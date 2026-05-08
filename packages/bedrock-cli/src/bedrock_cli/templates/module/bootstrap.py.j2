@@ -4,12 +4,7 @@ Register any startup and teardown logic here.
 This file is optional — delete it if the module has no lifecycle needs.
 """
 
-from __future__ import annotations
-
-from bedrock.module import AppConfig, ModuleRegistry
-
-
-def on_load(registry: ModuleRegistry, app: AppConfig) -> None:
+def on_load(**kwargs) -> None:
     """Called when the module is installed into the registry.
 
     Args:
@@ -18,7 +13,7 @@ def on_load(registry: ModuleRegistry, app: AppConfig) -> None:
     """
 
 
-def ready(registry: ModuleRegistry, app: AppConfig) -> None:
+def ready(**kwargs) -> None:
     """Called after all modules have been loaded and the application is ready.
 
     Args:
@@ -27,7 +22,7 @@ def ready(registry: ModuleRegistry, app: AppConfig) -> None:
     """
 
 
-def on_shutdown(registry: ModuleRegistry, app: AppConfig) -> None:
+def on_shutdown(**kwargs) -> None:
     """Called during application shutdown.
 
     Args:

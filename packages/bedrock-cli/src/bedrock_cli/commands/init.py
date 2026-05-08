@@ -1,4 +1,4 @@
-"""``bedrock new`` sub-commands for scaffolding new workspaces."""
+"""``bedrock-cli init`` command for scaffolding new projects."""
 
 from __future__ import annotations
 
@@ -9,8 +9,6 @@ import typer
 
 from bedrock_cli import console
 from bedrock_cli.scaffolding import RenderedFile, ScaffoldExistsError, render_files
-
-app = typer.Typer(help="Scaffold new Bedrock projects.")
 
 
 def _slugify(name: str) -> str:
@@ -25,33 +23,31 @@ def _slugify(name: str) -> str:
     return name.lower().replace("-", "_").replace(" ", "_")
 
 
-@app.command("workspace")
-def new_workspace(
+def init(
     name: str = typer.Argument(..., help="Project name (used as directory and package name)."),
     output_dir: Path = typer.Option(
         Path("."),
         "--output-dir",
         "-o",
-        help="Parent directory where the workspace will be created.",
+        help="Parent directory where the project will be created.",
     ),
     overwrite: bool = typer.Option(False, "--overwrite", help="Overwrite existing files."),
 ) -> None:
-    """Scaffold a new Bedrock workspace.
+    """Scaffold a new Bedrock project.
 
     Creates a new project directory at OUTPUT_DIR/NAME with a standard
     Bedrock layout: pyproject.toml, .python-version, README.md, and a
-    source package.
+    source package with manifest, models, bootstrap, installation, and exc.
     """
     package_base = _slugify(name)
     destination = output_dir / name
 
-    console.info(f"Creating workspace [bold]{name}[/bold] at {destination}")
+    console.info(f"Creating project [bold]{name}[/bold] at {destination}")
 
     project_context: dict[str, Any] = {
         "module_name": package_base,
         "package": package_base,
         "version": "0.1.0",
-        "kind": "module",
     }
     files: list[RenderedFile] = [
         RenderedFile(
@@ -77,6 +73,7 @@ def new_workspace(
         RenderedFile(f"src/{package_base}/manifest.yaml", "module/manifest.yaml.j2", project_context),
         RenderedFile(f"src/{package_base}/models.py", "module/models.py.j2", project_context),
         RenderedFile(f"src/{package_base}/bootstrap.py", "module/bootstrap.py.j2", project_context),
+        RenderedFile(f"src/{package_base}/installation.py", "module/installation.py.j2", project_context),
         RenderedFile(f"src/{package_base}/exc.py", "module/exceptions.py.j2", project_context),
     ]
 

@@ -1,57 +1,45 @@
-"""Jinja2 template environment factory for bedrock-cli scaffolding.
-
-Provides a pre-configured environment with custom filters for
-converting between naming conventions used across generated files.
-"""
+"""Jinja2 template environment factory for bedrock-cli scaffolding."""
 
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
-from jinja2 import Environment, PackageLoader
+from jinja2 import BaseLoader, ChoiceLoader, Environment, FileSystemLoader, PackageLoader
+
+_USER_TEMPLATE_DIR = "_bedrock_gen"
 
 
 def _to_snake(value: str) -> str:
-    """Convert a string to snake_case.
-
-    Args:
-        value: Input string in any casing style.
-
-    Returns:
-        The snake_case representation.
-    """
     value = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", value)
     value = re.sub(r"([a-z\d])([A-Z])", r"\1_\2", value)
     return value.lower()
 
 
 def _to_camel(value: str) -> str:
-    """Convert a string to PascalCase (UpperCamelCase).
-
-    Args:
-        value: Input string in snake_case or kebab-case.
-
-    Returns:
-        The PascalCase representation.
-    """
     parts = value.replace("-", "_").split("_")
     return "".join(p.capitalize() for p in parts if p)
 
 
+def _build_loader() -> BaseLoader:
+    """Build a loader that checks project-local _bedrock_gen/ first, then built-in templates."""
+    builtin_loader = PackageLoader("bedrock_cli", "templates")
+    user_dir = Path(".").resolve() / _USER_TEMPLATE_DIR
+    if user_dir.is_dir():
+        return ChoiceLoader([FileSystemLoader(str(user_dir)), builtin_loader])
+
+    return builtin_loader
+
+
 def build_template_environment() -> Environment:
-    """Build and return a configured Jinja2 Environment for bedrock-cli templates.
+    """Build a Jinja2 Environment with project-local template override support.
 
-    The environment loads templates from the ``templates`` package directory
-    and registers the following custom filters:
-
-    - ``snake``: converts to snake_case
-    - ``camel``: converts to PascalCase
-
-    Returns:
-        A ready-to-use Jinja2 Environment instance.
+    Template resolution order:
+        1. ``<project_root>/_bedrock_gen/`` (if exists)
+        2. Built-in ``bedrock_cli/templates/``
     """
     env = Environment(
-        loader=PackageLoader("bedrock_cli", "templates"),
+        loader=_build_loader(),
         autoescape=False,
         keep_trailing_newline=True,
     )
