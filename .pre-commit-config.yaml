@@ -1,0 +1,16 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.10
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: local
+    hooks:
+      - id: eslint
+        name: eslint (docs-web)
+        entry: bash -c 'cd docs-web && npm run lint'
+        language: system
+        files: ^docs-web/
+        types_or: [javascript, jsx, ts, tsx]

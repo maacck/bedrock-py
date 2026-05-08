@@ -1,0 +1,38 @@
+{% macro render_column(column, nullable) %}{{ column.name }}: {% if column.nullable or nullable is true %}Optional[{{ column.python_type }}]{% else %}{{ column.python_type }}{% endif %}{% if column.nullable or nullable is true %} = None{% endif %}{% endmacro %}
+"""Pydantic entities for {{ model_name }}, generated from SQLAlchemy introspection."""
+
+from __future__ import annotations
+{% if needs_datetime %}from datetime import datetime{% endif  %}
+{% if needs_decimal %}from decimal import Decimal{% endif  %}
+from typing import Optional
+{% if needs_any %}from typing import Any{% endif %}
+from pydantic import ConfigDict
+from bedrock.entities import BedrockEntity
+
+
+class {{ model_name }}Base(BedrockEntity):
+    """Shared fields for {{ model_name }}.
+
+    """
+{% for col in data_columns %}
+    {{ render_column(col, false) }}
+{% endfor %}
+
+class {{ model_name }}Create({{ model_name }}Base):
+    """Payload for creating a {{ model_name }}."""
+    pass
+
+
+class {{ model_name }}Read({{ model_name }}Base):
+    """Read representation of {{ model_name }}, returned from the API."""
+{% for col in pk_columns %}
+    {{ render_column(col, false) }}
+{% endfor %}
+    model_config = ConfigDict(from_attributes=True)
+
+
+class {{ model_name }}Update(BedrockEntity):
+    """Partial update payload for {{ model_name }}. All fields are optional."""
+{% for col in data_columns %}
+    {{ render_column(col, true) }}
+{% endfor %}

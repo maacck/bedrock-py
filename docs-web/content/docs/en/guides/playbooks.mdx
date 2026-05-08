@@ -1,0 +1,197 @@
+---
+title: Playbooks
+description: AI-readable documentation for reusable Bedrock modules
+---
+
+## The Problem
+
+You build reusable Bedrock modules — auth, S3 storage, payment processing, team scaffolding. These modules encapsulate complex business logic and APIs.
+
+When AI agents work on projects that **use** these modules, they face a problem: **they don't know how the module works**.
+
+The agent has to:
+1. Scan the module source code every time
+2. Guess at API contracts and usage patterns
+3. Repeat this work across every project
+
+**If your module lives in a separate package (not in the project's codebase), it makes agent even harder to scan it.**
+
+### Real-World Scenario
+
+Your team builds a reusable `storage` module that supports multiple backends — S3, local filesystem, Azure Blob, etc. The module is published as a separate package and installed via `uv add mycompany-bedrock-storage`.
+
+When an AI agent works on a project that uses this module:
+
+```python
+# The agent sees this in the codebase
+from mycompany.storage import storage_service
+
+# But it has NO idea:
+# - What methods are available? upload()? download()? get_url()?
+# - What parameters does upload() accept? file_path? content? metadata?
+# - How to configure the backend? env vars? settings class?
+# - What exceptions does it raise? StorageError? FileNotFoundError?
+```
+
+The agent can't scan the source code because it's in an installed package, not in the project repo. Without a playbook, the agent has to **guess** — and often guesses wrong.
+
+**With a playbook**, the agent runs `bedrock app playbook mycompany.storage` and instantly knows:
+
+```markdown
+# Storage Module
+
+## Quick Start
+from mycompany.storage import storage_service, StorageSettings
+
+# Upload a file
+url = storage_service.upload(
+    path="avatars/user-123.jpg",
+    content=file_bytes,
+    content_type="image/jpeg",
+)
+
+## Backends
+- S3: Set STORAGE_BACKEND=s3, STORAGE_S3_BUCKET=my-bucket
+- Local: Set STORAGE_BACKEND=local, STORAGE_LOCAL_PATH=./uploads
+```
+
+## The Solution: Playbooks
+
+A **playbook** is a directory inside your module that teaches AI agents how to use it:
+
+```
+team_storage/
+├── __init__.py
+├── manifest.yaml
+├── service.py
+├── ...
+└── playbook/                  # AI-readable documentation
+    ├── PLAYBOOK.md            # Main playbook (Similar to SKILL.md or README.md)
+    └── references/
+        ├── auth-flows.md
+        └── examples/
+            └── login-flow.py
+```
+
+AI agents read playbooks via CLI:
+
+```bash
+bedrock app playbook myapp.auth           # Read the main playbook
+bedrock app playbook-ref myapp.auth references/api-reference.md  # Read references
+```
+
+## When to Write a Playbook
+
+When you/your team builds a reusable bedrock module and planning to use it across multiple projects, write a playbook.
+This is especially important if the module will be published as a separate package and installed via `pypi`/ or private repo, since it will be hard for agents find docs and scan the source code.
+
+**Rule of thumb**: If another project will import this module but won't have its source code in the repo, write a playbook.
+
+## What to Put in a Playbook
+
+### PLAYBOOK.md (Required)
+
+The main playbook should answer:
+
+1. **What does this module do?** — One paragraph summary
+2. **How to import and initialize** — Exact import paths
+3. **Core API** — The main classes/functions developers will use
+4. **Common patterns** — Copy-pasteable code examples
+5. **Anti-patterns** — What NOT to do
+
+```markdown
+# Auth Module
+
+Authentication and authorization for Bedrock applications.
+
+## Quick Start
+
+\`\`\`python
+from myapp.auth import auth_service
+from myapp.auth.entities import UserEntity
+
+# Login
+user = auth_service.authenticate(email="alice@example.com", password="secret")
+
+# Check permissions
+if auth_service.has_permission(user, "users:write"):
+    ...
+\`\`\`
+
+## Key APIs
+
+### `auth_service.authenticate(email, password) -> User`
+Raises `AuthenticationError` if credentials are invalid.
+
+### `auth_service.has_permission(user, permission) -> bool`
+Check if user has a specific permission.
+
+## Anti-Patterns
+
+- Don't import `auth_service` at module level in bootstrap.py (circular import)
+- Don't catch `AuthenticationError` and return None — let it propagate
+```
+
+### Other References
+
+Additional documentation that's too detailed for the main playbook:
+
+- `references/` — Detail Reference Docs
+- `examples/` — Complete code examples
+- `templates/` — Boilerplate code to copy
+
+## Playbook vs. Documentation Site
+
+| Aspect | Playbook | Documentation Site |
+|--------|----------|-------------------|
+| Audience | AI agents | Humans |
+| Format | Markdown files | HTML/MDX |
+| Location | Inside module package | Separate repo/build |
+| Access | `bedrock app playbook` | Browser |
+| Setup | None (convention) | Build pipeline |
+
+**Use both**: Playbooks for AI agents, documentation sites for human developers. They serve different audiences.
+Also, writing documentation for every module is a lot of work. Focus on playbooks for reusable modules, and save documentation sites for public/open-source projects or complex modules that require detailed human docs.
+
+
+## CLI Reference
+
+```bash
+# Read main playbook
+bedrock app playbook <module_import_path>
+
+# Read reference files
+bedrock app playbook-ref <module_import_path> <filename>
+
+# Examples
+bedrock app playbook myapp.auth
+bedrock app playbook-ref myapp.auth references/api-reference.md
+bedrock app playbook-ref myapp.auth examples/login-flow.py
+```
+
+## Playbook vs. Agent Skills
+
+Playbooks are essentially **lightweight, module-scoped skills**.
+
+You might wonder: "Why not just create an agent skill for each module?"
+
+| Approach | Pros | Cons |
+|----------|------|------|
+| One skill per module | Full skill capabilities | Context pollution — 10 modules = 10 skills loaded |
+| Playbooks per module | Scoped, on-demand discovery | Limited to markdown documentation |
+
+**The problem with per-module skills**: Agent skills are loaded into context at conversation start. If your project uses 10 Bedrock modules, that's 10 skills competing for context window space. Most are irrelevant to the current task.
+
+**Playbooks solve this**: They live inside the module package and are only read when the agent explicitly needs them via `bedrock app playbook`. No context pollution, no wasted tokens.
+
+Think of it as:
+- **Skills** = Global knowledge (how to use Git, how to write tests)
+- **Playbooks** = Local knowledge (how to use *this specific module*)
+
+## Best Practices
+
+1. **Keep it concise** — Agents scan quickly, don't need prose
+2. **Show code** — Examples beat explanations
+3. **Cover anti-patterns** — Prevent common mistakes
+4. **Update with code** — Playbook should match current API
+5. **Use references/** — Don't overload README.md

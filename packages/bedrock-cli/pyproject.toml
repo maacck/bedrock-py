@@ -1,0 +1,29 @@
+[project]
+name = "bedrock-cli"
+version = "0.0.1"
+description = "Scaffold and inspect Bedrock modular applications."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "jinja2>=3.1.6",
+    "rich>=14.3.4",
+    "typer>=0.24.1",
+    "pyyaml>=6.0.2",
+]
+
+[project.urls]
+Documentation = "https://bedrock-py.com"
+Source = "https://github.com/maacck/bedrock/"
+
+
+[project.scripts]
+bedrock-cli = "bedrock_cli.main:main"
+
+[build-system]
+requires = ["uv_build>=0.8.15,<0.9.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-root = "src"
+module-name = "bedrock_cli"
+

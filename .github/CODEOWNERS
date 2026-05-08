@@ -1,0 +1,10 @@
+# Default owners for everything
+* @maacck
+
+# Package-specific owners
+/packages/bedrock/ @maacck
+/docs-web/ @maacck
+
+# GitHub Actions and CI
+.github/ @maacck
+

@@ -1,0 +1,31 @@
+# {{ project_name }}
+
+A Bedrock modular application.
+
+## Setup
+
+```bash
+uv sync
+```
+
+## Running
+
+```bash
+uv run python -m {{ package_base }}
+```
+
+## Project Structure
+
+```
+src/
+└── {{ package_base }}/
+    ├── __init__.py
+    └── modules/
+        └── ...        # domain modules go here
+```
+
+Each module follows the Bedrock convention:
+- `__init__.py` + `manifest.yaml` — required
+- `models.py`, `entities.py`, `service.py`, `exc.py` — domain layer
+- `api.py` — optional FastAPI router
+- `bootstrap.py` — optional lifecycle hooks

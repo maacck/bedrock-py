@@ -1,0 +1,17 @@
+"""Pydantic entities for the {{ module_name }} module.
+
+Entities are the data transfer objects used at API and service boundaries.
+They must not leak ORM model internals.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Optional
+
+from pydantic import ConfigDict
+
+from bedrock.entities import BedrockEntity
+
+
+

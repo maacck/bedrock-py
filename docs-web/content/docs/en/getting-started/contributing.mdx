@@ -1,0 +1,299 @@
+---
+title: Contributing
+description: How to contribute to Bedrock
+---
+
+Bedrock welcomes contributions. This guide covers the development workflow, coding standards, and conventions to follow when contributing to the project.
+
+## Development Setup
+
+### Fork and Clone
+
+1. Fork the repository on GitHub
+2. Clone your fork locally:
+
+```bash
+git clone https://github.com/<your-username>/bedrock.git
+cd bedrock
+```
+
+### Install Dependencies
+
+Bedrock uses [uv](https://docs.astral.sh/uv/) for dependency management. Install all dependencies with:
+
+```bash
+uv sync
+```
+
+This installs both runtime and development dependencies (including pytest and ruff).
+
+### Verify Installation
+
+Run the test suite to confirm everything works:
+
+```bash
+uv run pytest packages/bedrock/tests/
+```
+
+You should see all tests pass. If any fail, check that you're using Python 3.12+ and that `uv sync` completed without errors.
+
+## Running Tests
+
+Bedrock uses pytest for testing. Run the full test suite from the repository root:
+
+```bash
+uv run pytest packages/bedrock/tests/
+```
+
+Run a specific test file:
+
+```bash
+uv run pytest packages/bedrock/tests/test_signal.py
+```
+
+Run with verbose output:
+
+```bash
+uv run pytest packages/bedrock/tests/ -v
+```
+
+All tests must pass before submitting a pull request.
+
+## Linting
+
+Bedrock uses [ruff](https://docs.astral.sh/ruff/) for linting and formatting. The line length is configured to **120 characters**.
+
+### Check for Issues
+
+```bash
+uv run ruff check .
+```
+
+### Auto-Fix Issues
+
+```bash
+uv run ruff check . --fix
+```
+
+### Format Code
+
+```bash
+uv run ruff format .
+```
+
+Always run both `ruff check` and `ruff format` before committing. The CI build will fail if linting errors remain.
+
+## Code Style
+
+### Language
+
+All code, comments, docstrings, and variable names must be written in **English**. This is a strict project requirement.
+
+### Docstrings
+
+Use **Google-style** docstrings on all public functions, classes, and methods:
+
+```python
+def get_user(user_id: int) -> User:
+    """Retrieve a user by their ID.
+
+    Args:
+        user_id: The unique identifier of the user.
+
+    Returns:
+        The user instance.
+
+    Raises:
+        UserNotFoundError: If no user exists with the given ID.
+    """
+```
+
+### Type Hints
+
+All public functions and methods must include **strict type hints**:
+
+```python
+# Correct
+def process_items(items: list[dict[str, Any]], batch_size: int = 100) -> list[Result]:
+    ...
+
+# Incorrect — missing type hints
+def process_items(items, batch_size=100):
+    ...
+```
+
+### Line Length
+
+Maximum line length is **120 characters**. This is enforced by ruff configuration.
+
+### Async Naming
+
+Async methods use the `a` prefix convention:
+
+```python
+async def aget(key: str) -> Any: ...
+async def aset(key: str, value: Any, ttl: int = 300) -> None: ...
+async def adelete(key: str) -> None: ...
+```
+
+### Imports
+
+- Use **relative imports** within a package
+- Use **absolute imports** across packages
+
+```python
+# Within the same package
+from .entities import ModuleManifest
+
+# Across packages
+from bedrock.database import db
+```
+
+## Module Conventions
+
+When creating or modifying Bedrock modules, follow the standard module anatomy:
+
+### File Structure
+
+```
+modules/<name>/
+├── __init__.py
+├── manifest.yaml    # Module identity and dependencies
+├── entities.py      # Pydantic models for validation
+├── service.py       # Business logic (no HTTP/ORM leakage)
+├── exc.py           # Module exceptions
+└── bootstrap.py     # Optional: lifecycle hooks
+```
+
+### Manifest Requirements
+
+Every module must have a `manifest.yaml` with at minimum:
+
+```yaml
+title: my_module
+version: 0.1.0
+```
+
+Optional fields: `description`, `depends_on`, `commands`.
+
+### Layer Boundaries
+
+These boundaries are mandatory:
+
+| Rule | Description |
+|------|-------------|
+| API → Services | API layers call services, never the reverse |
+| No ORM in services | Service files must not import SQLAlchemy directly |
+| No HTTP in services | Service files must not import Request, Response, or framework types |
+| Framework code at edges | HTTP-specific code belongs in adapter/API layers only |
+
+### Exception Pattern
+
+Module exceptions must subclass `BedrockExc` and set a `detail` class attribute:
+
+```python
+from bedrock.exc import BedrockExc
+
+class UserNotFoundError(BedrockExc):
+    detail = "User not found"
+```
+
+## Commit Conventions
+
+Bedrock follows [Conventional Commits](https://www.conventionalcommits.org/). Every commit message must use this format:
+
+```
+<type>(<scope>): <description>
+```
+
+### Types
+
+| Type | Use For |
+|------|---------|
+| `feat` | New features |
+| `fix` | Bug fixes |
+| `docs` | Documentation changes |
+| `refactor` | Code restructuring without behavior change |
+| `test` | Adding or updating tests |
+| `chore` | Build, CI, dependency, or tooling changes |
+| `style` | Formatting, whitespace (no logic change) |
+| `perf` | Performance improvements |
+
+### Examples
+
+```
+feat(cache): add Redis backend with connection pooling
+fix(database): resolve session leak in context manager
+docs(guides): add module anatomy documentation
+refactor(module): extract manifest parsing into separate module
+test(signal): add async signal dispatch tests
+chore(deps): bump pydantic to 2.12.5
+```
+
+### Scope
+
+Use the module or subsystem name as scope: `cache`, `database`, `module`, `signal`, `cli`, `docs`, etc.
+
+## PR Process
+
+### 1. Create a Branch
+
+Create a feature branch from `main`:
+
+```bash
+git checkout -b feat/my-feature
+```
+
+Use the conventional commit type as branch prefix: `feat/`, `fix/`, `docs/`, `refactor/`.
+
+### 2. Implement Changes
+
+Write your code following the coding standards above. Keep changes focused — one feature or fix per PR.
+
+### 3. Run Tests
+
+```bash
+uv run pytest packages/bedrock/tests/
+```
+
+All tests must pass.
+
+### 4. Run Linting
+
+```bash
+uv run ruff check .
+uv run ruff format .
+```
+
+Fix any linting errors before committing.
+
+### 5. Commit
+
+Use conventional commit messages:
+
+```bash
+git add .
+git commit -m "feat(cache): add TTL auto-refresh option"
+```
+
+### 6. Push and Open PR
+
+```bash
+git push origin feat/my-feature
+```
+
+Open a pull request against `main` on GitHub. In the PR description:
+
+- Summarize what changed and why
+- Reference any related issues
+- Note any breaking changes
+
+### 7. Review
+
+Address reviewer feedback. Once approved, the PR will be merged.
+
+## Next Steps
+
+- [Module Anatomy](/docs/guides/module-anatomy) — Detailed module structure
+- [Architecture](/docs/guides/architecture) — Core principles and design
+- [Agent Skills](/docs/getting-started/agent-skills) — AI assistant setup

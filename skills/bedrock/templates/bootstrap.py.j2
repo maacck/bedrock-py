@@ -1,0 +1,24 @@
+"""Bootstrap lifecycle hooks for the {{ module_name }} module.
+
+Register any startup and teardown logic here.
+This file is optional — delete it if the module has no lifecycle needs.
+"""
+
+from __future__ import annotations
+
+from bedrock.module import AppConfig, ModuleRegistry
+
+
+def on_load(**kwargs) -> None:
+    """Called when the module is installed into the registry.
+    """
+
+
+def ready(**kwargs) -> None:
+    """Called after all modules have been loaded and the application is ready.
+    """
+
+
+def on_shutdown(**kwargs) -> None:
+    """Called during application shutdown.
+    """

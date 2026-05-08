@@ -1,0 +1,391 @@
+---
+title: Signals
+description: Blinker-derived event system with sync/async support and lifecycle signals
+---
+
+Bedrock includes a signal system derived from [Blinker](https://blinker.readthedocs.io/) that provides decoupled event notifications with first-class async support. The implementation lives under `bedrock.signal`.
+
+## Quick Start
+
+Create a signal, connect a receiver, and send it:
+
+```python
+from bedrock.signal import Signal
+
+# 1. Create a signal
+order_placed = Signal("Emitted when an order is placed")
+
+# 2. Connect a receiver
+def notify_warehouse(sender, **kwargs):
+    print(f"New order from {sender}: {kwargs['order_id']}")
+
+order_placed.connect(notify_warehouse)
+
+# 3. Send the signal
+order_placed.send(current_app, order_id="ORD-001")
+# Output: New order from <App>: ORD-001
+```
+
+That's the core loop. The rest of this page covers advanced patterns, async dispatch, lifecycle signals, and pitfalls.
+
+## Creating Signals
+
+### Signal
+
+The base class for all signals. Pass an optional docstring:
+
+```python
+from bedrock.signal import Signal
+
+user_created = Signal("Emitted after a new user is persisted")
+payment_failed = Signal()  # No docstring
+```
+
+### NamedSignal
+
+A `Signal` subclass that carries a `name` attribute for identification and debugging:
+
+```python
+from bedrock.signal import NamedSignal
+
+audit_event = NamedSignal("app.audit", doc="Emitted for auditable actions")
+print(audit_event.name)  # "app.audit"
+```
+
+### Namespace
+
+A dictionary-like container that maps names to `NamedSignal` instances. Signals are created on first access:
+
+```python
+from bedrock.signal import Namespace
+
+my_signals = Namespace()
+
+# Creates a NamedSignal named "user.login" on first call
+login_signal = my_signals.signal("user.login", doc="User logged in")
+
+# Second call returns the same instance
+assert my_signals.signal("user.login") is login_signal
+```
+
+### Default Namespace
+
+A module-level convenience for quick signal creation:
+
+```python
+from bedrock.signal import signal
+
+# Creates or retrieves a NamedSignal in the default namespace
+cache_miss = signal("cache.miss", doc="Cache key not found")
+```
+
+## Connecting Receivers
+
+A receiver is any callable that accepts `sender` as its first positional argument plus optional keyword arguments.
+
+### `signal.connect(receiver, sender, weak)`
+
+Connect a receiver directly:
+
+```python
+from bedrock.signal import Signal
+
+user_created = Signal()
+
+def log_user(sender, **kwargs):
+    print(f"User created by {sender}: {kwargs.get('username')}")
+
+# Connect to all senders
+user_created.connect(log_user)
+
+# Connect to a specific sender only
+user_created.connect(log_user, sender=admin_module)
+
+# Disable weak referencing (needed for closures/lambdas)
+user_created.connect(log_user, weak=False)
+```
+
+### `@signal.connect_via(sender)` Decorator
+
+Use as a decorator to connect a receiver for a specific sender:
+
+```python
+from bedrock.signal import Signal
+
+invoice_created = Signal()
+
+@invoice_created.connect_via(billing_module)
+def handle_invoice(sender, **kwargs):
+    """Only called when billing_module sends invoice_created."""
+    process_invoice(kwargs["invoice"])
+```
+
+The `connect_via` decorator defaults to `weak=False`, making it safe for use with module-level functions.
+
+### Disconnecting
+
+Remove a receiver explicitly:
+
+```python
+user_created.disconnect(log_user)
+
+# Disconnect from a specific sender only
+user_created.disconnect(log_user, sender=admin_module)
+```
+
+## Sending Signals
+
+### `signal.send(sender, **kwargs)`
+
+Calls all connected receivers synchronously. Returns a list of `(receiver, return_value)` tuples:
+
+```python
+results = order_placed.send(current_app, order_id="ORD-042")
+
+for receiver, result in results:
+    print(f"{receiver.__name__} returned {result}")
+```
+
+### `signal.send_robust(sender, **kwargs)`
+
+Like `send()`, but catches `Exception` subclasses raised by receivers instead of propagating them. The exception is returned in the results list:
+
+```python
+results = order_placed.send_robust(current_app, order_id="ORD-042")
+
+for receiver, result in results:
+    if isinstance(result, Exception):
+        log.error(f"{receiver.__name__} failed: {result}")
+    else:
+        log.info(f"{receiver.__name__} returned {result}")
+```
+
+### `await signal.asend(sender, **kwargs)`
+
+The async counterpart to `send()`. Awaits async receivers natively. Sync receivers are automatically adapted via `asyncio.to_thread`:
+
+```python
+results = await order_placed.asend(current_app, order_id="ORD-042")
+```
+
+### `await signal.asend_robust(sender, **kwargs)`
+
+Async equivalent of `send_robust()` — captures exceptions from receivers:
+
+```python
+results = await order_placed.asend_robust(current_app, order_id="ORD-042")
+```
+
+## Sender Filtering
+
+By default, receivers connected with `sender=Signal.ANY` (the default) are called for every sender. Use sender filtering to restrict which sender triggers a receiver.
+
+### Signal.ANY
+
+The sentinel value meaning "any sender". This is the default:
+
+```python
+from bedrock.signal import Signal
+
+data_changed = Signal()
+
+# These two are equivalent:
+data_changed.connect(handler)
+data_changed.connect(handler, sender=Signal.ANY)
+```
+
+### Specific Sender
+
+Pass a concrete sender to only receive from that object:
+
+```python
+from bedrock.signal import Signal
+
+data_changed = Signal()
+
+@data_changed.connect_via(inventory_module)
+def on_inventory_change(sender, **kwargs):
+    """Only fires when inventory_module sends data_changed."""
+    refresh_stock(kwargs["item_id"])
+
+# This triggers the receiver:
+data_changed.send(inventory_module, item_id="SKU-99")
+
+# This does NOT:
+data_changed.send(billing_module, item_id="SKU-99")
+```
+
+### Checking for Receivers
+
+Before performing expensive operations, check if anyone is listening:
+
+```python
+if data_changed.has_receivers_for(inventory_module):
+    payload = build_expensive_payload()
+    data_changed.send(inventory_module, payload=payload)
+```
+
+## Context Managers
+
+### `signal.connected_to(receiver, sender)`
+
+Temporarily connect a receiver for the duration of a `with` block. Useful for testing:
+
+```python
+from bedrock.signal import Signal
+
+user_created = Signal()
+received = []
+
+def capture(sender, **kwargs):
+    received.append(kwargs)
+
+with user_created.connected_to(capture):
+    user_created.send(app, username="alice")
+
+assert len(received) == 1
+
+# Receiver is disconnected after the block
+user_created.send(app, username="bob")
+assert len(received) == 1  # Still 1
+```
+
+### `signal.muted()`
+
+Temporarily suppress all signal dispatch. No receivers are called while muted:
+
+```python
+from bedrock.signal import Signal
+
+audit = Signal()
+
+@audit.connect_via(Signal.ANY, weak=False)
+def log_audit(sender, **kwargs):
+    write_audit_log(kwargs)
+
+# Suppress during bulk import
+with audit.muted():
+    for record in bulk_data:
+        import_record(record)
+        audit.send(importer, action="import")  # Silently ignored
+
+# Normal dispatch resumes here
+audit.send(importer, action="complete")  # This fires
+```
+
+## Lifecycle Signals
+
+Bedrock emits signals at key points in the module lifecycle. These are defined in `bedrock.module.signals` and sent by the `ModuleRegistry`.
+
+| Signal | Emitted When | Sender | Extra kwargs |
+|--------|-------------|--------|--------------|
+| `module_loaded` | After a module's `on_load` hook completes | The `AppConfig` instance | `registry`, `module`, `config` |
+| `module_ready` | After a module's `ready` hook completes | The `AppConfig` instance | `registry`, `module`, `config` |
+| `module_shutdown` | During graceful shutdown (reverse order) | The `AppConfig` instance | `registry`, `module`, `config` |
+| `registry_ready` | After all modules are marked ready | The `ModuleRegistry` | `registry`, `config` |
+| `registry_shutdown` | When the registry begins shutdown | The `ModuleRegistry` | `registry`, `config` |
+
+### Usage
+
+```python
+from bedrock.module.signals import module_ready, registry_ready
+
+@module_ready.connect_via(Signal.ANY, weak=False)
+def on_module_ready(sender, **kwargs):
+    module = kwargs["module"]
+    print(f"Module ready: {module.name}")
+
+@registry_ready.connect_via(Signal.ANY, weak=False)
+def on_all_ready(sender, **kwargs):
+    print("All modules initialized — safe to accept traffic")
+```
+
+### Lifecycle Order
+
+During `registry.populate(modules)`:
+
+1. Each module is installed in dependency order → `module_loaded` per module
+2. Each module's `ready` hook is called → `module_ready` per module
+3. Registry is marked ready → `registry_ready` once
+
+During `registry.shutdown()`:
+
+4. Each module's `on_shutdown` hook is called in **reverse** order → `module_shutdown` per module
+5. Registry signals completion → `registry_shutdown` once
+
+## Critical Pitfall: Async Receivers with Sync Send
+
+<Callout type="error">
+Calling `signal.send()` when an async receiver is connected raises `RuntimeError`. You **must** use `await signal.asend()` when any receiver might be async.
+</Callout>
+
+```python
+from bedrock.signal import Signal
+
+order_placed = Signal()
+
+# This async receiver looks innocent...
+async def async_handler(sender, **kwargs):
+    await notify_external_service(kwargs["order_id"])
+
+order_placed.connect(async_handler, weak=False)
+
+# THIS RAISES RuntimeError!
+order_placed.send(app, order_id="ORD-001")
+# RuntimeError: Cannot send to an async receiver with send().
+# Use await signal.asend(...) or provide _async_wrapper.
+
+# CORRECT: use asend() in async context
+await order_placed.asend(app, order_id="ORD-001")
+```
+
+If you're in a mixed sync/async codebase, prefer `asend()` as the default dispatch method. It handles both sync and async receivers seamlessly — sync receivers are automatically wrapped via `asyncio.to_thread`.
+
+## Weak References
+
+By default, receivers are stored as weak references. This means:
+
+- **Module-level functions** work fine — they persist for the lifetime of the module.
+- **Closures and lambdas** will be garbage collected immediately unless you pass `weak=False`.
+- **Bound methods** are weakly referenced via a `WeakMethod`-style wrapper — the receiver is automatically disconnected when the owning instance is garbage collected.
+
+### When to Use `weak=False`
+
+```python
+# WRONG: closure is immediately garbage collected
+def setup():
+    def handler(sender, **kwargs):
+        print("received")
+    signal.connect(handler)  # handler has no strong reference!
+
+# CORRECT: disable weak refs for closures
+def setup():
+    def handler(sender, **kwargs):
+        print("received")
+    signal.connect(handler, weak=False)
+```
+
+The `connect_via` decorator defaults to `weak=False`, making it safe for typical decorator usage patterns.
+
+### Checking Connected State
+
+Use the `receivers` attribute for a quick boolean check:
+
+```python
+if order_placed.receivers:
+    print("At least one receiver is connected")
+```
+
+## Anti-Patterns
+
+**Don't mix `send()` and async receivers.** This raises `RuntimeError`. Always use `asend()` in codebases with async receivers, or guard with `has_receivers_for()` + type checks.
+
+**Don't rely on receiver execution order.** The default `set_class` is Python's unordered `set`. If you need ordered dispatch, provide an ordered set implementation via `Signal.set_class`.
+
+**Don't connect receivers inside hot loops.** Each `connect()` call updates internal bookkeeping dicts. Connect once at module load time, not per-request.
+
+**Don't forget `weak=False` for closures.** A common bug: connecting a closure or lambda without `weak=False` causes it to be garbage collected before any signal is sent.
+
+**Don't use signals for synchronous control flow.** Signals are for notification (fire-and-forget). If you need a return value to drive logic, call the function directly.
+
+**Don't send lifecycle signals manually.** The `ModuleRegistry` owns the lifecycle signal emission. Sending `module_ready` or `registry_ready` yourself breaks invariants.

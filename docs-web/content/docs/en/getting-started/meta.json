@@ -1,0 +1,6 @@
+{
+  "title": "Getting Started",
+  "icon": "",
+  "pages": ["overview", "installation", "tutorial", "philosophy", "agent-skills", "contributing"],
+  "defaultOpen": true
+}

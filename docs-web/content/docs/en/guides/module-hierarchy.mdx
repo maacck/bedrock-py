@@ -1,0 +1,106 @@
+---
+title: Module Hierarchy
+description: How Bedrock organizes projects, submodules, and domain modules
+---
+
+Bedrock organizes code into three conceptual levels: Project, Submodule, and Domain Module. This hierarchy is a development convention, not a runtime enforcement mechanism. Bedrock's `ModuleRegistry` treats all modules identically regardless of their position in this hierarchy.
+
+## Three Module Types
+
+| Type | Has manifest.yaml | Participates in Bedrock lifecycle | Purpose |
+|------|-------------------|-----------------------------------|---------|
+| Project | Optional | No (unless it has a manifest) | Organizational container for your application |
+| Submodule | Yes | Yes | Business-level module with full Bedrock integration |
+| Domain Module | No | No | Recommended file structure convention within a submodule |
+
+## Project
+
+A Project is the top-level directory for your application. It serves as an organizational container.
+
+A project can be a plain Python package (no `manifest.yaml`) or a Bedrock module (with `manifest.yaml`). It contains submodules as subdirectories.
+
+```text
+erp/                            # Project
+├── __init__.py
+├── settings.py
+├── oms/                         # Submodule
+│   └── ...
+└── auth/                        # Submodule
+    └── ...
+```
+
+## Submodule
+
+A Submodule is a business-level module that participates in Bedrock's module lifecycle.
+
+- MUST have a `manifest.yaml` at its root.
+- Loaded by `ModuleRegistry.install()` or `ModuleRegistry.populate()`.
+- Can declare dependencies on other submodules via `depends_on`.
+
+Example manifest:
+
+```yaml
+title: Order Management System
+description: Handles orders, fulfillment, and returns
+version: 0.1.0
+depends_on:
+  - my_app.auth
+commands: "commands:app"
+```
+
+## Domain Module
+
+A Domain Module is a recommended development convention for organizing code within a submodule. It does NOT have a `manifest.yaml` and is invisible to Bedrock's module system.
+
+Recommended file set (all optional):
+
+| File | Purpose |
+|------|---------|
+| `entities.py` | Pydantic models for validation |
+| `service.py` | Business logic |
+| `exc.py` | Module exceptions |
+
+Example: `sales_order/` within the `oms` submodule.
+
+## Directory Structure
+
+```text
+my_app/                          # Project
+├── __init__.py
+├── settings.py
+├── oms/                         # Submodule
+│   ├── __init__.py
+│   ├── manifest.yaml
+│   ├── bootstrap.py
+│   ├── sales_order/             # Domain Module
+│   │   ├── __init__.py
+│   │   ├── entities.py
+│   │   └── service.py
+│   └── purchase_order/          # Domain Module
+│       ├── __init__.py
+│       ├── entities.py
+│       └── service.py
+└── auth/                        # Submodule
+    ├── __init__.py
+    ├── manifest.yaml
+    └── ...
+```
+
+## Cross-Project Dependencies
+
+A separate runtime project (e.g., `my_app_worker`) can depend on submodules from another project (e.g., `my_app.oms`) directly via `depends_on`. When both packages are on the Python path, `depends_on` resolves import paths normally.
+
+```text
+my_app_worker/                   # Another project (e.g., a worker runtime)
+├── __init__.py
+├── manifest.yaml               # depends_on: ["my_app.oms", "my_app.auth"]
+└── ...
+```
+
+## Convention, Not Enforcement
+
+This hierarchy is an organizational convention, not a framework constraint.
+
+- Bedrock's `ModuleRegistry` does not distinguish between Project, Submodule, or Domain Module.
+- All modules with a `manifest.yaml` are treated identically at runtime.
+- The hierarchy helps teams organize code predictably. It does not affect loading, dependency resolution, or lifecycle behavior.

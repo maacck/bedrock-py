@@ -1,0 +1,394 @@
+---
+title: Cache
+description: In-memory and Redis cache with sync/async API, distributed locks, and typed namespaces
+---
+
+Bedrock ships a first-party cache system with pluggable backends, typed namespaces, and distributed locks. The whole subsystem lives under `bedrock.contrib.cache`.
+
+## Quick Start
+
+```python
+from bedrock.contrib.cache import cache
+
+# Store a value (auto-configures with in-memory backend)
+cache.set("user:123", {"name": "Alice"}, ex=300)
+
+# Retrieve it
+user = cache.get("user:123")
+print(user)  # {"name": "Alice"}
+
+# Async variants
+await cache.aset("user:456", {"name": "Bob"}, ex=600)
+user = await cache.aget("user:456")
+```
+
+That's the core loop. The rest of this page covers configuration, the full API, and advanced patterns.
+
+## Configuration
+
+The cache service uses a dynamic backend registry. The in-memory backend is available by default. Redis requires the optional `redis` dependency.
+
+### Backend Selection
+
+```python
+from bedrock.contrib.cache import cache
+
+# In-memory backend (default, auto-configured on first use)
+cache.configure("memory")
+
+# Redis backend (requires: uv add bedrock[cache-redis])
+cache.configure("redis")
+```
+
+### Custom Settings
+
+Pass a settings instance to override defaults:
+
+```python
+from bedrock.contrib.cache import cache, RedisCacheSettings
+
+settings = RedisCacheSettings(
+    REDIS_URL="redis://localhost:6379/1",
+    REDIS_PREFIX="myapp",
+)
+cache.configure("redis", settings=settings)
+```
+
+### Registering Custom Backends
+
+```python
+from bedrock.contrib.cache import register_backend, CacheBackend
+
+class MyCustomBackend(CacheBackend):
+    # Implement required methods...
+    pass
+
+register_backend("custom", MyCustomBackend)
+cache.configure("custom")
+```
+
+## CacheService API Reference
+
+The `cache` singleton is a `CacheService` instance. All access goes through this object.
+
+### Core Operations
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `cache.get()` | `get(key, default=None, type_=None, coder=None) → Any` | Retrieve a cached value |
+| `cache.aget()` | `aget(key, default=None, type_=None, coder=None) → Any` | Async variant of `get` |
+| `cache.set()` | `set(key, value, ex=None, ea=None, coder=None) → None` | Store a value |
+| `cache.aset()` | `aset(key, value, ex=None, ea=None, coder=None) → None` | Async variant of `set` |
+| `cache.delete()` | `delete(key) → bool` | Remove a key |
+| `cache.adelete()` | `adelete(key) → bool` | Async variant of `delete` |
+| `cache.exists()` | `exists(key) → bool` | Check if key exists |
+| `cache.aexists()` | `aexists(key) → bool` | Async variant of `exists` |
+| `cache.clear()` | `clear(prefix=None) → int` | Remove all entries (optionally by prefix) |
+| `cache.aclear()` | `aclear(prefix=None) → int` | Async variant of `clear` |
+
+### Batch Operations
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `cache.get_many()` | `get_many(keys) → dict[str, Any]` | Retrieve multiple keys |
+| `cache.aget_many()` | `aget_many(keys) → dict[str, Any]` | Async variant |
+| `cache.set_many()` | `set_many(mapping, ex=None, ea=None, coder=None) → None` | Store multiple pairs |
+| `cache.aset_many()` | `aset_many(mapping, ex=None, ea=None, coder=None) → None` | Async variant |
+
+### Numeric Operations
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `cache.incr()` | `incr(key, delta=1) → int` | Increment a numeric value |
+| `cache.aincr()` | `aincr(key, delta=1) → int` | Async variant |
+| `cache.decr()` | `decr(key, delta=1) → int` | Decrement a numeric value |
+| `cache.adecr()` | `adecr(key, delta=1) → int` | Async variant |
+
+### Key Listing
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `cache.list()` | `list(prefix, limit=100) → list[str]` | List keys matching prefix |
+| `cache.alist()` | `alist(prefix, limit=100) → list[str]` | Async variant |
+
+### TTL Inspection
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `cache.get_with_ttl()` | `get_with_ttl(key, type_=None, coder=None) → tuple[Any, int \| None]` | Get value with remaining TTL |
+| `cache.aget_with_ttl()` | `aget_with_ttl(key, type_=None, coder=None) → tuple[Any, int \| None]` | Async variant |
+
+## TTL and Expiration
+
+Cache entries can have time-to-live (TTL) set in two ways:
+
+### Relative Expiration (`ex`)
+
+Sets expiration in seconds from now:
+
+```python
+# Expires in 5 minutes
+cache.set("session:abc", data, ex=300)
+```
+
+### Absolute Expiration (`ea`)
+
+Sets expiration as a Unix timestamp:
+
+```python
+import time
+
+# Expires at a specific time
+cache.set("session:abc", data, ea=time.time() + 3600)
+```
+
+<Callout type="warning">
+`ex` and `ea` are mutually exclusive. If both are `None`, the entry never expires.
+</Callout>
+
+## Coders
+
+By default, values are serialized using `orjson`. You can customize serialization with the `coder` parameter or auto-decode to a specific type with `type_`.
+
+### Auto-Decode with `type_`
+
+```python
+from pydantic import BaseModel
+
+class User(BaseModel):
+    name: str
+    email: str
+
+# Store as usual
+cache.set("user:123", {"name": "Alice", "email": "alice@example.com"})
+
+# Retrieve and auto-decode to User
+user = cache.get("user:123", type_=User)
+print(type(user))  # <class 'User'>
+```
+
+### Custom Coders
+
+```python
+from bedrock.contrib.cache import CacheCoder
+
+class MsgPackCoder(CacheCoder[dict]):
+    @staticmethod
+    def encode(value: dict) -> bytes:
+        import msgpack
+        return msgpack.packb(value)
+
+    @staticmethod
+    def decode(data: bytes) -> dict:
+        import msgpack
+        return msgpack.unpackb(data)
+
+# Use the custom coder
+cache.set("data:key", {"foo": "bar"}, coder=MsgPackCoder)
+result = cache.get("data:key", coder=MsgPackCoder)
+```
+
+<Callout type="warning">
+Pass either `type_` or `coder`, not both. Passing both raises `ValueError`.
+</Callout>
+
+## Namespaces
+
+Namespaces group related cache keys under a common prefix. They provide `clear()` and `list()` operations scoped to the namespace.
+
+```python
+from bedrock.contrib.cache import cache
+
+# Create a namespace
+users = cache.namespace("users")
+
+# Build keys within the namespace
+key = users.build_key("user", "123")  # "users:user:123"
+
+# List all keys in the namespace
+all_user_keys = users.list(limit=50)
+
+# Clear all keys in the namespace
+count = users.clear()
+```
+
+### Namespace API
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `namespace.build_key()` | `build_key(*segments) → str` | Build a fully qualified key |
+| `namespace.clear()` | `clear() → int` | Delete all keys in namespace |
+| `namespace.aclear()` | `aclear() → int` | Async variant |
+| `namespace.list()` | `list(limit=100) → list[str]` | List keys in namespace |
+| `namespace.alist()` | `alist(limit=100) → list[str]` | Async variant |
+| `namespace.slot()` | `slot(template, ...) → CacheSlot` | Create a typed key slot |
+
+## Slots
+
+Slots are typed key templates with a stable namespace and default TTL policy. They provide type-safe `get()`/`set()`/`delete()`/`exists()` operations.
+
+```python
+from bedrock.contrib.cache import cache
+from pydantic import BaseModel
+
+class User(BaseModel):
+    name: str
+    email: str
+
+# Create a typed slot
+users_ns = cache.namespace("users")
+user_slot = users_ns.slot("user:{user_id}", value_type=User, ttl=300)
+
+# Use the slot
+user_slot.set(User(name="Alice", email="alice@example.com"), user_id="123")
+user = user_slot.get(user_id="123")  # Returns User instance
+user_slot.delete(user_id="123")
+exists = user_slot.exists(user_id="123")  # False
+```
+
+### Slot API
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `slot.get()` | `get(default=None, **params) → T` | Read the cached value |
+| `slot.aget()` | `aget(default=None, **params) → T` | Async variant |
+| `slot.set()` | `set(value, ex=None, ea=None, **params) → None` | Write a value |
+| `slot.aset()` | `aset(value, ex=None, ea=None, **params) → None` | Async variant |
+| `slot.delete()` | `delete(**params) → bool` | Delete the cached value |
+| `slot.adelete()` | `adelete(**params) → bool` | Async variant |
+| `slot.exists()` | `exists(**params) → bool` | Check if value exists |
+| `slot.aexists()` | `aexists(**params) → bool` | Async variant |
+| `slot.get_with_ttl()` | `get_with_ttl(**params) → tuple[T, int \| None]` | Get value with TTL |
+| `slot.build_key()` | `build_key(**params) → str` | Render the fully qualified key |
+
+<Callout type="info">
+Slot templates use Python string format syntax. Parameters are extracted automatically and must be provided when calling `get()`, `set()`, etc.
+</Callout>
+
+## Distributed Locks
+
+The cache system provides distributed locks backed by the configured backend. Locks support both sync and async context managers, as well as manual acquire/release.
+
+### Context Manager (Recommended)
+
+```python
+from bedrock.contrib.cache import cache
+
+# Sync context manager
+with cache.lock("jobs:sync", expire=30, blocking_timeout=5):
+    run_job()  # Lock is held here
+
+# Async context manager
+async with cache.lock("jobs:async", expire=30, blocking_timeout=5):
+    await run_job()  # Lock is held here
+```
+
+### Manual Acquire/Release
+
+```python
+from bedrock.contrib.cache import cache
+
+lock = cache.lock("jobs:manual", expire=30, blocking=False)
+
+if lock.acquire():
+    try:
+        run_job()
+    finally:
+        lock.release()
+```
+
+### Lock Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `name` | Required | Logical lock name |
+| `expire` | `30` | Lock TTL in seconds |
+| `blocking` | `True` | Whether to wait for the lock |
+| `blocking_timeout` | `None` | Max seconds to wait (None = forever) |
+| `sleep` | `0.1` | Delay between acquisition attempts |
+| `prefix` | `"lock"` | Namespace prefix for the lock key |
+
+### Lock API
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `lock.acquire()` | `acquire(blocking=None, blocking_timeout=None, sleep=None) → bool` | Acquire the lock |
+| `lock.aacquire()` | `aacquire(blocking=None, blocking_timeout=None, sleep=None) → bool` | Async variant |
+| `lock.release()` | `release() → None` | Release the lock |
+| `lock.arelease()` | `arelease() → None` | Async variant |
+| `lock.locked()` | `locked() → bool` | Check if lock is held |
+| `lock.alocked()` | `alocked() → bool` | Async variant |
+
+## Backends
+
+### InMemoryBackend (Default)
+
+Thread-safe in-process cache. No external dependencies.
+
+```python
+cache.configure("memory")
+```
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `MAX_SIZE` | `1024` | Maximum number of entries |
+
+### RedisBackend
+
+Redis-backed distributed cache. Requires `uv add bedrock[cache-redis]`.
+
+```python
+cache.configure("redis")
+```
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `REDIS_URL` | `"redis://localhost:6379"` | Redis connection URL |
+| `REDIS_PREFIX` | `"bedrock"` | Key prefix |
+| `REDIS_MAX_CONNECTIONS` | `10` | Connection pool size |
+
+## Exception Hierarchy
+
+All cache exceptions inherit from `CacheError`:
+
+```
+CacheError
+├── CacheConnectionError      — Backend connection failure
+├── CacheSerializationError   — Serialization/deserialization failure
+├── BackendNotConfiguredError — Backend not available
+└── CacheLockError
+    ├── CacheLockAcquisitionError — Lock acquisition failure
+    └── CacheLockOwnershipError   — Lock ownership violation
+```
+
+```python
+from bedrock.contrib.cache import (
+    CacheError,
+    CacheConnectionError,
+    CacheSerializationError,
+    BackendNotConfiguredError,
+    CacheLockError,
+    CacheLockAcquisitionError,
+    CacheLockOwnershipError,
+)
+```
+
+## Anti-Patterns
+
+**Don't call `configure()` more than once.** The backend is initialized once. Calling `configure()` again replaces the previous backend without cleanup.
+
+**Don't use the in-memory backend for distributed locks.** `InMemoryBackend` is process-local. Locks only coordinate within a single process. Use `RedisBackend` for cross-process coordination.
+
+**Don't forget TTL for temporary data.** Without `ex` or `ea`, entries persist until explicitly deleted or the process restarts. Always set TTL for session data, tokens, and temporary state.
+
+**Don't use `bedrock.cache` as import path.** The canonical import is `from bedrock.contrib.cache import cache`. There is no re-export at the `bedrock` package level.
+
+**Don't mix `type_` and `coder` parameters.** Passing both to `get()` or `set()` raises `ValueError`. Choose one serialization strategy per call.
+
+**Don't hardcode cache keys.** Use namespaces and slots to organize keys. Raw string concatenation leads to key collisions and makes cache invalidation difficult.
+
+## See Also
+
+- [Database](./database) — SQLAlchemy 2.0 database layer
+- [Signals](./signals) — Event system with lifecycle signals
+- [CLI Reference](./cli) — Cache-related CLI commands

@@ -1,0 +1,104 @@
+"""Service layer for {{ model_name }}, generated from SQLAlchemy strrospection.
+
+All functions return ORM model instances. Entity conversion is handled
+at the API boundary layer.
+"""
+
+from __future__ import annotations
+
+from sqlalchemy.orm import Session
+
+from ..models import {{ model_name }}
+from .entities import {{ model_name }}Create, {{ model_name }}Update
+
+
+def get(db_session: Session, {{ model_slug }}_id: str) -> {{ model_name }} | None:
+    """Retrieve a {{ model_name }} by primary key.
+
+    Args:
+        db_session: The database session.
+        {{ model_slug }}_id: Primary key value.
+
+    Returns:
+        The {{ model_name }} instance, or None if not found.
+    """
+    return db_session.get({{ model_name }}, {{ model_slug }}_id)
+
+
+def get_by(db_session: Session, **kwargs) -> {{ model_name }} | None:
+    """Retrieve a single {{ model_name }} matching the given field values.
+
+    Args:
+        db_session: The database session.
+        **kwargs: Column name/value pairs to filter by.
+
+    Returns:
+        The first matching {{ model_name }} instance, or None.
+    """
+    return db_session.query({{ model_name }}).filter_by(**kwargs).first()
+
+
+
+def query(db_session: Session, **kwargs) -> list[{{ model_name }}]:
+    """Filter {{ model_name }} records by arbitrary field values.
+
+    Args:
+        db_session: The database session.
+        **kwargs: Column name/value pairs to filter by.
+
+    Returns:
+        A list of matching {{ model_name }} instances.
+    """
+    return db_session.query({{ model_name }}).filter_by(**kwargs).all()
+
+
+def create(db_session: Session, {{ model_slug }}_in: {{ model_name }}Create) -> {{ model_name }}:
+    """Persist a new {{ model_name }} from a creation payload.
+
+    Args:
+        db_session: The database session.
+        {{ model_slug }}_in: Validated creation entity.
+
+    Returns:
+        The newly created and refreshed {{ model_name }} instance.
+    """
+    instance = {{ model_name }}(**{{ model_slug }}_in.model_dump())
+    db_session.add(instance)
+    db_session.commit()
+    db_session.refresh(instance)
+    return instance
+
+
+def update(db_session: Session, {{ model_slug }}: {{ model_name }}, {{ model_slug }}_in: {{ model_name }}Update) -> {{ model_name }} | None:
+    """Apply a partial update to an existing {{ model_name }}.
+
+    Args:
+        db_session: The database session.
+        {{ model_slug }}: {{ model_name }} SQLAlchemy Instance.
+        {{ model_slug }}_in:: Partial update entity; only non-None fields are applied.
+
+    Returns:
+        The updated {{ model_name }} instance, or None if not found.
+    """
+    {{ model_slug }}.update(**{{ model_slug }}_in.model_dump(exclude_unset=True))
+    db_session.commit()
+    db_session.refresh({{ model_slug }})
+    return {{ model_slug }}
+
+
+def delete(db_session: Session, {{ model_slug }}_id: str) -> bool:
+    """Delete a {{ model_name }} by primary key.
+
+    Args:
+        db_session: The database session.
+        {{ model_slug }}_id: Primary key of the record to delete.
+
+    Returns:
+        True if the record was deleted, False if not found.
+    """
+    instance = db_session.get({{ model_name }}, {{ model_slug }}_id )
+    if instance is None:
+        return False
+    db_session.delete(instance)
+    db_session.commit()
+    return True

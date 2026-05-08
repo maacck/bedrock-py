@@ -1,0 +1,531 @@
+---
+title: CLI Reference
+description: Complete guide to Bedrock's command-line interface
+---
+
+Bedrock provides a Typer-based CLI for managing modules, database migrations, and application lifecycle. The CLI is installed automatically with the `bedrock` package.
+
+## Overview
+
+```bash
+bedrock [OPTIONS] COMMAND [ARGS]
+```
+
+### Global Options
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--version` | `-v` | Show Bedrock version and exit |
+| `--help` | `-h` | Show help message and exit |
+
+### Command Groups
+
+| Group | Purpose |
+|-------|---------|
+| `bedrock run` | Run module-specific commands |
+| `bedrock app` | Inspect and manage modules |
+| `bedrock manage` | Application lifecycle management |
+| `bedrock db` | Database migration operations |
+
+## Module Commands (`bedrock app`)
+
+Commands for inspecting and managing Bedrock modules.
+
+### `bedrock app inspect`
+
+Validate a module's manifest and loadability.
+
+```bash
+bedrock app inspect <import_path>
+```
+
+**What it checks:**
+1. `manifest.yaml` structure and required fields
+2. Module can be imported successfully
+3. Bootstrap submodule exists
+4. Models submodule exists
+5. Installation hooks are valid
+
+**Example:**
+
+```bash
+$ bedrock app inspect myapp.users
+
+✓ Manifest for 'myapp.users' is valid.
+✓ Module 'myapp.users' loads successfully.
+✓ Bootstrap submodule is available.
+! No models submodule found.
+✓ Installation hooks for 'myapp.users' are valid and executable.
+```
+
+**Exit codes:**
+- `0` — All checks passed
+- `1` — Validation failed
+
+---
+
+### `bedrock app info`
+
+Display detailed information about a module.
+
+```bash
+bedrock app info <import_path>
+```
+
+**Example:**
+
+```bash
+$ bedrock app info myapp.users
+
+Title        User Management
+Description  User authentication and profiles
+Version      0.1.0
+Import Path  myapp.users
+Dependencies myapp.core
+             myapp.auth
+Bootstrap    Yes
+Models       Yes
+Commands     commands:app
+```
+
+---
+
+### `bedrock app install`
+
+Install a Bedrock module (runs migrations and hooks).
+
+```bash
+bedrock app install <import_path>
+```
+
+<Callout type="warning">
+This command is currently a placeholder. Use `bedrock manage install` for full installation with migrations and hooks.
+</Callout>
+
+---
+
+### `bedrock app playbook`
+
+Read a module's playbook documentation.
+
+```bash
+bedrock app playbook <import_path>
+```
+
+Playbooks are AI-readable documentation stored in `playbook/PLAYBOOK.md` inside the module package. See [Playbooks](./playbooks) for details.
+
+**Example:**
+
+```bash
+$ bedrock app playbook myapp.auth
+
+# Auth Module
+
+Authentication and authorization for Bedrock applications.
+
+## Quick Start
+...
+```
+
+---
+
+### `bedrock app playbook-ref`
+
+Read a reference file from a module's playbook.
+
+```bash
+bedrock app playbook-ref <import_path> <filename>
+```
+
+**Arguments:**
+- `import_path` — Module import path
+- `filename` — Path relative to `playbook/` directory
+
+**Examples:**
+
+```bash
+# Read architecture docs
+bedrock app playbook-ref myapp.auth references/architecture.md
+
+# Read code examples
+bedrock app playbook-ref myapp.auth examples/login-flow.py
+```
+
+**Security:** Path traversal attempts (e.g., `../`) are blocked.
+
+---
+
+## Database Commands (`bedrock db`)
+
+Alembic-powered database migration commands. Each command takes an app import path that serves as both the host app and migration branch target.
+
+### `bedrock db revision`
+
+Create a new migration revision.
+
+```bash
+bedrock db revision <app_import_path> -m "<message>"
+```
+
+**Options:**
+
+| Option | Short | Default | Description |
+|--------|-------|---------|-------------|
+| `--message` | `-m` | Required | Short description for the revision |
+| `--autogenerate` | | `True` | Autogenerate migration from model diff |
+| `--no-autogenerate` | | | Disable autogeneration |
+
+**Examples:**
+
+```bash
+# First revision (creates branch root)
+bedrock db revision myapp.users -m "initial schema"
+
+# Subsequent revision
+bedrock db revision myapp.users -m "add email verification"
+
+# Manual migration (no autogenerate)
+bedrock db revision myapp.users -m "custom index" --no-autogenerate
+```
+
+**How it works:**
+- First call creates a branch root with `--head=base`
+- Branch label equals the import path (e.g., `myapp.users`)
+- Subsequent calls append to `<import_path>@head`
+
+---
+
+### `bedrock db upgrade`
+
+Upgrade database to a target revision.
+
+```bash
+bedrock db upgrade <app_import_path> [target]
+```
+
+**Arguments:**
+- `target` — Revision target (default: `head`)
+
+**Target formats:**
+
+| Target | Description |
+|--------|-------------|
+| `head` | Upgrade to latest revision (default) |
+| `+1` | Upgrade one step |
+| `<revision_id>` | Upgrade to specific revision |
+
+**Examples:**
+
+```bash
+# Upgrade to latest
+bedrock db upgrade myapp.users
+
+# Upgrade one step
+bedrock db upgrade myapp.users +1
+
+# Upgrade to specific revision
+bedrock db upgrade myapp.users abc123def456
+```
+
+**Important:** Only the specified app's branch is upgraded. Other branches are untouched.
+
+---
+
+### `bedrock db downgrade`
+
+Downgrade database to a target revision.
+
+```bash
+bedrock db downgrade <app_import_path> <target>
+```
+
+**Target formats:**
+
+| Target | Description |
+|--------|-------------|
+| `base` | Downgrade to empty (remove all tables) |
+| `-1` | Downgrade one step |
+| `<revision_id>` | Downgrade to specific revision |
+
+**Examples:**
+
+```bash
+# Downgrade one step
+bedrock db downgrade myapp.users -1
+
+# Downgrade to base
+bedrock db downgrade myapp.users base
+```
+
+---
+
+### `bedrock db heads`
+
+Show the current head revision for an app.
+
+```bash
+bedrock db heads <app_import_path>
+```
+
+**Example:**
+
+```bash
+$ bedrock db heads myapp.users
+
+abc123def456 (head)
+```
+
+---
+
+### `bedrock db current`
+
+Show the current database revision.
+
+```bash
+bedrock db current <app_import_path>
+```
+
+**Example:**
+
+```bash
+$ bedrock db current myapp.users
+
+Current revision: abc123def456
+```
+
+---
+
+### `bedrock db history`
+
+Show migration history for an app.
+
+```bash
+bedrock db history <app_import_path>
+```
+
+**Example:**
+
+```bash
+$ bedrock db history myapp.users
+
+Revision         Down Revision    Branch Labels    Message
+abc123def456     None             myapp.users      initial schema
+def789ghi012     abc123def456     myapp.users      add email verification
+```
+
+---
+
+### `bedrock db uninstall`
+
+Rollback all migrations and prepare module for removal.
+
+```bash
+bedrock db uninstall <app_import_path>
+```
+
+**What it does:**
+1. Downgrades all migrations to base
+2. Removes entries from `alembic_version`
+3. Prepares module for safe removal from `INSTALLED_APPS`
+
+**Example:**
+
+```bash
+$ bedrock db uninstall myapp.users
+
+✓ myapp.users downgraded to base. You can now remove it from INSTALLED_APPS.
+```
+
+---
+
+## Application Management (`bedrock manage`)
+
+Commands for managing the application lifecycle.
+
+### `bedrock manage install`
+
+Install the current Bedrock application.
+
+```bash
+bedrock manage install [OPTIONS]
+```
+
+**Options:**
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--app` | `-A` | Install specific module (default: all loaded) |
+| `--skip-migrations` | | Skip database migrations |
+
+**What it does for each module:**
+
+1. **Database schema** — Creates tables on first install, upgrades if behind head
+2. **Pre-install hook** — Runs `installation.py:pre_install()` if defined
+3. **Install hook** — Runs `installation.py:install()` if defined
+4. **Post-install hook** — Runs `installation.py:post_install()` if defined
+
+**Examples:**
+
+```bash
+# Install all modules
+bedrock manage install
+
+# Install specific module
+bedrock manage install -A myapp.users
+
+# Skip migrations
+bedrock manage install --skip-migrations
+```
+
+**Example output:**
+
+```bash
+✓ Installing application...
+Installing app: myapp.users 0.1.0
+✓ Schema created (tables initialised and stamped at head).
+Running pre-install hook for myapp.users...
+Running post-install hook for myapp.users...
+✓ Application installed successfully.
+```
+
+---
+
+## Running Module Commands (`bedrock run`)
+
+Execute module-specific CLI commands.
+
+```bash
+bedrock run --app <module> <command> [ARGS]
+```
+
+**Options:**
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--app` | `-a` | Module to load (or set `APP` env var) |
+
+### How Module Commands Work
+
+Modules can expose CLI commands via a Typer app in their `commands.py` file:
+
+```python
+# myapp/users/commands.py
+import typer
+
+app = typer.Typer(name="users", help="User management commands")
+
+@app.command()
+def create_user(name: str, email: str) -> None:
+    """Create a new user."""
+    ...
+
+@app.command()
+def list_users() -> None:
+    """List all users."""
+    ...
+```
+
+Register in `manifest.yaml`:
+
+```yaml
+title: User Management
+version: "0.1.0"
+commands: commands:app
+```
+
+### Examples
+
+```bash
+# Run module command
+bedrock run --app myapp.users create-user --name Alice --email alice@example.com
+
+# List available commands
+bedrock run --app myapp.users --help
+
+# Use APP environment variable
+export APP=myapp.users
+bedrock run create-user --name Bob --email bob@example.com
+```
+
+---
+
+## Environment Variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `APP` | Default app for `run` and `manage` commands | None |
+| `DATABASE_URL` | Database connection string | Required for `db` commands |
+
+---
+
+## Common Workflows
+
+### Initial Project Setup
+
+```bash
+# 1. Install the application
+bedrock manage install
+
+# 2. Verify modules
+bedrock app info myapp.users
+bedrock app info myapp.products
+
+# 3. Check database status
+bedrock db current myapp.users
+```
+
+### Adding a New Migration
+
+```bash
+# 1. Create migration
+bedrock db revision myapp.users -m "add phone field"
+
+# 2. Review generated migration
+# (check migrations/ directory)
+
+# 3. Apply migration
+bedrock db upgrade myapp.users
+
+# 4. Verify
+bedrock db current myapp.users
+```
+
+### Removing a Module
+
+```bash
+# 1. Rollback migrations
+bedrock db uninstall myapp.users
+
+# 2. Remove from INSTALLED_APPS
+# 3. Delete module code
+```
+
+### Debugging Module Issues
+
+```bash
+# 1. Validate manifest
+bedrock app inspect myapp.users
+
+# 2. Check module info
+bedrock app info myapp.users
+
+# 3. Read playbook (if available)
+bedrock app playbook myapp.users
+```
+
+---
+
+## Exit Codes
+
+| Code | Meaning |
+|------|---------|
+| `0` | Success |
+| `1` | Error (validation failed, migration error, etc.) |
+
+---
+
+## See Also
+
+- [Module Anatomy](./module-anatomy) — Module file structure
+- [Playbooks](./playbooks) — AI-readable module documentation
+- [Installation](../getting-started/installation) — Installing Bedrock
