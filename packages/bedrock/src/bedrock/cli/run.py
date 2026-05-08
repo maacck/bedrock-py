@@ -37,7 +37,6 @@ def _parse_run_args_for_app(argv: list[str]) -> str | None:
                 return arg.split("=", 1)[1]
             if arg.startswith("-a="):
                 return arg.split("=", 1)[1]
-            break
     return None
 
 

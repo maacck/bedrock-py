@@ -62,7 +62,9 @@ class DictManager:
 
         try:
             module = importlib.import_module(module_name)
-            cls: type[Any] = getattr(module, class_name)
+            cls: Any = module
+            for attr in class_name.split("."):
+                cls = getattr(cls, attr)
             return cls
         except Exception as e:
             logger.exception("Unable to import %s. Reason: %s", cls_path, e)

@@ -1,16 +1,7 @@
-from __future__ import annotations
-
-from bedrock.module import ModuleRegistry, apps
-
 from .conf import BedrockSettings
 from .entities import BedrockEntity
 from .logging import get_logger
-from .utils.string_helpers import (
-    StringHelpers,
-    generate_token,
-    is_strong_password,
-    random_password,
-)
+from .module import ModuleRegistry, apps
 
 __all__ = [
     "ModuleRegistry",

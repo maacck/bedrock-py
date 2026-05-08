@@ -82,7 +82,7 @@ def make_id(obj: object) -> c.Hashable:
         # function and instance are.
         return id(obj.__func__), id(obj.__self__)
 
-    if isinstance(obj, (str, int)):
+    if isinstance(obj, (str | int)):
         # Instances with the same value always compare equal and have the same
         # hash, even if the id may change.
         return obj
