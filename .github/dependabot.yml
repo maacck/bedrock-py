@@ -6,39 +6,33 @@ updates:
     directory: /
     schedule:
       interval: weekly
-      day: monday
-      time: "04:00"
-      timezone: Asia/Shanghai
     open-pull-requests-limit: 5
-    labels:
-      - dependencies
-      - python
     commit-message:
       prefix: "deps"
       include: scope
-
+    groups:
+      pydantic:
+        patterns:
+          - "pydantic"
+          - "pydantic-*"
+      dev:
+        patterns:
+          - "coverage"
+          - "ruff"
+          - "pytest*"
+    target-branch: "main"
+    
   # GitHub Actions
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: monthly
     open-pull-requests-limit: 5
-    labels:
-      - dependencies
-      - github-actions
     commit-message:
       prefix: "ci"
       include: scope
-
-  # npm (docs-web)
-  - package-ecosystem: npm
-    directory: /docs-web
-    schedule:
-      interval: monthly
-    open-pull-requests-limit: 5
-    labels:
-      - dependencies
-      - javascript
-    commit-message:
-      prefix: "deps"
-      include: scope
+    groups:
+      github-actions-dependencies:
+        patterns:
+          - "*"
+    target-branch: "main"

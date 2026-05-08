@@ -51,7 +51,8 @@ cd starlight-docs && npm run build  # Production build
 <name>/
 ├── __init__.py
 ├── manifest.yaml    # name, package, version, depends_on
-├── entities.py      # Pydantic models
+├── entities.py      # Business domain entities (internal data flow)
+├── schemas.py       # Optional: API input/output contracts (request/response DTOs)
 ├── service.py       # Business logic (no HTTP)
 ├── exc.py           # Module exceptions
 └── bootstrap.py     # Optional: lifecycle hooks
