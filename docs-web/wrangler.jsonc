@@ -15,7 +15,8 @@
   "kv_namespaces": [
     {
       "binding": "RATE_LIMIT_KV",
-      "id": "rate_limit_kv",
+      "id": "ebf3c555a4b344a0aa8d9b43628dfe43",
+      "remote": true,
     },
   ],
 }
