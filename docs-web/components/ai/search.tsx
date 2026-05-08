@@ -12,6 +12,7 @@ import {
   useState,
 } from "react";
 import {
+  AlertTriangle,
   Loader2,
   MessageCircleIcon,
   RefreshCw,
@@ -26,6 +27,13 @@ import { DefaultChatTransport, type Tool, type UIToolInvocation } from "ai";
 import { Markdown } from "../markdown";
 import { Presence } from "@radix-ui/react-presence";
 import type { ChatUIMessage, SearchTool } from "../../app/api/chat/route";
+import { Suggestion, Suggestions } from "./suggestion";
+
+const suggestions = [
+  "What is bedrock?",
+  "How to install bedrock?",
+  "How to use bedrock?",
+];
 
 const Context = createContext<{
   open: boolean;
@@ -376,7 +384,7 @@ export function AISearchTrigger({
 }
 
 export function AISearchPanel() {
-  const { open, setOpen } = useAISearchContext();
+  const { open, setOpen, chat } = useAISearchContext();
   useHotKey();
 
   return (
@@ -423,6 +431,33 @@ export function AISearchPanel() {
           <div className="flex flex-col size-full p-2 lg:p-3 lg:w-(--ai-chat-width)">
             <AISearchPanelHeader />
             <AISearchPanelList className="flex-1" />
+            {chat.messages.length === 0 && (
+              <Suggestions className="my-2">
+                {suggestions.map((suggestion) => (
+                  <Suggestion
+                    key={suggestion}
+                    onClick={() =>
+                      chat.sendMessage({
+                        role: "user",
+                        parts: [
+                          {
+                            type: "data-client",
+                            data: {
+                              location: location.href,
+                            },
+                          },
+                          {
+                            type: "text",
+                            text: suggestion,
+                          },
+                        ],
+                      })
+                    }
+                    suggestion={suggestion}
+                  />
+                ))}
+              </Suggestions>
+            )}
             <div className="rounded-xl border bg-fd-secondary text-fd-secondary-foreground shadow-sm has-focus-visible:shadow-md">
               <AISearchInput />
               <div className="flex items-center gap-1.5 p-1 empty:hidden">
@@ -461,20 +496,44 @@ export function AISearchPanelList({
         </div>
       ) : (
         <div className="flex flex-col px-3 gap-4">
-          {chat.error && (
-            <div className="p-2 bg-fd-secondary text-fd-secondary-foreground border rounded-lg">
-              <p className="text-xs text-fd-muted-foreground mb-1">
-                Request Failed: {chat.error.name}
-              </p>
-              <p className="text-sm">{chat.error.message}</p>
-            </div>
-          )}
+          {chat.error && <RateLimitError error={chat.error} />}
           {messages.map((item) => (
             <Message key={item.id} message={item} />
           ))}
         </div>
       )}
     </List>
+  );
+}
+
+function RateLimitError({ error }: { error: Error }) {
+  const isRateLimit =
+    error.message?.includes("Rate limit") || error.message?.includes("429");
+
+  if (isRateLimit) {
+    return (
+      <div className="p-3 bg-amber-500/10 border border-amber-500/30 rounded-lg">
+        <div className="flex items-center gap-2 mb-1">
+          <AlertTriangle className="size-4 text-amber-500" />
+          <p className="text-sm font-medium text-amber-600 dark:text-amber-400">
+            Quota Exceeded
+          </p>
+        </div>
+        <p className="text-xs text-fd-muted-foreground">
+          You&apos;ve reached the hourly token limit. Please wait before sending
+          more messages.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="p-2 bg-fd-secondary text-fd-secondary-foreground border rounded-lg">
+      <p className="text-xs text-fd-muted-foreground mb-1">
+        Request Failed: {error.name}
+      </p>
+      <p className="text-sm">{error.message}</p>
+    </div>
   );
 }
 

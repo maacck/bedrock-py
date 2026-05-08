@@ -12,4 +12,10 @@
   "ai": {
     "binding": "AI",
   },
+  "kv_namespaces": [
+    {
+      "binding": "RATE_LIMIT_KV",
+      "id": "rate_limit_kv",
+    },
+  ],
 }
