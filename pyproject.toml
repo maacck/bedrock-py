@@ -16,7 +16,7 @@ dev = [
     "pre-commit>=4.6.0",
 ]
 docs = [
-    "mkdocstrings[python]>=0.26.0",
+    "mkdocstrings[python]>=1.0.4",
     "griffe>=1.0.0",
 ]
 
