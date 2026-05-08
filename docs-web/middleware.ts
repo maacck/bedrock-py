@@ -1,8 +1,10 @@
-import { NextRequest, NextResponse, NextFetchEvent } from 'next/server';
-import { isMarkdownPreferred, rewritePath } from 'fumadocs-core/negotiation';
-import { createI18nMiddleware } from 'fumadocs-core/i18n/middleware';
-import { i18n } from '@/lib/i18n';
-import { docsContentRoute, docsRoute } from '@/lib/shared';
+import { NextRequest, NextResponse, NextFetchEvent } from "next/server";
+import { isMarkdownPreferred, rewritePath } from "fumadocs-core/negotiation";
+import { createI18nMiddleware } from "fumadocs-core/i18n/middleware";
+import { i18n } from "@/lib/i18n";
+import { docsContentRoute, docsRoute } from "@/lib/shared";
+
+export const runtime = "experimental-edge";
 
 const i18nMiddleware = createI18nMiddleware(i18n);
 
@@ -15,7 +17,10 @@ const { rewrite: rewriteSuffix } = rewritePath(
   `${docsContentRoute}{/*path}/content.md`,
 );
 
-export default function proxy(request: NextRequest, event: NextFetchEvent) {
+export default function middleware(
+  request: NextRequest,
+  event: NextFetchEvent,
+) {
   const result = rewriteSuffix(request.nextUrl.pathname);
   if (result) {
     return NextResponse.rewrite(new URL(result, request.nextUrl));
@@ -33,5 +38,5 @@ export default function proxy(request: NextRequest, event: NextFetchEvent) {
 }
 
 export const config = {
-  matcher: ['/((?!api|_next/static|_next/image|favicon.ico|.*\\..*).*)'],
+  matcher: ["/((?!api|_next/static|_next/image|favicon.ico|.*\\..*).*)"],
 };
