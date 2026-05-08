@@ -40,7 +40,8 @@ Bedrock is **not** a web framework. It's a modular runtime that works with any P
 The fundamental unit of organization in Bedrock. Each module is a self-contained package with its own:
 
 - **Manifest** (`manifest.yaml`) — Identity, version, and dependencies
-- **Entities** (`entities.py`) — Pydantic models for validation
+- **Entities** (`entities.py`) — Business domain entities for internal data flow
+- **Schemas** (`schemas.py`) — API input/output contracts (optional)
 - **Services** (`service.py`) — Business logic
 - **Models** (`models.py`) — Database models (optional)
 - **Exceptions** (`exc.py`) — Module-specific errors

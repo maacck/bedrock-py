@@ -16,6 +16,7 @@ bedrock_app/
 ├── manifest.yaml
 ├── models.py
 ├── entities.py
+├── schemas.py
 ├── service.py
 ├── exc.py
 └── bootstrap.py
@@ -28,7 +29,8 @@ bedrock_app/
 | `__init__.py` | Yes | Standard Python Module File |
 | `manifest.yaml` | Yes | Module declaration and metadata |
 | `models.py` | No | Data models and persistence |
-| `entities.py` | No | Business entities |
+| `entities.py` | No | Business entities for internal data flow |
+| `schemas.py` | No | API input/output schemas (request/response DTOs) |
 | `service.py` | No | Business logic layer |
 | `exc.py` | No | Module-specific exceptions |
 | `bootstrap.py` | No | Lifecycle hooks |
@@ -74,13 +76,30 @@ commands: "commands:app"
 
 ### `entities.py`
 
-Pydantic models for request/response validation and business data transfer. These are distinct from ORM models — they carry no persistence logic.
+Pydantic models for business domain entities. These represent data that flows within the service layer — not tied to any specific API contract. Entities can also be used as output when a dedicated response schema is not needed.
+
+```python
+from pydantic import BaseModel
+
+
+class Product(BaseModel):
+    """Business entity representing a product."""
+
+    id: int
+    name: str
+    sku: str
+    price: int
+```
+
+### `schemas.py`
+
+Pydantic models for API input/output contracts. Use schemas when you need dedicated request validation or response serialization that differs from your business entities. This file is optional — simple modules can use entities directly.
 
 ```python
 from pydantic import BaseModel, Field
 
 
-class ProductCreate(BaseModel):
+class ProductCreateRequest(BaseModel):
     """Input schema for creating a product."""
 
     name: str = Field(..., min_length=1, max_length=100)
@@ -274,7 +293,7 @@ Each lifecycle transition emits a signal that external code can observe:
 
 ## Minimal Module Example
 
-A complete, copy-pasteable module with all required files:
+A complete, copy-pasteable module with all required files. This example uses `entities.py` only — add `schemas.py` when you need dedicated API input/output contracts.
 
 ```files
 my_module/
@@ -383,3 +402,13 @@ The runtime loader is planned around these phases:
 3. **order** — compute a deterministic dependency-respecting load order
 4. **import** — import modules lazily through declared package paths
 5. **initialize** — run lightweight lifecycle hooks
+
+## Where Does My Code Belong?
+
+Use these rules to decide which file a piece of code belongs in:
+
+- If it touches `Request`, `Response`, or HTTP status codes → **API layer** (routes/controllers)
+- If it imports `sqlalchemy` → **Data layer** (`models.py`)
+- If it imports `pydantic` for input/output shapes → **Schemas** (`schemas.py`) or **Entities** (`entities.py`)
+- If it contains conditional logic, calculations, or orchestration → **Logic layer** (`service.py`)
+- If it runs once at startup → **Lifecycle hooks** (`bootstrap.py`)

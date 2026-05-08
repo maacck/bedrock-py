@@ -1,0 +1,95 @@
+---
+title: Agent Skills
+description: 使用 Bedrock 约定配置 AI 编码助手
+---
+
+Bedrock 被设计为能够与 AI 编码助手无缝协作。为了获得最佳效果，请安装 Bedrock agent skill，让你的 AI 助手了解 Bedrock 的约定和模式。
+
+## 为什么要安装这个技能？
+
+如果没有这个技能，AI 助手就必须：
+
+1. 扫描整个代码库来理解 Bedrock 的模式
+2. 猜测模块结构和约定
+3. 在每一次对话中重复这些工作
+
+安装技能后，你的 AI 助手会立刻知道：
+
+- 标准模块结构和文件组织方式
+- Manifest 格式与依赖声明
+- 数据库模式和模型约定
+- Cache 系统的使用方式
+- CLI 命令和工作流
+
+## 安装
+
+Bedrock agent skill 可用于多个 AI 编码助手。
+
+### Skills.sh
+
+```bash
+npx skills add https://github.com/maacck/bedrock
+```
+
+## 技能会教会什么
+
+Bedrock agent skill 提供以下内容：
+
+### 模块结构
+
+Bedrock 模块的标准文件组织：
+
+```
+modules/
+└── my_module/
+    ├── __init__.py
+    ├── manifest.yaml
+    ├── models.py
+    ├── entities.py
+    ├── service.py
+    ├── exc.py
+    └── bootstrap.py
+```
+
+### Manifest 格式
+
+如何编写 `manifest.yaml` 文件：
+
+```yaml
+title: my_module
+description: Module description
+version: 0.1.0
+depends_on:
+  - other_module
+commands: "commands:app"
+```
+
+### 层边界
+
+不同类型的代码应该放在哪里：
+
+| 层级     | 文件           | 用途            |
+| -------- | -------------- | --------------- |
+| 数据     | `models.py`    | SQLAlchemy 模型 |
+| 校验     | `entities.py`  | Pydantic 模型   |
+| 逻辑     | `service.py`   | 业务逻辑        |
+| 错误     | `exc.py`       | 模块异常        |
+| 生命周期 | `bootstrap.py` | 钩子            |
+
+### 反模式
+
+在使用 Bedrock 时，不要这样做：
+
+- 不要在 service 层导入 HTTP 类型
+- 不要直接使用 `BaseSettings`（请使用 `LazySettings`）
+- 不要绕过 `ModuleRegistry.install()` 加载模块
+- 不要把 API endpoints 放进 service 文件
+
+## 手动设置
+
+如果你更愿意手动配置这些约定，可以把 skills 安装到项目中并自行编辑。这个目录包含了该技能提供的全部约定。
+
+## 下一步
+
+- [Module Anatomy](/docs/guides/module-anatomy) — 详细模块结构
+- [Module Playbooks](/docs/guides/playbooks) — 面向 AI 的模块文档

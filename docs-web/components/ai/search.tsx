@@ -28,24 +28,20 @@ import { Markdown } from "../markdown";
 import { Presence } from "@radix-ui/react-presence";
 import type { ChatUIMessage, SearchTool } from "../../app/api/chat/route";
 import { Suggestion, Suggestions } from "./suggestion";
-
-const suggestions = [
-  "What is bedrock?",
-  "How to install bedrock?",
-  "How to use bedrock?",
-];
+import type { SearchTexts } from "../../i18n/search";
 
 const Context = createContext<{
   open: boolean;
   setOpen: (open: boolean) => void;
   chat: UseChatHelpers<ChatUIMessage>;
+  texts: SearchTexts;
 } | null>(null);
 
 export function AISearchPanelHeader({
   className,
   ...props
 }: ComponentProps<"div">) {
-  const { setOpen } = useAISearchContext();
+  const { setOpen, texts } = useAISearchContext();
 
   return (
     <div
@@ -56,9 +52,9 @@ export function AISearchPanelHeader({
       {...props}
     >
       <div className="px-3 py-2 flex-1">
-        <p className="text-sm font-medium mb-2">AI Chat</p>
+        <p className="text-sm font-medium mb-2">{texts.aiChat}</p>
         <p className="text-xs text-fd-muted-foreground">
-          AI can be inaccurate, please verify the answers.
+          {texts.aiDisclaimer}
         </p>
       </div>
 
@@ -82,6 +78,7 @@ export function AISearchPanelHeader({
 
 export function AISearchInputActions() {
   const { messages, status, setMessages, regenerate } = useChatContext();
+  const { texts } = useAISearchContext();
   const isLoading = status === "streaming";
 
   if (messages.length === 0) return null;
@@ -101,7 +98,7 @@ export function AISearchInputActions() {
           onClick={() => regenerate()}
         >
           <RefreshCw className="size-4" />
-          Retry
+          {texts.retry}
         </button>
       )}
       <button
@@ -115,7 +112,7 @@ export function AISearchInputActions() {
         )}
         onClick={() => setMessages([])}
       >
-        Clear Chat
+        {texts.clearChat}
       </button>
     </>
   );
@@ -124,6 +121,7 @@ export function AISearchInputActions() {
 const StorageKeyInput = "__ai_search_input";
 export function AISearchInput(props: ComponentProps<"form">) {
   const { status, sendMessage, stop } = useChatContext();
+  const { texts } = useAISearchContext();
   const [input, setInput] = useState(
     () => localStorage.getItem(StorageKeyInput) ?? "",
   );
@@ -164,7 +162,7 @@ export function AISearchInput(props: ComponentProps<"form">) {
     >
       <Input
         value={input}
-        placeholder={isLoading ? "AI is answering..." : "Ask a question"}
+        placeholder={isLoading ? texts.answeringPlaceholder : texts.askPlaceholder}
         autoFocus
         className="p-3"
         disabled={status === "streaming" || status === "submitted"}
@@ -191,7 +189,7 @@ export function AISearchInput(props: ComponentProps<"form">) {
           onClick={stop}
         >
           <Loader2 className="size-4 animate-spin text-fd-muted-foreground" />
-          Abort Answer
+          {texts.abortAnswer}
         </button>
       ) : (
         <button
@@ -285,6 +283,7 @@ function Message({
   message,
   ...props
 }: { message: ChatUIMessage } & ComponentProps<"div">) {
+  const { texts } = useAISearchContext();
   let markdown = "";
   const searchCalls: UIToolInvocation<SearchTool>[] = [];
 
@@ -326,13 +325,13 @@ function Message({
             <SearchIcon className="size-4" />
             {call.state === "output-error" || call.state === "output-denied" ? (
               <p className="text-fd-error">
-                {call.errorText ?? "Failed to search"}
+                {call.errorText ?? texts.failedToSearch}
               </p>
             ) : (
               <p>
                 {!call.output
-                  ? "Searching…"
-                  : `${call.output.length} search results`}
+                  ? texts.searching
+                  : texts.searchResults.replace('{{count}}', String(call.output.length))}
               </p>
             )}
           </div>
@@ -342,7 +341,7 @@ function Message({
   );
 }
 
-export function AISearch({ children }: { children: ReactNode }) {
+export function AISearch({ children, texts }: { children: ReactNode; texts: SearchTexts }) {
   const [open, setOpen] = useState(false);
   const chat = useChat<ChatUIMessage>({
     id: "search",
@@ -352,7 +351,7 @@ export function AISearch({ children }: { children: ReactNode }) {
   });
 
   return (
-    <Context value={useMemo(() => ({ chat, open, setOpen }), [chat, open])}>
+    <Context value={useMemo(() => ({ chat, open, setOpen, texts }), [chat, open, texts])}>
       {children}
     </Context>
   );
@@ -384,7 +383,7 @@ export function AISearchTrigger({
 }
 
 export function AISearchPanel() {
-  const { open, setOpen, chat } = useAISearchContext();
+  const { open, setOpen, chat, texts } = useAISearchContext();
   useHotKey();
 
   return (
@@ -433,7 +432,7 @@ export function AISearchPanel() {
             <AISearchPanelList className="flex-1" />
             {chat.messages.length === 0 && (
               <Suggestions className="my-2">
-                {suggestions.map((suggestion) => (
+                {texts.suggestions.map((suggestion) => (
                   <Suggestion
                     key={suggestion}
                     onClick={() =>
@@ -477,6 +476,7 @@ export function AISearchPanelList({
   ...props
 }: ComponentProps<"div">) {
   const chat = useChatContext();
+  const { texts } = useAISearchContext();
   const messages = chat.messages.filter((msg) => msg.role !== "system");
 
   return (
@@ -492,11 +492,11 @@ export function AISearchPanelList({
       {messages.length === 0 ? (
         <div className="text-sm text-fd-muted-foreground/80 size-full flex flex-col items-center justify-center text-center gap-2">
           <MessageCircleIcon fill="currentColor" stroke="none" />
-          <p onClick={(e) => e.stopPropagation()}>Start a new chat below.</p>
+          <p onClick={(e) => e.stopPropagation()}>{texts.startChat}</p>
         </div>
       ) : (
         <div className="flex flex-col px-3 gap-4">
-          {chat.error && <RateLimitError error={chat.error} />}
+          {chat.error && <RateLimitError error={chat.error} texts={texts} />}
           {messages.map((item) => (
             <Message key={item.id} message={item} />
           ))}
@@ -506,7 +506,7 @@ export function AISearchPanelList({
   );
 }
 
-function RateLimitError({ error }: { error: Error }) {
+function RateLimitError({ error, texts }: { error: Error; texts: SearchTexts }) {
   const isRateLimit =
     error.message?.includes("Rate limit") || error.message?.includes("429");
 
@@ -516,12 +516,11 @@ function RateLimitError({ error }: { error: Error }) {
         <div className="flex items-center gap-2 mb-1">
           <AlertTriangle className="size-4 text-amber-500" />
           <p className="text-sm font-medium text-amber-600 dark:text-amber-400">
-            Quota Exceeded
+            {texts.quotaExceeded}
           </p>
         </div>
         <p className="text-xs text-fd-muted-foreground">
-          You&apos;ve reached the hourly token limit. Please wait before sending
-          more messages.
+          {texts.quotaMessage}
         </p>
       </div>
     );
@@ -530,7 +529,7 @@ function RateLimitError({ error }: { error: Error }) {
   return (
     <div className="p-2 bg-fd-secondary text-fd-secondary-foreground border rounded-lg">
       <p className="text-xs text-fd-muted-foreground mb-1">
-        Request Failed: {error.name}
+        {texts.requestFailed}: {error.name}
       </p>
       <p className="text-sm">{error.message}</p>
     </div>

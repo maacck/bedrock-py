@@ -1,0 +1,287 @@
+---
+title: 参与贡献
+description: 如何为 Bedrock 做出贡献
+---
+
+Bedrock 欢迎贡献。本文档介绍参与本项目时应遵循的开发工作流、编码规范和约定。
+
+## 开发环境设置
+
+### Fork 并克隆
+
+1. 在 GitHub 上 Fork 此仓库
+2. 将你的 Fork 克隆到本地：
+
+```bash
+git clone https://github.com/maacck/bedrock.git
+cd bedrock
+```
+
+### 安装依赖
+
+Bedrock 使用 [uv](https://docs.astral.sh/uv/) 进行依赖管理。执行以下命令安装全部依赖：
+
+```bash
+uv sync
+```
+
+这会同时安装运行时依赖和开发依赖（包括 pytest 和 ruff）。
+
+### 验证安装
+
+运行测试套件以确认一切正常：
+
+```bash
+uv run pytest packages/bedrock/tests/
+```
+
+你应该会看到所有测试通过。如果有测试失败，请检查你使用的是 Python 3.12+，并确认 `uv sync` 已无报错完成。
+
+## 运行测试
+
+Bedrock 使用 pytest 进行测试。在仓库根目录运行完整测试套件：
+
+```bash
+uv run pytest packages/bedrock/tests/
+```
+
+运行某个特定测试文件：
+
+```bash
+uv run pytest packages/bedrock/tests/test_signal.py
+```
+
+使用详细输出运行：
+
+```bash
+uv run pytest packages/bedrock/tests/ -v
+```
+
+在提交 pull request 之前，所有测试都必须通过。
+
+## Lint 检查
+
+Bedrock 使用 [ruff](https://docs.astral.sh/ruff/) 进行 lint 检查与格式化。行长度被配置为 **120 个字符**。
+
+### 检查问题
+
+```bash
+uv run ruff check .
+```
+
+### 自动修复问题
+
+```bash
+uv run ruff check . --fix
+```
+
+### 格式化代码
+
+```bash
+uv run ruff format .
+```
+
+在 commit 之前，请始终运行 `ruff check` 和 `ruff format`。如果仍存在 lint 错误，CI 构建会失败。
+
+## 代码风格
+
+### 语言
+
+所有代码、注释、docstrings 和变量名都必须使用 **英文** 编写。这是项目的严格要求。
+
+### 文档字符串
+
+所有公开函数、类和方法都应使用 **Google-style** docstrings：
+
+```python
+def get_user(user_id: int) -> User:
+    """Retrieve a user by their ID.
+
+    Args:
+        user_id: The unique identifier of the user.
+
+    Returns:
+        The user instance.
+
+    Raises:
+        UserNotFoundError: If no user exists with the given ID.
+    """
+```
+
+### 类型标注
+
+所有公开函数和方法都必须包含**严格的类型标注**：
+
+```python
+# Correct
+def process_items(items: list[dict[str, Any]], batch_size: int = 100) -> list[Result]:
+    ...
+
+# Incorrect — missing type hints
+def process_items(items, batch_size=100):
+    ...
+```
+
+### 行长度
+
+最大行长度为 **120 个字符**。这一点由 ruff 配置强制执行。
+
+### 异步命名
+
+异步方法使用 `a` 前缀约定：
+
+```python
+async def aget(key: str) -> Any: ...
+async def aset(key: str, value: Any, ttl: int = 300) -> None: ...
+async def adelete(key: str) -> None: ...
+```
+
+### 导入
+
+- 在包内使用**相对导入**
+- 跨包使用**绝对导入**
+
+```python
+# Within the same package
+from .entities import ModuleManifest
+
+# Across packages
+from bedrock.database import db
+```
+
+## 模块约定
+
+在创建或修改 Bedrock 模块时，请遵循标准的模块结构：
+
+### 文件结构
+
+```
+contrib/<name>/
+├── __init__.py
+├── manifest.yaml    # Module identity and dependencies
+├── entities.py      # Pydantic models for validation
+├── service.py       # Business logic (no HTTP/ORM leakage)
+├── exc.py           # Module exceptions
+└── bootstrap.py     # Optional: lifecycle hooks
+```
+
+### Manifest 要求
+
+每个模块都必须提供至少包含以下内容的 `manifest.yaml`：
+
+```yaml
+title: my_module
+version: 0.1.0
+```
+
+可选字段包括：`description`、`depends_on`、`commands`。
+
+### 异常模式
+
+模块异常必须继承 `BedrockExc`，并设置 `detail` 类属性：
+
+```python
+from bedrock.exc import BedrockExc
+
+class UserNotFoundError(BedrockExc):
+    detail = "User not found"
+```
+
+## Commit 约定
+
+Bedrock 遵循 [Conventional Commits](https://www.conventionalcommits.org/)。每条 commit message 都必须使用以下格式：
+
+```
+<type>(<scope>): <description>
+```
+
+### 类型
+
+| 类型       | 用途                           |
+| ---------- | ------------------------------ |
+| `feat`     | 新功能                         |
+| `fix`      | Bug 修复                       |
+| `docs`     | 文档变更                       |
+| `refactor` | 不改变行为的代码重构           |
+| `test`     | 新增或更新测试                 |
+| `chore`    | 构建、CI、依赖或工具链变更     |
+| `style`    | 格式、空白等调整（不改变逻辑） |
+| `perf`     | 性能优化                       |
+
+### 示例
+
+```
+feat(cache): add Redis backend with connection pooling
+fix(database): resolve session leak in context manager
+docs(guides): add module anatomy documentation
+refactor(module): extract manifest parsing into separate module
+test(signal): add async signal dispatch tests
+chore(deps): bump pydantic to 2.12.5
+```
+
+### Scope
+
+请使用模块或子系统名称作为 scope：`cache`、`database`、`module`、`signal`、`cli`、`docs` 等。
+
+## PR 流程
+
+### 1. 创建分支
+
+从 `main` 创建一个功能分支：
+
+```bash
+git checkout -b feat/my-feature
+```
+
+请使用 conventional commit 的类型作为分支前缀：`feat/`、`fix/`、`docs/`、`refactor/`。
+
+### 2. 实现改动
+
+按照上面的编码规范编写代码。保持改动聚焦——每个 PR 只处理一个功能或一个修复。
+
+### 3. 运行测试
+
+```bash
+uv run pytest packages/bedrock/tests/
+```
+
+所有测试都必须通过。
+
+### 4. 运行 Lint 检查
+
+```bash
+uv run ruff check .
+uv run ruff format .
+```
+
+在 commit 之前修复所有 lint 错误。
+
+### 5. Commit
+
+使用 conventional commit message：
+
+```bash
+git add .
+git commit -m "feat(cache): add TTL auto-refresh option"
+```
+
+### 6. Push 并创建 PR
+
+```bash
+git push origin feat/my-feature
+```
+
+在 GitHub 上向 `main` 提交 pull request。请在 PR 描述中：
+
+- 概述改动内容以及原因
+- 引用相关 issue
+- 说明是否存在破坏性变更
+
+### 7. 评审
+
+根据 reviewer 的反馈进行修改。审核通过后，PR 将被合并。
+
+## 下一步
+
+- [Module Anatomy](/docs/guides/module-anatomy) — 详细模块结构
+- [Agent Skills](/docs/getting-started/agent-skills) — AI 助手设置

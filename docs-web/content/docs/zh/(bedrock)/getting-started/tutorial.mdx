@@ -1,44 +1,44 @@
 ---
-title: Tutorial
-description: Build your first Bedrock module from scratch
+title: 教程
+description: 从零开始构建你的第一个 Bedrock 模块
 ---
 
-This tutorial walks you through creating a complete Bedrock module — from an empty directory to a working CLI command. By the end, you'll have a fully functional `inventory` module with a Pydantic entity, a service layer, lifecycle hooks, and a custom command.
+本教程将带你创建一个完整的 Bedrock 模块——从空目录开始，到一个可运行的 CLI 命令结束。完成后，你将得到一个功能完整的 `inventory` 模块，其中包含 Pydantic 实体、服务层、生命周期钩子和自定义命令。
 
-## Prerequisites
+## 前置要求
 
-Before starting, make sure you have:
+开始前，请确保你已经具备：
 
-- Python 3.11+ installed
-- `bedrock` installed (`uv add bedrock` or `pip install bedrock`)
-- A basic understanding of Python and Pydantic
+- 已安装 Python 3.11+
+- 已安装 `bedrock`（`uv add bedrock` 或 `pip install bedrock`）
+- 对 Python 和 Pydantic 有基本了解
 
-Verify your installation:
+验证安装：
 
 ```bash
 bedrock -v
 ```
 
-## Step 1: Create the Module Directory
+## 步骤 1：创建模块目录
 
-Every Bedrock module lives in its own Python package. Create the directory structure:
+每个 Bedrock 模块都位于自己的 Python 包中。先创建目录结构：
 
 ```bash
 mkdir -p inventory
 touch inventory/__init__.py
 ```
 
-Add a docstring to `inventory/__init__.py`:
+为 `inventory/__init__.py` 添加 docstring：
 
 ```python
 """Inventory — product inventory management module."""
 ```
 
-## Step 2: Write the Manifest
+## 步骤 2：编写 Manifest
 
-The `manifest.yaml` file declares the module's identity. It's the only required file beyond `__init__.py`.
+`manifest.yaml` 文件用于声明模块身份。除 `__init__.py` 之外，它是唯一必需的文件。
 
-Create `inventory/manifest.yaml`:
+创建 `inventory/manifest.yaml`：
 
 ```yaml
 title: inventory
@@ -47,18 +47,18 @@ version: 0.1.0
 commands: "commands:app"
 ```
 
-| Field | Purpose |
+| 字段 | 用途 |
 |-------|---------|
-| `title` | Human-friendly name used in logs and error messages |
-| `description` | Short description of the module |
-| `version` | Semantic version string |
-| `commands` | Relative import path to a Typer app (we'll create this later) |
+| `title` | 用于日志和错误消息的人类可读名称 |
+| `description` | 模块的简短描述 |
+| `version` | 语义化版本字符串 |
+| `commands` | 指向 Typer app 的相对导入路径（稍后会创建） |
 
-## Step 3: Define Entities
+## 步骤 3：定义实体
 
-Entities are Pydantic models for business data. They carry no persistence logic — just validation and structure.
+实体是用于承载业务数据的 Pydantic 模型。它们不包含持久化逻辑，只负责校验和结构定义。
 
-Create `inventory/entities.py`:
+创建 `inventory/entities.py`：
 
 ```python
 """Inventory entities."""
@@ -83,11 +83,11 @@ class ProductSummary(BaseModel):
     quantity: int
 ```
 
-## Step 4: Write the Service
+## 步骤 4：编写 Service
 
-The service layer contains business logic. Services receive data as entities or primitives — never HTTP objects or ORM instances.
+服务层承载业务逻辑。Service 接收的数据应是实体或基础类型，而不是 HTTP 对象或 ORM 实例。
 
-Create `inventory/service.py`:
+创建 `inventory/service.py`：
 
 ```python
 """Inventory business logic."""
@@ -131,11 +131,11 @@ class InventoryService:
         return product
 ```
 
-## Step 5: Add Bootstrap Hooks
+## 步骤 5：添加 Bootstrap Hooks
 
-Bootstrap hooks let you run code at specific lifecycle stages. The registry calls them automatically.
+Bootstrap hooks 允许你在特定生命周期阶段运行代码，注册表会自动调用它们。
 
-Create `inventory/bootstrap.py`:
+创建 `inventory/bootstrap.py`：
 
 ```python
 """Inventory lifecycle hooks."""
@@ -164,15 +164,15 @@ def on_shutdown(registry: ModuleRegistry, app: AppConfig) -> None:
     print("[inventory] Module shutting down")
 ```
 
-## Step 6: Register and Verify
+## 步骤 6：注册并验证
 
-Verify the module loads correctly using the Bedrock CLI:
+使用 Bedrock CLI 验证模块是否能正确加载：
 
 ```bash
 bedrock app inspect inventory
 ```
 
-Expected output:
+预期输出：
 
 ```
 ✓ Manifest for 'inventory' is valid.
@@ -181,7 +181,7 @@ Expected output:
 ! No models submodule found.
 ```
 
-Check module details:
+查看模块详情：
 
 ```bash
 bedrock app info inventory
@@ -198,9 +198,9 @@ Models       No
 Commands     commands:app
 ```
 
-## Step 7: Add a CLI Command
+## 步骤 7：添加 CLI 命令
 
-Create `inventory/commands.py` with a Typer app:
+创建 `inventory/commands.py` 并定义一个 Typer app：
 
 ```python
 """Inventory CLI commands."""
@@ -247,9 +247,9 @@ def adjust(
     typer.echo(f"✓ {sku} quantity now: {product.quantity}")
 ```
 
-## Step 8: Run the Command
+## 步骤 8：运行命令
 
-Use `bedrock run` to execute your module's commands:
+使用 `bedrock run` 执行模块命令：
 
 ```bash
 # Add a product
@@ -265,7 +265,7 @@ bedrock run --app inventory list
 bedrock run --app inventory adjust WIDGET-001 -10
 ```
 
-Expected output:
+预期输出：
 
 ```
 ✓ Added 'Widget' (SKU: WIDGET-001, qty: 50)
@@ -275,7 +275,7 @@ Expected output:
 ✓ WIDGET-001 quantity now: 40
 ```
 
-## Final Module Structure
+## 最终模块结构
 
 ```
 inventory/
@@ -287,12 +287,12 @@ inventory/
 └── commands.py        # CLI commands (add, list, adjust)
 ```
 
-## Next Steps
+## 下一步
 
-Now that you've built your first module, explore these topics:
+现在你已经构建好了第一个模块，可以继续了解以下主题：
 
-- **[Module Anatomy](/docs/guides/module-anatomy)** — Deep dive into every module file and its purpose
-- **[Cache Guide](/docs/guides/cache)** — Add caching to your module with Bedrock's cache system
-- **[Signals Guide](/docs/guides/signals)** — Emit and listen for events across modules
-- **[CLI Reference](/docs/guides/cli)** — Full reference for all Bedrock CLI commands
-- **[Database Guide](/docs/guides/database)** — Add persistent storage with SQLAlchemy and Alembic
+- **[Module Anatomy](/docs/guides/module-anatomy)** —— 深入了解每个模块文件及其用途
+- **[Cache Guide](/docs/guides/cache)** —— 使用 Bedrock 的 cache system 为模块添加缓存
+- **[Signals Guide](/docs/guides/signals)** —— 在模块之间发送和监听事件
+- **[CLI Reference](/docs/guides/cli)** —— 所有 Bedrock CLI 命令的完整参考
+- **[Database Guide](/docs/guides/database)** —— 使用 SQLAlchemy 和 Alembic 添加持久化存储

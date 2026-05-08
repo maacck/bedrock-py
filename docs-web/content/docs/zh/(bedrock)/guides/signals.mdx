@@ -1,0 +1,391 @@
+---
+title: 信号
+description: 源自 Blinker、支持同步/异步与生命周期信号的事件系统
+---
+
+Bedrock 内置了一套源自 [Blinker](https://blinker.readthedocs.io/) 的信号系统，用于提供解耦的事件通知，并原生支持异步。其实现位于 `bedrock.signal` 下。
+
+## 快速开始
+
+创建一个信号，连接一个接收器，然后发送它：
+
+```python
+from bedrock.signal import Signal
+
+# 1. Create a signal
+order_placed = Signal("Emitted when an order is placed")
+
+# 2. Connect a receiver
+def notify_warehouse(sender, **kwargs):
+    print(f"New order from {sender}: {kwargs['order_id']}")
+
+order_placed.connect(notify_warehouse)
+
+# 3. Send the signal
+order_placed.send(current_app, order_id="ORD-001")
+# Output: New order from <App>: ORD-001
+```
+
+这就是核心使用循环。本页其余部分会介绍高级模式、异步分发、生命周期信号以及常见陷阱。
+
+## 创建信号
+
+### Signal
+
+所有信号的基类。可以传入一个可选文档字符串：
+
+```python
+from bedrock.signal import Signal
+
+user_created = Signal("Emitted after a new user is persisted")
+payment_failed = Signal()  # No docstring
+```
+
+### NamedSignal
+
+`Signal` 的子类，带有用于标识和调试的 `name` 属性：
+
+```python
+from bedrock.signal import NamedSignal
+
+audit_event = NamedSignal("app.audit", doc="Emitted for auditable actions")
+print(audit_event.name)  # "app.audit"
+```
+
+### Namespace
+
+一个类似字典的容器，用于将名称映射到 `NamedSignal` 实例。信号会在首次访问时创建：
+
+```python
+from bedrock.signal import Namespace
+
+my_signals = Namespace()
+
+# Creates a NamedSignal named "user.login" on first call
+login_signal = my_signals.signal("user.login", doc="User logged in")
+
+# Second call returns the same instance
+assert my_signals.signal("user.login") is login_signal
+```
+
+### 默认命名空间
+
+用于快速创建信号的模块级便捷接口：
+
+```python
+from bedrock.signal import signal
+
+# Creates or retrieves a NamedSignal in the default namespace
+cache_miss = signal("cache.miss", doc="Cache key not found")
+```
+
+## 连接接收器
+
+接收器是任意可调用对象：它以 `sender` 作为第一个位置参数，并接收可选的关键字参数。
+
+### `signal.connect(receiver, sender, weak)`
+
+直接连接一个接收器：
+
+```python
+from bedrock.signal import Signal
+
+user_created = Signal()
+
+def log_user(sender, **kwargs):
+    print(f"User created by {sender}: {kwargs.get('username')}")
+
+# Connect to all senders
+user_created.connect(log_user)
+
+# Connect to a specific sender only
+user_created.connect(log_user, sender=admin_module)
+
+# Disable weak referencing (needed for closures/lambdas)
+user_created.connect(log_user, weak=False)
+```
+
+### `@signal.connect_via(sender)` 装饰器
+
+可将其作为装饰器使用，以便为特定 sender 连接接收器：
+
+```python
+from bedrock.signal import Signal
+
+invoice_created = Signal()
+
+@invoice_created.connect_via(billing_module)
+def handle_invoice(sender, **kwargs):
+    """Only called when billing_module sends invoice_created."""
+    process_invoice(kwargs["invoice"])
+```
+
+`connect_via` 装饰器默认使用 `weak=False`，因此适合与模块级函数安全配合使用。
+
+### 断开连接
+
+显式移除接收器：
+
+```python
+user_created.disconnect(log_user)
+
+# Disconnect from a specific sender only
+user_created.disconnect(log_user, sender=admin_module)
+```
+
+## 发送信号
+
+### `signal.send(sender, **kwargs)`
+
+同步调用所有已连接的接收器。返回 `(receiver, return_value)` 元组列表：
+
+```python
+results = order_placed.send(current_app, order_id="ORD-042")
+
+for receiver, result in results:
+    print(f"{receiver.__name__} returned {result}")
+```
+
+### `signal.send_robust(sender, **kwargs)`
+
+与 `send()` 类似，但会捕获接收器抛出的 `Exception` 子类，而不是继续向外传播。异常会作为结果列表中的返回值返回：
+
+```python
+results = order_placed.send_robust(current_app, order_id="ORD-042")
+
+for receiver, result in results:
+    if isinstance(result, Exception):
+        log.error(f"{receiver.__name__} failed: {result}")
+    else:
+        log.info(f"{receiver.__name__} returned {result}")
+```
+
+### `await signal.asend(sender, **kwargs)`
+
+`send()` 的异步对应版本。它会原生等待异步接收器；同步接收器则会通过 `asyncio.to_thread` 自动适配：
+
+```python
+results = await order_placed.asend(current_app, order_id="ORD-042")
+```
+
+### `await signal.asend_robust(sender, **kwargs)`
+
+`send_robust()` 的异步等价版本——会捕获接收器抛出的异常：
+
+```python
+results = await order_placed.asend_robust(current_app, order_id="ORD-042")
+```
+
+## 发送者过滤
+
+默认情况下，使用 `sender=Signal.ANY`（默认值）连接的接收器会对任意 sender 响应。你可以通过 sender 过滤来限制哪些 sender 能触发某个接收器。
+
+### Signal.ANY
+
+表示“任意 sender”的哨兵值。这也是默认值：
+
+```python
+from bedrock.signal import Signal
+
+data_changed = Signal()
+
+# These two are equivalent:
+data_changed.connect(handler)
+data_changed.connect(handler, sender=Signal.ANY)
+```
+
+### 特定发送者
+
+传入一个具体 sender，就只会接收来自该对象的信号：
+
+```python
+from bedrock.signal import Signal
+
+data_changed = Signal()
+
+@data_changed.connect_via(inventory_module)
+def on_inventory_change(sender, **kwargs):
+    """Only fires when inventory_module sends data_changed."""
+    refresh_stock(kwargs["item_id"])
+
+# This triggers the receiver:
+data_changed.send(inventory_module, item_id="SKU-99")
+
+# This does NOT:
+data_changed.send(billing_module, item_id="SKU-99")
+```
+
+### 检查是否存在接收器
+
+在执行高开销操作之前，可以先检查是否有人在监听：
+
+```python
+if data_changed.has_receivers_for(inventory_module):
+    payload = build_expensive_payload()
+    data_changed.send(inventory_module, payload=payload)
+```
+
+## 上下文管理器
+
+### `signal.connected_to(receiver, sender)`
+
+在 `with` 代码块的持续时间内临时连接一个接收器。对测试尤其有用：
+
+```python
+from bedrock.signal import Signal
+
+user_created = Signal()
+received = []
+
+def capture(sender, **kwargs):
+    received.append(kwargs)
+
+with user_created.connected_to(capture):
+    user_created.send(app, username="alice")
+
+assert len(received) == 1
+
+# Receiver is disconnected after the block
+user_created.send(app, username="bob")
+assert len(received) == 1  # Still 1
+```
+
+### `signal.muted()`
+
+临时抑制所有信号分发。静默期间不会调用任何接收器：
+
+```python
+from bedrock.signal import Signal
+
+audit = Signal()
+
+@audit.connect_via(Signal.ANY, weak=False)
+def log_audit(sender, **kwargs):
+    write_audit_log(kwargs)
+
+# Suppress during bulk import
+with audit.muted():
+    for record in bulk_data:
+        import_record(record)
+        audit.send(importer, action="import")  # Silently ignored
+
+# Normal dispatch resumes here
+audit.send(importer, action="complete")  # This fires
+```
+
+## 生命周期信号
+
+Bedrock 会在模块生命周期的关键节点发出信号。这些信号定义在 `bedrock.module.signals` 中，并由 `ModuleRegistry` 发送。
+
+| 信号 | 发出时机 | 发送者 | 额外 kwargs |
+|--------|-------------|--------|--------------|
+| `module_loaded` | 模块的 `on_load` 钩子执行完成后 | `AppConfig` 实例 | `registry`, `module`, `config` |
+| `module_ready` | 模块的 `ready` 钩子执行完成后 | `AppConfig` 实例 | `registry`, `module`, `config` |
+| `module_shutdown` | 优雅关闭期间（逆序） | `AppConfig` 实例 | `registry`, `module`, `config` |
+| `registry_ready` | 所有模块都被标记为 ready 后 | `ModuleRegistry` | `registry`, `config` |
+| `registry_shutdown` | registry 开始关闭时 | `ModuleRegistry` | `registry`, `config` |
+
+### 用法
+
+```python
+from bedrock.module.signals import module_ready, registry_ready
+
+@module_ready.connect_via(Signal.ANY, weak=False)
+def on_module_ready(sender, **kwargs):
+    module = kwargs["module"]
+    print(f"Module ready: {module.name}")
+
+@registry_ready.connect_via(Signal.ANY, weak=False)
+def on_all_ready(sender, **kwargs):
+    print("All modules initialized — safe to accept traffic")
+```
+
+### 生命周期顺序
+
+在 `registry.populate(modules)` 期间：
+
+1. 每个模块按依赖顺序安装 → 每个模块触发一次 `module_loaded`
+2. 调用每个模块的 `ready` 钩子 → 每个模块触发一次 `module_ready`
+3. 注册表被标记为 ready → 触发一次 `registry_ready`
+
+在 `registry.shutdown()` 期间：
+
+4. 按**逆序**调用每个模块的 `on_shutdown` 钩子 → 每个模块触发一次 `module_shutdown`
+5. 注册表发出完成信号 → 触发一次 `registry_shutdown`
+
+## 关键陷阱：异步接收器配合同步发送
+
+<Callout type="error">
+当连接了异步接收器时调用 `signal.send()` 会抛出 `RuntimeError`。如果任一接收器可能是异步的，你**必须**使用 `await signal.asend()`。
+</Callout>
+
+```python
+from bedrock.signal import Signal
+
+order_placed = Signal()
+
+# This async receiver looks innocent...
+async def async_handler(sender, **kwargs):
+    await notify_external_service(kwargs["order_id"])
+
+order_placed.connect(async_handler, weak=False)
+
+# THIS RAISES RuntimeError!
+order_placed.send(app, order_id="ORD-001")
+# RuntimeError: Cannot send to an async receiver with send().
+# Use await signal.asend(...) or provide _async_wrapper.
+
+# CORRECT: use asend() in async context
+await order_placed.asend(app, order_id="ORD-001")
+```
+
+如果你的代码库同时包含同步与异步逻辑，建议优先将 `asend()` 作为默认分发方式。它可以无缝处理同步和异步接收器——同步接收器会自动通过 `asyncio.to_thread` 包装。
+
+## 弱引用
+
+默认情况下，接收器会以弱引用形式存储。这意味着：
+
+- **模块级函数** 可以正常工作——它们会在模块生命周期内持续存在。
+- **闭包和 lambda** 如果不传入 `weak=False`，会立即被垃圾回收。
+- **绑定方法** 会通过类似 `WeakMethod` 的包装器进行弱引用——当所属实例被垃圾回收时，接收器会自动断开连接。
+
+### 何时使用 `weak=False`
+
+```python
+# WRONG: closure is immediately garbage collected
+def setup():
+    def handler(sender, **kwargs):
+        print("received")
+    signal.connect(handler)  # handler has no strong reference!
+
+# CORRECT: disable weak refs for closures
+def setup():
+    def handler(sender, **kwargs):
+        print("received")
+    signal.connect(handler, weak=False)
+```
+
+`connect_via` 装饰器默认使用 `weak=False`，因此对常见的装饰器用法来说是安全的。
+
+### 检查连接状态
+
+可使用 `receivers` 属性快速进行布尔检查：
+
+```python
+if order_placed.receivers:
+    print("At least one receiver is connected")
+```
+
+## 反模式
+
+**不要将 `send()` 与异步接收器混用。** 这会抛出 `RuntimeError`。如果代码库中存在异步接收器，应始终使用 `asend()`，或者结合 `has_receivers_for()` 与类型检查进行保护。
+
+**不要依赖接收器的执行顺序。** 默认的 `set_class` 是 Python 无序的 `set`。如果你需要有序分发，请通过 `Signal.set_class` 提供一个有序集合实现。
+
+**不要在热点循环中连接接收器。** 每次 `connect()` 调用都会更新内部 bookkeeping 字典。应在模块加载时连接一次，而不是每个请求都连接。
+
+**不要忘记为闭包传入 `weak=False`。** 一个常见 bug 是：连接闭包或 lambda 时未传 `weak=False`，导致它在任何信号发送之前就被垃圾回收。
+
+**不要把信号用于同步控制流。** 信号适用于通知（发出即忘）。如果你需要依赖返回值来驱动逻辑，请直接调用函数。
+
+**不要手动发送生命周期信号。** 生命周期信号的发出由 `ModuleRegistry` 负责。自行发送 `module_ready` 或 `registry_ready` 会破坏系统不变量。

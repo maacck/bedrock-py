@@ -1,0 +1,106 @@
+---
+title: 模块层级
+description: Bedrock 如何组织项目、子模块与领域模块
+---
+
+Bedrock 将代码组织为三个概念层级：Project、Submodule 和 Domain Module。这个层级是开发约定，而不是运行时强制机制。无论模块位于该层级中的哪个位置，Bedrock 的 `ModuleRegistry` 都会一视同仁地对待它们。
+
+## 三类模块
+
+| 类型 | 是否有 manifest.yaml | 是否参与 Bedrock 生命周期 | 目的 |
+|------|-------------------|-----------------------------------|---------|
+| Project | 可选 | 否（除非它有 manifest） | 应用的组织容器 |
+| Submodule | 是 | 是 | 具备完整 Bedrock 集成的业务级模块 |
+| Domain Module | 否 | 否 | 子模块内部推荐的文件结构约定 |
+
+## Project（项目）
+
+Project 是应用的顶层目录，用作组织容器。
+
+Project 可以是普通 Python package（无 `manifest.yaml`），也可以是 Bedrock 模块（有 `manifest.yaml`）。它通过子目录包含多个 submodules。
+
+```text
+erp/                            # Project
+├── __init__.py
+├── settings.py
+├── oms/                         # Submodule
+│   └── ...
+└── auth/                        # Submodule
+    └── ...
+```
+
+## Submodule（子模块）
+
+Submodule 是参与 Bedrock 模块生命周期的业务级模块。
+
+- 根目录**必须**包含 `manifest.yaml`。
+- 通过 `ModuleRegistry.install()` 或 `ModuleRegistry.populate()` 加载。
+- 可以通过 `depends_on` 声明对其他 submodules 的依赖。
+
+示例 manifest：
+
+```yaml
+title: Order Management System
+description: Handles orders, fulfillment, and returns
+version: 0.1.0
+depends_on:
+  - my_app.auth
+commands: "commands:app"
+```
+
+## Domain Module（领域模块）
+
+Domain Module 是在子模块内部组织代码的推荐开发约定。它**不**包含 `manifest.yaml`，对 Bedrock 的模块系统也是不可见的。
+
+推荐文件集合（均为可选）：
+
+| 文件 | 用途 |
+|------|---------|
+| `entities.py` | 用于校验的 Pydantic models |
+| `service.py` | 业务逻辑 |
+| `exc.py` | 模块异常 |
+
+例如，`oms` 子模块中的 `sales_order/`。
+
+## 目录结构
+
+```text
+my_app/                          # Project
+├── __init__.py
+├── settings.py
+├── oms/                         # Submodule
+│   ├── __init__.py
+│   ├── manifest.yaml
+│   ├── bootstrap.py
+│   ├── sales_order/             # Domain Module
+│   │   ├── __init__.py
+│   │   ├── entities.py
+│   │   └── service.py
+│   └── purchase_order/          # Domain Module
+│       ├── __init__.py
+│       ├── entities.py
+│       └── service.py
+└── auth/                        # Submodule
+    ├── __init__.py
+    ├── manifest.yaml
+    └── ...
+```
+
+## 跨项目依赖
+
+一个独立的运行时项目（例如 `my_app_worker`）可以通过 `depends_on` 直接依赖另一个项目中的子模块（例如 `my_app.oms`）。当两个 package 都在 Python path 上时，`depends_on` 会按正常导入路径进行解析。
+
+```text
+my_app_worker/                   # Another project (e.g., a worker runtime)
+├── __init__.py
+├── manifest.yaml               # depends_on: ["my_app.oms", "my_app.auth"]
+└── ...
+```
+
+## 约定，而非强制
+
+这种层级结构是一种组织约定，不是框架约束。
+
+- Bedrock 的 `ModuleRegistry` 不区分 Project、Submodule 或 Domain Module。
+- 所有带有 `manifest.yaml` 的模块在运行时都会被一视同仁地对待。
+- 这种层级有助于团队以可预测的方式组织代码，但不会影响加载、依赖解析或生命周期行为。

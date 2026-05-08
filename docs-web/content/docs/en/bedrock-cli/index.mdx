@@ -1,0 +1,363 @@
+---
+title: Bedrock CLI (Scaffolding)
+description: Project scaffolding and code generation CLI for Bedrock applications
+---
+
+`bedrock-cli` is the scaffolding companion for Bedrock. It generates new projects, adds modules, and generates domain code — all following Bedrock conventions out of the box.
+
+## Installation
+
+```bash
+uv add bedrock-cli
+```
+
+The CLI registers itself as the `bedrock-cli` command (separate from the runtime `bedrock` command).
+
+## Overview
+
+```bash
+bedrock-cli [OPTIONS] COMMAND [ARGS]
+```
+
+### Command Groups
+
+| Command            | Purpose                                                                                                                                  |
+| ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `bedrock-cli init` | Initialize a new Bedrock [Project](/docs/guides/module-hierarchy#project)                                                                |
+| `bedrock-cli add`  | Add [Submodules](/docs/guides/module-hierarchy#submodule) and [Domain Modules](/docs/guides/module-hierarchy#domain-module) to a project |
+| `bedrock-cli gen`  | Generate code from SQLAlchemy models using templates (extensible)                                                                        |
+
+---
+
+## Initializing a Project (`bedrock-cli init`)
+
+### `bedrock-cli init`
+
+Scaffold a new Bedrock [Project](/docs/guides/module-hierarchy#project) — the top-level application container.
+
+```bash
+bedrock-cli init <name> [OPTIONS]
+```
+
+**Arguments:**
+
+| Argument | Description                                       |
+| -------- | ------------------------------------------------- |
+| `name`   | Project name (used as directory and package name) |
+
+**Options:**
+
+| Option         | Short | Default | Description                                        |
+| -------------- | ----- | ------- | -------------------------------------------------- |
+| `--output-dir` | `-o`  | `.`     | Parent directory where the project will be created |
+| `--overwrite`  |       | `False` | Overwrite existing files                           |
+
+**Generated structure:**
+
+```
+<name>/
+├── pyproject.toml          # uv project with bedrock, fastapi, sqlalchemy, uvicorn
+├── .python-version         # Pins Python 3.12
+├── README.md               # Setup and run instructions
+└── src/<package>/
+    ├── __init__.py
+    ├── manifest.yaml       # Root module manifest
+    ├── models.py           # SQLAlchemy model stubs
+    ├── bootstrap.py        # Lifecycle hooks (on_load, ready, on_shutdown)
+    ├── installation.py     # Installation hooks (pre_install, install, post_install, uninstall)
+    └── exc.py              # Module exception base class
+```
+
+**Example:**
+
+```bash
+$ bedrock-cli init my-saas-app
+
+ℹ Creating project my-saas-app at my-saas-app
+✓ my-saas-app/pyproject.toml
+✓ my-saas-app/.python-version
+✓ my-saas-app/README.md
+✓ my-saas-app/src/my_saas_app/__init__.py
+✓ my-saas-app/src/my_saas_app/manifest.yaml
+✓ my-saas-app/src/my_saas_app/models.py
+✓ my-saas-app/src/my_saas_app/bootstrap.py
+✓ my-saas-app/src/my_saas_app/installation.py
+✓ my-saas-app/src/my_saas_app/exc.py
+
+ℹ Next steps:
+ℹ   cd my-saas-app
+ℹ   uv sync
+```
+
+The project name is automatically converted to a valid Python package identifier (hyphens and spaces become underscores, lowercased).
+
+**Next steps after scaffolding:**
+
+```bash
+cd my-saas-app
+uv sync
+# Start adding submodules:
+bedrock-cli add submodule users src/my_saas_app
+```
+
+---
+
+## Adding to a Project (`bedrock-cli add`)
+
+### `bedrock-cli add submodule`
+
+Generate a new Bedrock [Submodule](/docs/guides/module-hierarchy#submodule) — a business-level module with `manifest.yaml` that participates in Bedrock's lifecycle.
+
+```bash
+bedrock-cli add submodule <name> <path> [OPTIONS]
+```
+
+**Arguments:**
+
+| Argument | Description                                               |
+| -------- | --------------------------------------------------------- |
+| `name`   | Module name in snake_case (e.g. `inventory`, `user_auth`) |
+| `path`   | Target directory where the submodule will be created      |
+
+**Options:**
+
+| Option                                 | Short | Default     | Description                                  |
+| -------------------------------------- | ----- | ----------- | -------------------------------------------- |
+| `--bootstrap` / `--no-bootstrap`       |       | Interactive | Include `bootstrap.py` lifecycle hooks       |
+| `--installation` / `--no-installation` |       | Interactive | Include `installation.py` installation hooks |
+| `--overwrite`                          |       | `False`     | Overwrite existing files                     |
+
+**Generated structure:**
+
+```
+<path>/<name>/
+├── __init__.py
+├── manifest.yaml       # Module identity (title, version)
+├── models.py           # SQLAlchemy model stubs
+├── entities.py         # Pydantic entity stubs
+├── exc.py              # Module exception class
+├── bootstrap.py        # (optional) Lifecycle hooks
+└── installation.py     # (optional) Installation hooks
+```
+
+**Example:**
+
+```bash
+$ bedrock-cli add submodule inventory src/myapp
+
+? Include bootstrap.py (lifecycle hooks)? Yes
+? Include installation.py (installation hooks)? No
+
+ℹ Generating submodule inventory in src/myapp/inventory
+✓ src/myapp/inventory/__init__.py
+✓ src/myapp/inventory/manifest.yaml
+✓ src/myapp/inventory/models.py
+✓ src/myapp/inventory/entities.py
+✓ src/myapp/inventory/exc.py
+✓ src/myapp/inventory/bootstrap.py
+```
+
+**Non-interactive mode:**
+
+```bash
+# Skip prompts with explicit flags
+bedrock-cli add submodule payments src/myapp --bootstrap --no-installation
+```
+
+---
+
+### `bedrock-cli add domain`
+
+Generate a blank [Domain Module](/docs/guides/module-hierarchy#domain-module) skeleton — a code organization unit within a Submodule. Domain Modules do not have a `manifest.yaml`.
+
+```bash
+bedrock-cli add domain <name> <path> [OPTIONS]
+```
+
+**Arguments:**
+
+| Argument | Description                                                   |
+| -------- | ------------------------------------------------------------- |
+| `name`   | Domain module name in snake_case (e.g. `user`, `sales_order`) |
+| `path`   | Target directory where the domain module will be created      |
+
+**Options:**
+
+| Option        | Short | Default | Description              |
+| ------------- | ----- | ------- | ------------------------ |
+| `--overwrite` |       | `False` | Overwrite existing files |
+
+**Generated structure:**
+
+```
+<path>/<name>/
+├── __init__.py
+├── entities.py         # Pydantic entity stubs
+├── service.py          # Service layer stub
+└── exc.py              # Domain exception class
+```
+
+**Example:**
+
+```bash
+$ bedrock-cli add domain sales_order src/myapp/oms
+
+ℹ Generating domain module sales_order in src/myapp/oms/sales_order
+✓ src/myapp/oms/sales_order/__init__.py
+✓ src/myapp/oms/sales_order/entities.py
+✓ src/myapp/oms/sales_order/service.py
+✓ src/myapp/oms/sales_order/exc.py
+```
+
+---
+
+## Code Generation (`bedrock-cli gen`)
+
+Generate code by introspecting a SQLAlchemy model and rendering a template. The command is fully generic — built-in templates (`entity`, `service`) ship with bedrock-cli, and you can add your own.
+
+### `bedrock-cli gen`
+
+```bash
+bedrock-cli gen <template> <model_ref> <path> [OPTIONS]
+```
+
+**Arguments:**
+
+| Argument    | Description                                                                      |
+| ----------- | -------------------------------------------------------------------------------- |
+| `template`  | Template name (e.g. `entity`, `service`, or any custom template)                 |
+| `model_ref` | Model reference in `<module.path>:<ClassName>` format (e.g. `myapp.models:User`) |
+| `path`      | Output directory where `<template>.py` will be written                           |
+
+**Options:**
+
+| Option        | Short | Default                 | Description              |
+| ------------- | ----- | ----------------------- | ------------------------ |
+| `-n`          |       | Derived from class name | Override module slug     |
+| `--overwrite` |       | `False`                 | Overwrite existing files |
+
+**Built-in templates:**
+
+| Template  | Output file  | Description                                               |
+| --------- | ------------ | --------------------------------------------------------- |
+| `entity`  | `entity.py`  | Typed Pydantic entities (Base/Create/Read/Update)         |
+| `service` | `service.py` | Full CRUD service (get/get_by/query/create/update/delete) |
+
+**Examples:**
+
+```bash
+# Generate entities
+$ bedrock-cli gen entity myapp.auth.models:User src/myapp/auth/user
+
+ℹ Generating entity for User in src/myapp/auth/user
+✓ src/myapp/auth/user/entity.py
+
+# Generate service
+$ bedrock-cli gen service myapp.auth.models:User src/myapp/auth/user
+
+ℹ Generating service for User in src/myapp/auth/user
+✓ src/myapp/auth/user/service.py
+
+# Generate from a custom template (e.g. router)
+$ bedrock-cli gen router myapp.auth.models:User src/myapp/auth/user
+
+ℹ Generating router for User in src/myapp/auth/user
+✓ src/myapp/auth/user/router.py
+```
+
+---
+
+### How It Works
+
+1. Resolves the template: checks `_bedrock_gen/<template>.py.j2` first, then built-in templates
+2. Imports the specified SQLAlchemy model at runtime
+3. Introspects all columns (type, nullable, primary key)
+4. Maps SQLAlchemy types to Python types
+5. Renders the template with the model context
+6. Writes `<template>.py` to the output path
+
+**Type mapping:**
+
+| SQLAlchemy Type           | Python Type |
+| ------------------------- | ----------- |
+| INTEGER, BIGINT, SMALLINT | `int`       |
+| FLOAT, DOUBLE, NUMERIC    | `float`     |
+| DECIMAL                   | `Decimal`   |
+| VARCHAR, TEXT, CHAR       | `str`       |
+| BOOLEAN                   | `bool`      |
+| DATETIME, DATE, TIMESTAMP | `datetime`  |
+| JSON, JSONB               | `dict`      |
+
+<Callout type="info">
+  The model's package must be importable from the current directory. Make sure
+  you're in the project root and the package is installed (e.g., via `uv sync`).
+</Callout>
+
+### Custom Templates
+
+Place `<name>.py.j2` files in a `_bedrock_gen/` directory at your project root to add new templates or override built-in ones. You must run `bedrock-cli gen` from the project root for the directory to be detected. See [Custom Gen Templates](./bedrock-cli/custom-templates) for context variables, filters, and examples.
+
+---
+
+## Overwrite Protection
+
+All scaffolding commands have built-in safety:
+
+- **Directory check**: If the target directory exists and is non-empty, the command fails unless `--overwrite` is passed
+- **File check**: Individual existing files are never silently overwritten
+
+```bash
+# This will fail if src/myapp/inventory/ already has files
+bedrock-cli add submodule inventory src/myapp
+
+# Force overwrite
+bedrock-cli add submodule inventory src/myapp --overwrite
+```
+
+---
+
+## Common Workflows
+
+### Starting a New Project
+
+```bash
+# 1. Initialize project
+bedrock-cli init my-project
+cd my-project
+uv sync
+
+# 2. Add your first submodule
+bedrock-cli add submodule users src/my_project --bootstrap
+
+# 3. Add a domain module (blank scaffold)
+bedrock-cli add domain profile src/my_project/users
+
+# 4. After defining models, generate typed code
+bedrock-cli gen entity my_project.users.models:User src/my_project/users/user
+bedrock-cli gen service my_project.users.models:User src/my_project/users/user
+```
+
+### Adding a Submodule to Existing Project
+
+```bash
+# Add submodule skeleton
+bedrock-cli add submodule billing src/my_project --bootstrap --installation
+
+# Add domain modules within it
+bedrock-cli add domain invoice src/my_project/billing
+bedrock-cli add domain payment src/my_project/billing
+
+# Generate entities and service from models
+bedrock-cli gen entity my_project.billing.models:Invoice src/my_project/billing/invoice
+bedrock-cli gen service my_project.billing.models:Invoice src/my_project/billing/invoice
+```
+
+### Using Custom Templates
+
+```bash
+# Place your template in _bedrock_gen/
+# e.g. _bedrock_gen/router.py.j2
+
+# Now use it like any built-in template
+bedrock-cli gen router my_project.users.models:User src/my_project/users/user
+```

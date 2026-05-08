@@ -1,6 +1,0 @@
-{
-  "title": "Guide",
-  "icon": "",
-  "pages": ["architecture", "module-anatomy", "module-hierarchy", "playbooks", "cli", "database", "cache", "signals"],
-  "defaultOpen": true
-}

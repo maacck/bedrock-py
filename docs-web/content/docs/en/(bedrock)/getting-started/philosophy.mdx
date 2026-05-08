@@ -19,13 +19,14 @@ However, Django's heavyweight approach feels over-engineered for non web app use
 
 ### 1. Modular by Default
 
-Every module is a self-contained unit with its own entities, services, exceptions, and lifecycle hooks. Modules organize through explicit dependencies, preventing code coupling and structural chaos.
+Every module is a self-contained unit with its own entities, schemas, services, exceptions, and lifecycle hooks. Modules organize through explicit dependencies, preventing code coupling and structural chaos.
 
 ```text
 bedrock_app/
 ├── __init__.py
 ├── manifest.yaml
 ├── entities.py
+├── schemas.py
 ├── service.py
 ├── exc.py
 └── bootstrap.py

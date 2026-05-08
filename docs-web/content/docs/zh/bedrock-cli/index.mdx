@@ -1,0 +1,362 @@
+---
+title: Bedrock CLI（脚手架）
+description: 用于 Bedrock 应用的项目脚手架与代码生成 CLI
+---
+
+`bedrock-cli` 是 Bedrock 的脚手架配套工具。它可以生成新项目、添加模块，并生成领域代码——默认即遵循 Bedrock 约定。
+
+## 安装
+
+```bash
+uv add bedrock-cli
+```
+
+CLI 会将自己注册为 `bedrock-cli` 命令（与运行时的 `bedrock` 命令分开）。
+
+## 概览
+
+```bash
+bedrock-cli [OPTIONS] COMMAND [ARGS]
+```
+
+### 命令分组
+
+| 命令               | 用途                                                                                                                                        |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bedrock-cli init` | 初始化一个新的 Bedrock [项目](/docs/guides/module-hierarchy#project)                                                                        |
+| `bedrock-cli add`  | 向项目中添加 [子模块](/docs/guides/module-hierarchy#submodule) 和 [领域模块](/docs/guides/module-hierarchy#domain-module)                  |
+| `bedrock-cli gen`  | 使用模板从 SQLAlchemy 模型生成代码（可扩展）                                                                                                |
+
+---
+
+## 初始化项目（`bedrock-cli init`）
+
+### `bedrock-cli init`
+
+为新的 Bedrock [项目](/docs/guides/module-hierarchy#project) 生成脚手架——它是顶层应用容器。
+
+```bash
+bedrock-cli init <name> [OPTIONS]
+```
+
+**参数：**
+
+| 参数   | 说明                            |
+| ------ | ------------------------------- |
+| `name` | 项目名称（用作目录名和包名）    |
+
+**选项：**
+
+| 选项           | 简写  | 默认值  | 说明                               |
+| -------------- | ----- | ------- | ---------------------------------- |
+| `--output-dir` | `-o`  | `.`     | 将创建项目的父目录                 |
+| `--overwrite`  |       | `False` | 覆盖现有文件                       |
+
+**生成的结构：**
+
+```
+<name>/
+├── pyproject.toml          # uv project with bedrock, fastapi, sqlalchemy, uvicorn
+├── .python-version         # Pins Python 3.12
+├── README.md               # Setup and run instructions
+└── src/<package>/
+    ├── __init__.py
+    ├── manifest.yaml       # Root module manifest
+    ├── models.py           # SQLAlchemy model stubs
+    ├── bootstrap.py        # Lifecycle hooks (on_load, ready, on_shutdown)
+    ├── installation.py     # Installation hooks (pre_install, install, post_install, uninstall)
+    └── exc.py              # Module exception base class
+```
+
+**示例：**
+
+```bash
+$ bedrock-cli init my-saas-app
+
+ℹ Creating project my-saas-app at my-saas-app
+✓ my-saas-app/pyproject.toml
+✓ my-saas-app/.python-version
+✓ my-saas-app/README.md
+✓ my-saas-app/src/my_saas_app/__init__.py
+✓ my-saas-app/src/my_saas_app/manifest.yaml
+✓ my-saas-app/src/my_saas_app/models.py
+✓ my-saas-app/src/my_saas_app/bootstrap.py
+✓ my-saas-app/src/my_saas_app/installation.py
+✓ my-saas-app/src/my_saas_app/exc.py
+
+ℹ Next steps:
+ℹ   cd my-saas-app
+ℹ   uv sync
+```
+
+项目名称会自动转换为合法的 Python 包标识符（连字符和空格会变成下划线，并统一转为小写）。
+
+**生成脚手架后的下一步：**
+
+```bash
+cd my-saas-app
+uv sync
+# Start adding submodules:
+bedrock-cli add submodule users src/my_saas_app
+```
+
+---
+
+## 向项目添加内容（`bedrock-cli add`）
+
+### `bedrock-cli add submodule`
+
+生成一个新的 Bedrock [子模块](/docs/guides/module-hierarchy#submodule)——这是一个带有 `manifest.yaml` 的业务级模块，会参与 Bedrock 的生命周期。
+
+```bash
+bedrock-cli add submodule <name> <path> [OPTIONS]
+```
+
+**参数：**
+
+| 参数   | 说明                                                      |
+| ------ | --------------------------------------------------------- |
+| `name` | snake_case 形式的模块名（例如 `inventory`、`user_auth`） |
+| `path` | 将创建子模块的目标目录                                    |
+
+**选项：**
+
+| 选项                                   | 简写  | 默认值      | 说明                                         |
+| -------------------------------------- | ----- | ----------- | -------------------------------------------- |
+| `--bootstrap` / `--no-bootstrap`       |       | 交互式      | 包含 `bootstrap.py` 生命周期钩子             |
+| `--installation` / `--no-installation` |       | 交互式      | 包含 `installation.py` 安装钩子             |
+| `--overwrite`                          |       | `False`     | 覆盖现有文件                                 |
+
+**生成的结构：**
+
+```
+<path>/<name>/
+├── __init__.py
+├── manifest.yaml       # Module identity (title, version)
+├── models.py           # SQLAlchemy model stubs
+├── entities.py         # Pydantic entity stubs
+├── exc.py              # Module exception class
+├── bootstrap.py        # (optional) Lifecycle hooks
+└── installation.py     # (optional) Installation hooks
+```
+
+**示例：**
+
+```bash
+$ bedrock-cli add submodule inventory src/myapp
+
+? Include bootstrap.py (lifecycle hooks)? Yes
+? Include installation.py (installation hooks)? No
+
+ℹ Generating submodule inventory in src/myapp/inventory
+✓ src/myapp/inventory/__init__.py
+✓ src/myapp/inventory/manifest.yaml
+✓ src/myapp/inventory/models.py
+✓ src/myapp/inventory/entities.py
+✓ src/myapp/inventory/exc.py
+✓ src/myapp/inventory/bootstrap.py
+```
+
+**非交互模式：**
+
+```bash
+# Skip prompts with explicit flags
+bedrock-cli add submodule payments src/myapp --bootstrap --no-installation
+```
+
+---
+
+### `bedrock-cli add domain`
+
+生成一个空白的 [领域模块](/docs/guides/module-hierarchy#domain-module) 骨架——它是子模块内部的代码组织单元。领域模块不包含 `manifest.yaml`。
+
+```bash
+bedrock-cli add domain <name> <path> [OPTIONS]
+```
+
+**参数：**
+
+| 参数   | 说明                                                         |
+| ------ | ------------------------------------------------------------ |
+| `name` | snake_case 形式的领域模块名（例如 `user`、`sales_order`）   |
+| `path` | 将创建领域模块的目标目录                                     |
+
+**选项：**
+
+| 选项          | 简写  | 默认值  | 说明         |
+| ------------- | ----- | ------- | ------------ |
+| `--overwrite` |       | `False` | 覆盖现有文件 |
+
+**生成的结构：**
+
+```
+<path>/<name>/
+├── __init__.py
+├── entities.py         # Pydantic entity stubs
+├── service.py          # Service layer stub
+└── exc.py              # Domain exception class
+```
+
+**示例：**
+
+```bash
+$ bedrock-cli add domain sales_order src/myapp/oms
+
+ℹ Generating domain module sales_order in src/myapp/oms/sales_order
+✓ src/myapp/oms/sales_order/__init__.py
+✓ src/myapp/oms/sales_order/entities.py
+✓ src/myapp/oms/sales_order/service.py
+✓ src/myapp/oms/sales_order/exc.py
+```
+
+---
+
+## 代码生成（`bedrock-cli gen`）
+
+通过分析 SQLAlchemy 模型并渲染模板来生成代码。该命令完全通用——`bedrock-cli` 内置了模板（`entity`、`service`），你也可以添加自己的模板。
+
+### `bedrock-cli gen`
+
+```bash
+bedrock-cli gen <template> <model_ref> <path> [OPTIONS]
+```
+
+**参数：**
+
+| 参数        | 说明                                                                 |
+| ----------- | -------------------------------------------------------------------- |
+| `template`  | 模板名称（例如 `entity`、`service`，或任意自定义模板）              |
+| `model_ref` | `<module.path>:<ClassName>` 格式的模型引用（例如 `myapp.models:User`） |
+| `path`      | 将写入 `<template>.py` 的输出目录                                    |
+
+**选项：**
+
+| 选项          | 简写  | 默认值                  | 说明             |
+| ------------- | ----- | ----------------------- | ---------------- |
+| `-n`          |       | 由类名派生              | 覆盖模块 slug    |
+| `--overwrite` |       | `False`                 | 覆盖现有文件     |
+
+**内置模板：**
+
+| 模板      | 输出文件     | 说明                                                     |
+| --------- | ------------ | -------------------------------------------------------- |
+| `entity`  | `entity.py`  | 类型化的 Pydantic 实体（Base/Create/Read/Update）        |
+| `service` | `service.py` | 完整的 CRUD service（get/get_by/query/create/update/delete） |
+
+**示例：**
+
+```bash
+# Generate entities
+$ bedrock-cli gen entity myapp.auth.models:User src/myapp/auth/user
+
+ℹ Generating entity for User in src/myapp/auth/user
+✓ src/myapp/auth/user/entity.py
+
+# Generate service
+$ bedrock-cli gen service myapp.auth.models:User src/myapp/auth/user
+
+ℹ Generating service for User in src/myapp/auth/user
+✓ src/myapp/auth/user/service.py
+
+# Generate from a custom template (e.g. router)
+$ bedrock-cli gen router myapp.auth.models:User src/myapp/auth/user
+
+ℹ Generating router for User in src/myapp/auth/user
+✓ src/myapp/auth/user/router.py
+```
+
+---
+
+### 工作原理
+
+1. 解析模板：先检查 `_bedrock_gen/<template>.py.j2`，再检查内置模板
+2. 在运行时导入指定的 SQLAlchemy 模型
+3. 分析所有列（类型、nullable、主键）
+4. 将 SQLAlchemy 类型映射为 Python 类型
+5. 使用模型上下文渲染模板
+6. 将 `<template>.py` 写入输出路径
+
+**类型映射：**
+
+| SQLAlchemy 类型          | Python 类型 |
+| ------------------------ | ----------- |
+| INTEGER, BIGINT, SMALLINT | `int`      |
+| FLOAT, DOUBLE, NUMERIC   | `float`     |
+| DECIMAL                  | `Decimal`   |
+| VARCHAR, TEXT, CHAR      | `str`       |
+| BOOLEAN                  | `bool`      |
+| DATETIME, DATE, TIMESTAMP | `datetime` |
+| JSON, JSONB              | `dict`      |
+
+<Callout type="info">
+  模型所在的包必须能从当前目录导入。请确保你位于项目根目录，并且该包已安装（例如通过 `uv sync`）。
+</Callout>
+
+### 自定义模板
+
+将 `<name>.py.j2` 文件放在项目根目录的 `_bedrock_gen/` 目录中，即可添加新模板或覆盖内置模板。你必须从项目根目录运行 `bedrock-cli gen`，这样才能检测到该目录。有关上下文变量、过滤器和示例，请参见 [自定义生成模板](./bedrock-cli/custom-templates)。
+
+---
+
+## 覆盖保护
+
+所有脚手架命令都内置了安全保护：
+
+- **目录检查**：如果目标目录已存在且非空，除非传入 `--overwrite`，否则命令会失败
+- **文件检查**：已有文件绝不会被悄悄覆盖
+
+```bash
+# This will fail if src/myapp/inventory/ already has files
+bedrock-cli add submodule inventory src/myapp
+
+# Force overwrite
+bedrock-cli add submodule inventory src/myapp --overwrite
+```
+
+---
+
+## 常见工作流
+
+### 开始一个新项目
+
+```bash
+# 1. Initialize project
+bedrock-cli init my-project
+cd my-project
+uv sync
+
+# 2. Add your first submodule
+bedrock-cli add submodule users src/my_project --bootstrap
+
+# 3. Add a domain module (blank scaffold)
+bedrock-cli add domain profile src/my_project/users
+
+# 4. After defining models, generate typed code
+bedrock-cli gen entity my_project.users.models:User src/my_project/users/user
+bedrock-cli gen service my_project.users.models:User src/my_project/users/user
+```
+
+### 向现有项目添加子模块
+
+```bash
+# Add submodule skeleton
+bedrock-cli add submodule billing src/my_project --bootstrap --installation
+
+# Add domain modules within it
+bedrock-cli add domain invoice src/my_project/billing
+bedrock-cli add domain payment src/my_project/billing
+
+# Generate entities and service from models
+bedrock-cli gen entity my_project.billing.models:Invoice src/my_project/billing/invoice
+bedrock-cli gen service my_project.billing.models:Invoice src/my_project/billing/invoice
+```
+
+### 使用自定义模板
+
+```bash
+# Place your template in _bedrock_gen/
+# e.g. _bedrock_gen/router.py.j2
+
+# Now use it like any built-in template
+bedrock-cli gen router my_project.users.models:User src/my_project/users/user
+```

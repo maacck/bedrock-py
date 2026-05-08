@@ -1,77 +1,60 @@
 import Link from 'next/link';
 import { ArrowRight, Database, Shield, Terminal, Blocks, Sparkles, FileCode, Workflow, Bot } from 'lucide-react';
-import {Installation} from "@/components/installation";
+import { Installation } from '@/components/installation';
+import { getHomepageTexts } from '@/i18n/homepage';
 
-const deepDiveFeatures = [
-  {
-    icon: Database,
-    title: 'Database Management',
-    tagline: 'Production-grade persistence layer',
-    bullets: [
-      'Modular Database Migration — Alembic-powered, per-module migration management',
-      'Model CRUD Observer — Automatic event hooks for create, update, delete operations',
-      'Thread-safe Global Session — Async-compatible session scoping with context-local isolation'
-    ],
-    codeSnippet: 'with db.session() as session:\n    session.add(product)'
-  },
-  {
-    icon: Workflow,
-    title: 'Lifecycle & Hooks',
-    tagline: 'Predictable module orchestration',
-    bullets: [
-      'Manifest-driven Loading — Declarative dependency resolution and load ordering',
-      'Bootstrap Hooks — on_load, ready, on_shutdown for each module',
-      'Hot-reload Support — Development-friendly module reloading without restart'
-    ],
-    codeSnippet: 'def ready():\n    """Called when all modules are ready"""'
-  },
-  {
-    icon: Bot,
-    title: 'AI Integration',
-    tagline: 'Built for the AI era',
-    bullets: [
-      'Module Skills (Playbooks) — Structured context files that help AI understand module usage',
-      'Native SKILL Support — First-class integration with AI agent skill systems',
-      'Spec-driven Generation — Define module spec, let AI scaffold the implementation'
-    ],
-    codeSnippet: 'bedrock app generate --spec module.yaml'
-  }
-];
+export default async function HomePage({
+  params,
+}: {
+  params: Promise<{ lang: string }>;
+}) {
+  const { lang } = await params;
+  const t = getHomepageTexts(lang);
 
-const features = [
-  {
-    icon: Blocks,
-    title: 'Modular Architecture',
-    description: 'Manifest-driven module loading with explicit dependency management and lifecycle hooks.',
-  },
-  {
-    icon: Database,
-    title: 'Database Layer',
-    description: 'SQLAlchemy 2.0 integration with declarative models, session management, and Alembic migrations.',
-  },
-  {
-    icon: Shield,
-    title: 'Signal System',
-    description: 'Event system with sync/async support for decoupled communication between modules.',
-  },
-  {
-    icon: Terminal,
-    title: 'CLI Tools',
-    description: 'Typer-based CLI for module and database management. Generate, validate, and run.',
-  },
-  {
-    icon: Sparkles,
-    title: 'AI Ready',
-    description: 'Built-in agent skills for assisted development. AI-powered code generation and guidance out of the box.',
-  },
-  {
-    icon: FileCode,
-    title: 'Spec-driven',
-    description: 'Define your module spec in a few lines and start building. Minimal boilerplate, maximum productivity.',
-  },
-];
+  const deepDiveFeatures = [
+    {
+      icon: Database,
+      title: t.deepDiveDbTitle,
+      tagline: t.deepDiveDbTagline,
+      bullets: [
+        `${t.deepDiveDbBullet1Title} — ${t.deepDiveDbBullet1Desc}`,
+        `${t.deepDiveDbBullet2Title} — ${t.deepDiveDbBullet2Desc}`,
+        `${t.deepDiveDbBullet3Title} — ${t.deepDiveDbBullet3Desc}`,
+      ],
+      codeSnippet: 'with db.session() as session:\n    session.add(product)',
+    },
+    {
+      icon: Workflow,
+      title: t.deepDiveLifecycleTitle,
+      tagline: t.deepDiveLifecycleTagline,
+      bullets: [
+        `${t.deepDiveLifecycleBullet1Title} — ${t.deepDiveLifecycleBullet1Desc}`,
+        `${t.deepDiveLifecycleBullet2Title} — ${t.deepDiveLifecycleBullet2Desc}`,
+        `${t.deepDiveLifecycleBullet3Title} — ${t.deepDiveLifecycleBullet3Desc}`,
+      ],
+      codeSnippet: 'def ready():\n    """Called when all modules are ready"""',
+    },
+    {
+      icon: Bot,
+      title: t.deepDiveAiTitle,
+      tagline: t.deepDiveAiTagline,
+      bullets: [
+        `${t.deepDiveAiBullet1Title} — ${t.deepDiveAiBullet1Desc}`,
+        `${t.deepDiveAiBullet2Title} — ${t.deepDiveAiBullet2Desc}`,
+        `${t.deepDiveAiBullet3Title} — ${t.deepDiveAiBullet3Desc}`,
+      ],
+      codeSnippet: 'bedrock app generate --spec module.yaml',
+    },
+  ];
 
-export default function HomePage() {
+  const features = [
+    { icon: Blocks, title: t.featureModularTitle, description: t.featureModularDesc },
+    { icon: Database, title: t.featureDatabaseTitle, description: t.featureDatabaseDesc },
+    { icon: Shield, title: t.featureSignalTitle, description: t.featureSignalDesc },
+    { icon: Terminal, title: t.featureCliTitle, description: t.featureCliDesc },
+    { icon: Sparkles, title: t.featureAiTitle, description: t.featureAiDesc },
+    { icon: FileCode, title: t.featureSpecTitle, description: t.featureSpecDesc },
+  ];
   return (
     <main className="relative overflow-hidden">
       <div className="pointer-events-none absolute inset-0 select-none">
@@ -85,19 +68,18 @@ export default function HomePage() {
             <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-primary opacity-75" />
             <span className="relative inline-flex h-2 w-2 rounded-full bg-primary" />
           </span>
-          Production-ready Python framework
+          {t.badge}
         </div>
 
         <h1 className="animate-fade-in-up animation-delay-100 text-center text-5xl font-bold tracking-tight text-foreground sm:text-6xl md:text-7xl lg:text-8xl">
-          Build with
+          {t.heroTitle}
           <span className="block bg-gradient-to-r from-primary via-primary/80 to-primary/60 bg-clip-text text-transparent">
             Bedrock
           </span>
         </h1>
 
         <p className="animate-fade-in-up animation-delay-200 mt-6 max-w-2xl text-center text-lg text-muted-foreground sm:text-xl md:text-2xl">
-          A modular Python application framework for teams that want predictable architecture, 
-          strong conventions, and tooling that works with humans and AI.
+          {t.heroSubtitle}
         </p>
 
         <div className="animate-fade-in-up animation-delay-300 mt-10 flex flex-col gap-4 sm:flex-row">
@@ -105,16 +87,16 @@ export default function HomePage() {
             href="/docs"
             className="group inline-flex items-center justify-center gap-2 rounded-lg bg-primary px-6 py-3 text-sm font-medium text-primary-foreground shadow-lg shadow-primary/25 transition-all hover:shadow-xl hover:shadow-primary/30 hover:-translate-y-0.5"
           >
-            Get Started
+            {t.ctaGetStarted}
             <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-1" />
           </Link>
           <a
-            href="https://github.com/user/bedrock"
+            href="https://github.com/maacck/bedrock"
             target="_blank"
             rel="noopener noreferrer"
             className="inline-flex items-center justify-center gap-2 rounded-lg border bg-background/50 px-6 py-3 text-sm font-medium text-foreground backdrop-blur-sm transition-all hover:bg-accent hover:-translate-y-0.5"
           >
-            View on GitHub
+            {t.ctaGithub}
           </a>
         </div>
         <div className="animate-fade-in-up animation-delay-400 mt-16 w-full max-w-2xl overflow-hidden rounded-xl border bg-card/50 shadow-2xl backdrop-blur-sm">
@@ -166,10 +148,10 @@ export default function HomePage() {
         <div className="mx-auto max-w-6xl">
           <div className="mb-16 text-center">
             <h2 className="text-3xl font-bold tracking-tight sm:text-4xl md:text-5xl">
-              Everything you need
+              {t.featuresTitle}
             </h2>
             <p className="mt-4 text-lg text-muted-foreground">
-              Production-ready subsystems built with clean architecture in mind.
+              {t.featuresSubtitle}
             </p>
           </div>
 
@@ -198,10 +180,10 @@ export default function HomePage() {
         <div className="mx-auto max-w-7xl">
           <div className="mb-16 text-center">
             <h2 className="text-3xl font-bold tracking-tight sm:text-4xl md:text-5xl">
-              Deep Dive
+              {t.deepDiveTitle}
             </h2>
             <p className="mt-4 text-lg text-muted-foreground">
-              Powerful primitives designed for complex, modular applications.
+              {t.deepDiveSubtitle}
             </p>
           </div>
 
@@ -250,10 +232,10 @@ export default function HomePage() {
         <div className="mx-auto max-w-4xl">
           <div className="grid grid-cols-2 gap-8 md:grid-cols-4">
             {[
-              { value: '7,440+', label: 'Lines of Code' },
-              { value: '5', label: 'Core Subsystems' },
-              { value: '100%', label: 'Type Annotated' },
-              { value: '0', label: 'HTTP Dependencies' },
+              { value: '7,440+', label: t.statLinesOfCode },
+              { value: '5', label: t.statSubsystems },
+              { value: '100%', label: t.statTypeAnnotated },
+              { value: '0', label: t.statHttpDeps },
             ].map((stat, index) => (
               <div
                 key={stat.label}
@@ -271,18 +253,18 @@ export default function HomePage() {
       <section className="relative px-4 py-20 md:py-32">
         <div className="mx-auto max-w-2xl text-center">
           <h2 className="text-3xl font-bold tracking-tight sm:text-4xl">
-            Ready to build?
+            {t.ctaTitle}
           </h2>
           <p className="mt-4 text-lg text-muted-foreground">
-            Get started with Bedrock in minutes. Install, configure, and ship.
+            {t.ctaSubtitle}
           </p>
           <div className="mt-8 flex flex-col items-center justify-center gap-4">
             <Installation />
             <Link
-              href="/docs/guides/installation"
+              href="/docs/getting-started/installation"
               className="group inline-flex items-center justify-center gap-2 rounded-lg bg-primary px-6 py-3 text-sm font-medium text-primary-foreground shadow-lg shadow-primary/25 transition-all hover:shadow-xl hover:shadow-primary/30 hover:-translate-y-0.5"
             >
-              Installation Guide
+              {t.ctaInstallationGuide}
               <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-1" />
             </Link>
           </div>

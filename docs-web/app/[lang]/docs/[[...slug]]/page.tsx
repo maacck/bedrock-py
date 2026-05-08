@@ -1,4 +1,4 @@
-import { getPageImage, getPageMarkdownUrl, source } from '@/lib/source';
+import { getPageImage, getPageMarkdownUrl, source } from "@/lib/source";
 import {
   DocsBody,
   DocsDescription,
@@ -6,20 +6,20 @@ import {
   DocsTitle,
   MarkdownCopyButton,
   ViewOptionsPopover,
-} from 'fumadocs-ui/layouts/notebook/page';
-import { notFound } from 'next/navigation';
-import { getMDXComponents } from '@/components/mdx';
-import type { Metadata } from 'next';
-import { createRelativeLink } from 'fumadocs-ui/mdx';
-import { gitConfig } from '@/lib/shared';
-import { ServerCodeBlock } from 'fumadocs-ui/components/codeblock.rsc';
-import {HighlightBlock} from "@/components/highlight-block";
-import {Mermaid} from "@/components/mermaid";
-import { DynamicLink } from 'fumadocs-core/dynamic-link';
-import { File, Folder, Files } from 'fumadocs-ui/components/files';
+} from "fumadocs-ui/layouts/notebook/page";
+import { notFound } from "next/navigation";
+import { getMDXComponents } from "@/components/mdx";
+import type { Metadata } from "next";
+import { createRelativeLink } from "fumadocs-ui/mdx";
+import { gitConfig } from "@/lib/shared";
+import { ServerCodeBlock } from "fumadocs-ui/components/codeblock.rsc";
+import { HighlightBlock } from "@/components/highlight-block";
+import { Mermaid } from "@/components/mermaid";
+import { DynamicLink } from "fumadocs-core/dynamic-link";
+import { File, Folder, Files } from "fumadocs-ui/components/files";
 
 export default async function Page(props: {
-    params: Promise<{ lang: string; slug?: string[] }>;
+  params: Promise<{ lang: string; slug?: string[] }>;
 }) {
   const params = await props.params;
   const page = source.getPage(params.slug, params.lang);
@@ -31,7 +31,9 @@ export default async function Page(props: {
   return (
     <DocsPage toc={page.data.toc} full={page.data.full}>
       <DocsTitle>{page.data.title}</DocsTitle>
-      <DocsDescription className="mb-0">{page.data.description}</DocsDescription>
+      <DocsDescription className="mb-0">
+        {page.data.description}
+      </DocsDescription>
       <div className="flex flex-row gap-2 items-center border-b pb-6">
         <MarkdownCopyButton markdownUrl={markdownUrl} />
         <ViewOptionsPopover
@@ -45,11 +47,11 @@ export default async function Page(props: {
             // this allows you to link to other pages with relative file paths
             a: createRelativeLink(source, page, DynamicLink),
             CodeBlock: ServerCodeBlock,
-              HighlightBlock,
-              Mermaid,
-              File,
-              Folder,
-                Files,
+            HighlightBlock,
+            Mermaid,
+            File,
+            Folder,
+            Files,
           })}
         />
       </DocsBody>
@@ -61,7 +63,9 @@ export async function generateStaticParams() {
   return source.generateParams();
 }
 
-export async function generateMetadata(props: PageProps<'/[lang]/docs/[[...slug]]'>): Promise<Metadata> {
+export async function generateMetadata(
+  props: PageProps<"/[lang]/docs/[[...slug]]">,
+): Promise<Metadata> {
   const params = await props.params;
   const page = source.getPage(params.slug, params.lang);
   if (!page) notFound();

@@ -1,0 +1,487 @@
+---
+title: 数据库
+description: 提供迁移、session 管理和查询工具的 SQLAlchemy 2.0 数据库层
+---
+
+Bedrock 内置了一套 SQLAlchemy 2.0 数据库层，用于处理 engine 初始化、上下文局部 session、声明式模型以及 Alembic 迁移。整个子系统位于 `bedrock.database` 下。
+
+## 快速开始
+
+定义一个模型，初始化数据库，然后开始查询：
+
+```python
+from bedrock.database import db, BedrockModel
+from sqlalchemy import Column, String, Integer
+
+class Product(BedrockModel):
+    __tablename__ = "products"
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String(100), nullable=False)
+
+# Initialize once at process start
+db.init()
+
+# Use the context-local session
+with db.session as session:
+    product = Product(name="Widget")
+    session.add(product)
+    session.commit()
+
+    # Query back
+    all_products = session.query(Product).all()
+```
+
+这就是核心使用循环。本页其余部分会介绍配置、完整 API 以及高级模式。
+
+## 配置
+
+数据库设置使用带有 `DATABASE_` 前缀的环境变量。`DbSettings` 是 Pydantic 的 `BaseSettings` 子类，因此会自动从环境中读取配置。
+
+### 环境变量
+
+| 变量 | 类型 | 默认值 | 说明 |
+|----------|------|---------|-------------|
+| `DATABASE_TYPE` | `str` | `"sqlite"` | 数据库方言（`sqlite`、`postgresql`、`mysql`） |
+| `DATABASE_DRIVER` | `str` | `"pysqlite"` | DBAPI 驱动（`pysqlite`、`psycopg2`、`pymysql`） |
+| `DATABASE_HOST` | `str \| None` | `None` | 数据库主机（非 SQLite 时必需） |
+| `DATABASE_PORT` | `int \| None` | `None` | 数据库端口（非 SQLite 时必需） |
+| `DATABASE_USERNAME` | `str \| None` | `None` | 数据库用户名 |
+| `DATABASE_PASSWORD` | `str \| None` | `None` | 数据库密码 |
+| `DATABASE_MAX_CONNECTIONS` | `int` | `10` | 连接池最大连接数 |
+| `DATABASE_POOL_TIMEOUT` | `int` | `30` | 等待连接的秒数 |
+| `DATABASE_POOL_SIZE` | `int` | `10` | 持续维护的连接数 |
+| `DATABASE_POOL_RECYCLE` | `int` | `1800` | 回收连接前的秒数 |
+| `DATABASE_SCHEMA` | `str` | `"bedrock.db"` | 数据库名称或文件路径 |
+
+### SQLite
+
+```bash
+export DATABASE_TYPE=sqlite
+export DATABASE_DRIVER=pysqlite
+export DATABASE_SCHEMA=bedrock.db
+```
+
+对于内存数据库，将 `DATABASE_SCHEMA` 设置为 `:memory:`。
+
+### PostgreSQL
+
+```bash
+export DATABASE_TYPE=postgresql
+export DATABASE_DRIVER=psycopg2
+export DATABASE_HOST=localhost
+export DATABASE_PORT=5432
+export DATABASE_USERNAME=myuser
+export DATABASE_PASSWORD=mypassword
+export DATABASE_SCHEMA=myapp
+```
+
+### MySQL
+
+```bash
+export DATABASE_TYPE=mysql
+export DATABASE_DRIVER=pymysql
+export DATABASE_HOST=localhost
+export DATABASE_PORT=3306
+export DATABASE_USERNAME=root
+export DATABASE_PASSWORD=secret
+export DATABASE_SCHEMA=myapp
+```
+
+### 通过代码配置
+
+将 `DbSettings` 实例直接传给 `db.init()`：
+
+```python
+from bedrock.database import db, DbSettings
+
+settings = DbSettings(
+    TYPE="postgresql",
+    DRIVER="psycopg2",
+    HOST="localhost",
+    PORT=5432,
+    USERNAME="admin",
+    PASSWORD="secret",
+    SCHEMA="myapp",
+)
+
+db.init(settings=settings)
+```
+
+你也可以完全覆盖连接 URL：
+
+```python
+db.init(url="postgresql+psycopg2://admin:secret@localhost:5432/myapp")
+```
+
+## DatabaseManager
+
+`db` 单例是一个 `DatabaseManager` 实例。它持有 engine、session factory 和 settings。所有访问都通过该对象进行。
+
+### API 参考
+
+| 方法 / 属性 | 签名 | 说明 |
+|-------------------|-----------|-------------|
+| `db.init()` | `init(url: str \| None = None, settings: DbSettings \| None = None)` | 初始化 engine 和 session factory。在进程启动时调用一次。 |
+| `db.engine` | `property → Engine` | SQLAlchemy engine。未初始化时会抛出 `DatabaseNotConfiguredError`。 |
+| `db.session` | `property → Session` | 当前上下文局部 session。在某个上下文中首次访问时创建。 |
+| `db.session_factory` | `property → SessionFactory` | 底层 session factory。 |
+| `db.settings` | `property → DbSettings` | 解析后的数据库 settings。 |
+| `db.set_session(session)` | `set_session(session: Session)` | 将现有 session 绑定到当前执行上下文。 |
+| `db.clear_session()` | `clear_session()` | 清除当前上下文局部 session 绑定。 |
+
+### 错误处理
+
+在调用 `db.init()` 之前访问 `db.engine`、`db.session` 或 `db.settings` 会抛出 `DatabaseNotConfiguredError`。使用这些属性前务必先初始化数据库。
+
+## Session 管理
+
+Bedrock 使用由 `ContextVar` 支撑的上下文局部 session。每个执行上下文（线程、异步任务、请求）都会自动获得自己的 session。
+
+### 工作方式
+
+`SessionFactory` 对 SQLAlchemy 的 `sessionmaker` 做了封装。当你访问 `db.session` 时，它会检查 `ContextVar` 中是否已有 session。若不存在，就创建一个并存储进去。在同一上下文中的后续访问会返回同一个 session。
+
+```python
+from bedrock.database import db
+
+db.init()
+
+# First access creates a session
+session = db.session
+session.add(Product(name="Widget"))
+session.commit()
+
+# Same session within the same context
+same_session = db.session
+assert session is same_session
+```
+
+### 绑定外部 Session
+
+当你使用会自行管理 session 的框架（例如 FastAPI 的依赖注入）时，可以绑定一个现有 session：
+
+```python
+from bedrock.database import db
+
+# Bind a session from an external source
+db.set_session(framework_session)
+
+# Now db.session returns the bound session
+product = db.session.query(Product).first()
+
+# Clean up when done
+db.clear_session()
+```
+
+### 清理 Session
+
+请求或任务结束时务必清理 session，以防止陈旧数据残留：
+
+```python
+from bedrock.database import db
+
+try:
+    # Process request...
+    result = db.session.query(Product).all()
+finally:
+    db.clear_session()
+```
+
+## BedrockModel
+
+所有 Bedrock 模型都继承自 `BedrockModel`，它将 SQLAlchemy 的 `DeclarativeBase` 与用于常见操作的 `CrudMixin` 结合在一起。
+
+### 内置方法
+
+| 方法 / 属性 | 说明 |
+|-------------------|-------------|
+| `.dict()` | 返回包含所有列值的字典 |
+| `.update(**kwargs)` | 使用关键字参数设置属性 |
+| `.delete()` | 从其所在 session 中删除该实例 |
+| `.verbose_name` | 以可读标签形式返回类名 |
+| `.__repr__()` | 返回 `<ClassName #id>` 格式 |
+
+### 示例
+
+```python
+from bedrock.database import BedrockModel
+from sqlalchemy import Column, String, Integer
+
+class Product(BedrockModel):
+    __tablename__ = "products"
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String(100), nullable=False)
+    price = Column(Integer, default=0)
+
+# Create and use
+product = Product(name="Widget", price=999)
+product.dict()  # {"id": None, "name": "Widget", "price": 999}
+
+# Update attributes
+product.update(price=1499)
+
+# Delete (must be attached to a session)
+session.add(product)
+session.commit()
+product.delete()
+session.commit()
+```
+
+### 默认值
+
+BedrockModel 会监听 `init` 事件，并在构造函数结束前应用列默认值。可调用默认值会以实例作为参数进行调用。这意味着即使你显式传入 kwargs，默认值也会被一致地设置。
+
+## 查询构建器
+
+`search_filter_sort_paginate` 函数可构建带有过滤、排序、分页和自动 join 的查询。它返回一个包含 `items`、`total` 和 `page_info` 的字典。
+
+### 基本用法
+
+```python
+from bedrock.database.service import search_filter_sort_paginate
+
+result = search_filter_sort_paginate(
+    db_session=db.session,
+    model=Product,
+    filter_specs=[
+        {"field": "name", "op": "ilike", "value": "%widget%"},
+    ],
+    sort_key="name",
+    sort_dir="asc",
+    page=1,
+    limit=20,
+)
+
+result["items"]     # List of Product instances
+result["total"]     # Total count matching filters
+result["page_info"] # Pagination metadata
+```
+
+### 过滤操作符
+
+| 操作符 | 符号 | 说明 |
+|----------|--------|-------------|
+| 相等 | `==`, `eq` | 精确匹配 |
+| 不等于 | `!=`, `neq` | 不相等 |
+| 大于 | `>`, `gt` | 严格大于 |
+| 小于 | `<`, `lt` | 严格小于 |
+| 大于等于 | `>=`, `ge` | 大于或等于 |
+| 小于等于 | `<=`, `le` | 小于或等于 |
+| Like | `like` | SQL LIKE 模式匹配 |
+| 不区分大小写的 Like | `ilike` | 不区分大小写的 LIKE |
+| 非 ilike | `not_ilike` | 取反的不区分大小写 LIKE |
+| 属于 | `in` | 值在列表中 |
+| 不属于 | `not_in` | 值不在列表中 |
+| 区间 | `between` | 值位于两个边界之间 |
+| 为空 | `is_null` | 列为 NULL |
+| 非空 | `is_not_null` | 列不为 NULL |
+| 任一匹配 | `any` | 关系字段存在任意匹配的关联对象 |
+| 非任一匹配 | `not_any` | 对 any 的取反 |
+| 关系匹配 | `has` | 标量关系匹配 |
+| 文本搜索 | `text_search` | 在关联模型上进行全文搜索 |
+| 模糊搜索 | `fuzzy_search` | 不区分大小写的子串匹配 |
+
+### 布尔组合器
+
+使用 `or` 和 `and` 组合多个过滤条件：
+
+```python
+filter_specs = {
+    "or": [
+        {"field": "name", "op": "ilike", "value": "%widget%"},
+        {"field": "price", "op": "<", "value": 100},
+    ]
+}
+
+filter_specs = {
+    "and": [
+        {"field": "name", "op": "ilike", "value": "%widget%"},
+        {"field": "price", "op": ">=", "value": 50},
+    ]
+}
+```
+
+### 排序
+
+将 `sort_key` 作为字符串或元组列表传入：
+
+```python
+# Single sort
+sort_key="name"
+sort_dir="desc"
+
+# Multiple sorts
+sort_key=[("name", "asc"), ("price", "desc")]
+```
+
+### 分页
+
+通过 `page`、`limit` 和 `show_all` 控制结果：
+
+```python
+result = search_filter_sort_paginate(
+    db_session=db.session,
+    model=Product,
+    page=2,       # Second page
+    limit=10,     # 10 items per page
+)
+
+# Or fetch everything
+result = search_filter_sort_paginate(
+    db_session=db.session,
+    model=Product,
+    show_all=True,
+)
+```
+
+`page_info` 字典包含：
+
+| 键 | 说明 |
+|-----|-------------|
+| `total` | 匹配记录总数 |
+| `limit` | 每页条目数 |
+| `offset` | 当前偏移量 |
+| `page` | 当前页码 |
+| `has_more` | 是否还有更多页面 |
+| `paginated` | 是否启用了分页 |
+
+### 关联模型过滤
+
+可通过点号语法对 join 进行过滤，或通过冒号语法使用 `any()` / `has()` 跨关系过滤：
+
+```python
+# Dot notation: joins the related model
+{"field": "category.name", "op": "eq", "value": "Electronics"}
+
+# Colon notation: uses any() for collections, has() for scalars
+{"field": "category:name", "op": "eq", "value": "Electronics"}
+```
+
+## 迁移
+
+Bedrock 对 Alembic 做了按模块分支的封装。每个应用都有自己的 Alembic 分支，并以其导入路径作为标识。`MigrationsManager` 负责处理版本创建、升级、降级和 schema stamping。
+
+完整的迁移 CLI 参考见 [CLI 参考 — 数据库命令](/docs/guides/cli#database-commands-bedrock-db)。
+
+### 通过代码使用
+
+```python
+from bedrock.database.migrations_manager import MigrationsManager
+
+migrations = MigrationsManager(
+    registry=apps,
+    database_url=db.settings.SQLALCHEMY_DATABASE_URI,
+)
+
+# Create a new revision
+migrations.revision("myapp.users", "add email column")
+
+# Apply migrations
+migrations.upgrade("myapp.users")
+
+# Check current state
+migrations.current("myapp.users")
+
+# View history
+history = migrations.get_history("myapp.users")
+```
+
+### 分支归属
+
+每个应用的 migrations 目录都会在操作前进行审计。如果某个版本文件声明的分支标签与应用导入路径不匹配，就会抛出 `BranchOwnershipError`。这可以防止跨应用的版本树污染。
+
+### 首次安装
+
+当应用还没有任何现有版本时，`ensure_schema()` 会根据 SQLAlchemy metadata 创建所有表，并将该分支 stamp 到 head。这样就避免了为全新应用执行迁移脚本。
+
+## 模型观察器
+
+观察器系统会挂接到 SQLAlchemy 的 `before_flush` 事件，在模型被插入、更新或删除时调用回调。
+
+### 事件标识符
+
+| 标识符 | 触发时机 |
+|------------|------------|
+| `on_insert` | 新实例被加入 session 时 |
+| `on_update` | 现有实例被修改时 |
+| `on_delete` | 实例被标记为删除时 |
+
+### 注册观察器
+
+使用 `@observes_model` 装饰器：
+
+```python
+from bedrock.database import BedrockModel
+from bedrock.database.observer import observes_model, observer
+from sqlalchemy import Column, Integer, String
+
+class Catalog(BedrockModel):
+    __tablename__ = "catalog"
+    id = Column(Integer, primary_key=True)
+    name = Column(String(100))
+
+@observes_model(Catalog, "on_insert", "on_delete")
+def log_catalog_changes(session, target, identifier):
+    print(f"Catalog {target.id} was {identifier}")
+```
+
+回调会接收三个参数：session、模型实例，以及事件标识符字符串。
+
+### 自定义观察器实例
+
+可通过 `observer` 关键字传入自定义 `ModelObserver`：
+
+```python
+from bedrock.database.observer import ModelObserver
+
+custom_observer = ModelObserver()
+
+@observes_model(Catalog, "on_insert", observer=custom_observer)
+def handle_insert(session, target, identifier):
+    # Only fires on the custom observer
+    pass
+```
+
+### 弱引用
+
+观察器回调会以弱引用形式存储。绑定方法会使用 `WeakMethod` 包装器，以防止内存泄漏。如果拥有该绑定方法的对象被垃圾回收，对应回调会被静默跳过。
+
+## 架构
+
+数据库模块按职责拆分为多个聚焦文件：
+
+```
+bedrock/database/
+├── __init__.py            # Public exports
+├── base.py                # BedrockModel (DeclarativeBase + CrudMixin)
+├── config.py              # DbSettings (env-prefixed BaseSettings)
+├── connection.py          # Engine and session factory builders
+├── filters.py             # Filter operators and boolean combinators
+├── manager.py             # DatabaseManager singleton (db)
+├── migrations/            # Alembic env.py and script.py.mako
+├── migrations_manager.py  # Per-module Alembic orchestration
+├── observer.py            # Model lifecycle observer
+├── service.py             # search_filter_sort_paginate query builder
+├── session_factory.py     # Context-local sessions via ContextVar
+└── utils.py               # Model registry helpers
+```
+
+## 反模式
+
+**不要多次调用 `db.init()`。** engine 和 session factory 在所有路径上都不保证幂等。应在进程启动时初始化一次。
+
+**不要在初始化前访问 `db.session`。** 这会抛出 `DatabaseNotConfiguredError`。务必先调用 `db.init()`。
+
+**不要忘记清理 session。** 陈旧 session 会占用数据库连接，也可能返回过期数据。请在每次请求或任务结束时使用 `db.clear_session()`。
+
+**不要在 service 或 model 层中放入 HTTP 类型。** Request 和 Response 对象应位于适配器边界，而不应进入业务逻辑。
+
+**不要绕过 `ModuleRegistry.install()` 来执行迁移。** registry 会处理依赖顺序和生命周期钩子，手动加载模块会跳过这些机制。
+
+**不要硬编码数据库 URL。** 使用环境变量或 `DbSettings`，让配置保持在代码之外。
+
+**不要直接为新配置使用 `BaseSettings`。** 应继承 `LazySettings` 以保留延迟初始化特性。
+
+**不要在核心代码中导入 `contrib` 模块。** 核心运行时不能依赖 contrib 包。

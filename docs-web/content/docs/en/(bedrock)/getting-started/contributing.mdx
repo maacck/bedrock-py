@@ -13,7 +13,7 @@ Bedrock welcomes contributions. This guide covers the development workflow, codi
 2. Clone your fork locally:
 
 ```bash
-git clone https://github.com/<your-username>/bedrock.git
+git clone https://github.com/maacck/bedrock-py.git
 cd bedrock
 ```
 
@@ -149,14 +149,14 @@ from .entities import ModuleManifest
 from bedrock.database import db
 ```
 
-## Module Conventions
+## Contrib Module Conventions
 
 When creating or modifying Bedrock modules, follow the standard module anatomy:
 
 ### File Structure
 
 ```
-modules/<name>/
+contrib/<name>/
 ├── __init__.py
 ├── manifest.yaml    # Module identity and dependencies
 ├── entities.py      # Pydantic models for validation
@@ -167,7 +167,7 @@ modules/<name>/
 
 ### Manifest Requirements
 
-Every module must have a `manifest.yaml` with at minimum:
+Every contrib module must have a `manifest.yaml` with at minimum:
 
 ```yaml
 title: my_module
@@ -175,17 +175,6 @@ version: 0.1.0
 ```
 
 Optional fields: `description`, `depends_on`, `commands`.
-
-### Layer Boundaries
-
-These boundaries are mandatory:
-
-| Rule | Description |
-|------|-------------|
-| API → Services | API layers call services, never the reverse |
-| No ORM in services | Service files must not import SQLAlchemy directly |
-| No HTTP in services | Service files must not import Request, Response, or framework types |
-| Framework code at edges | HTTP-specific code belongs in adapter/API layers only |
 
 ### Exception Pattern
 
@@ -208,16 +197,16 @@ Bedrock follows [Conventional Commits](https://www.conventionalcommits.org/). Ev
 
 ### Types
 
-| Type | Use For |
-|------|---------|
-| `feat` | New features |
-| `fix` | Bug fixes |
-| `docs` | Documentation changes |
+| Type       | Use For                                    |
+| ---------- | ------------------------------------------ |
+| `feat`     | New features                               |
+| `fix`      | Bug fixes                                  |
+| `docs`     | Documentation changes                      |
 | `refactor` | Code restructuring without behavior change |
-| `test` | Adding or updating tests |
-| `chore` | Build, CI, dependency, or tooling changes |
-| `style` | Formatting, whitespace (no logic change) |
-| `perf` | Performance improvements |
+| `test`     | Adding or updating tests                   |
+| `chore`    | Build, CI, dependency, or tooling changes  |
+| `style`    | Formatting, whitespace (no logic change)   |
+| `perf`     | Performance improvements                   |
 
 ### Examples
 
@@ -295,5 +284,4 @@ Address reviewer feedback. Once approved, the PR will be merged.
 ## Next Steps
 
 - [Module Anatomy](/docs/guides/module-anatomy) — Detailed module structure
-- [Architecture](/docs/guides/architecture) — Core principles and design
 - [Agent Skills](/docs/getting-started/agent-skills) — AI assistant setup

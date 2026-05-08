@@ -1,0 +1,385 @@
+---
+title: 模块结构
+description: 标准 Bedrock 模块结构
+---
+
+## 标准模块结构
+
+第一阶段围绕应用级的 `modules/` 目录构建。
+当一个模块包含 `manifest.yaml` 文件时，它就是可加载的。
+
+```files
+bedrock_app/
+├── playbook/
+│   └──PLAYBOOK.md
+├── __init__.py
+├── manifest.yaml
+├── models.py
+├── entities.py
+├── service.py
+├── exc.py
+└── bootstrap.py
+```
+
+## 文件说明
+
+| 文件 | 必需 | 说明 |
+|------|----------|-------------|
+| `__init__.py` | 是 | 标准 Python 模块文件 |
+| `manifest.yaml` | 是 | 模块声明与元数据 |
+| `models.py` | 否 | 数据模型与持久化 |
+| `entities.py` | 否 | 业务实体 |
+| `service.py` | 否 | 业务逻辑层 |
+| `exc.py` | 否 | 模块专用异常 |
+| `bootstrap.py` | 否 | 生命周期 hooks |
+| `commands.py` | 否 | 模块 Typer app |
+
+
+## 模块清单
+
+Bedrock 正在统一采用 `manifest.yaml`。
+
+```yaml
+title: My Bedrock App
+description: An app building on Bedrock
+version: 0.1.0
+depends_on:
+  - users
+commands: "commands:app"
+```
+
+### 关键字段
+
+- `title`：（必需）用于日志和错误消息的人类可读显示名
+- `description`：（可选）模块的简短描述
+- `version`：（可选，默认值为 `"unknown"`）模块版本字符串
+- `depends_on`：（可选，默认值为 `[]`）当前模块依赖的导入路径有序列表
+- `commands`：（可选）指向 Typer app 的相对导入路径，例如 `"commands:app"`
+
+## 文件说明与示例
+
+### `manifest.yaml`
+
+manifest 用于声明模块的标识、版本、依赖以及可选的 CLI 入口。这是除 `__init__.py` 之外唯一**必需**的文件。
+
+```yaml
+title: inventory
+description: Product inventory management
+version: 0.1.0
+depends_on:
+  - products
+  - warehouse
+commands: "commands:app"
+```
+
+### `entities.py`
+
+用于请求/响应校验和业务数据传输的 Pydantic models。它们不同于 ORM models —— 不包含持久化逻辑。
+
+```python
+from pydantic import BaseModel, Field
+
+
+class ProductCreate(BaseModel):
+    """Input schema for creating a product."""
+
+    name: str = Field(..., min_length=1, max_length=100)
+    sku: str = Field(..., pattern=r"^[A-Z0-9\-]+$")
+    price: int = Field(..., ge=0, description="Price in cents")
+
+
+class ProductResponse(BaseModel):
+    """Output schema for product queries."""
+
+    id: int
+    name: str
+    sku: str
+    price: int
+```
+
+### `service.py`
+
+业务逻辑层。service 接收 Pydantic entities 或原始类型数据——绝不直接接收 HTTP request 对象或 ORM instances。
+
+```python
+from bedrock.database import db
+
+from .entities import ProductCreate, ProductResponse
+from .models import Product
+
+
+class InventoryService:
+    """Inventory business operations."""
+
+    def create_product(self, data: ProductCreate) -> ProductResponse:
+        """Create a new product in the inventory."""
+        product = Product(name=data.name, sku=data.sku, price=data.price)
+        db.session.add(product)
+        db.session.commit()
+        return ProductResponse(
+            id=product.id, name=product.name, sku=product.sku, price=product.price
+        )
+
+    def get_product(self, product_id: int) -> ProductResponse | None:
+        """Retrieve a product by ID."""
+        product = db.session.query(Product).get(product_id)
+        if product is None:
+            return None
+        return ProductResponse(
+            id=product.id, name=product.name, sku=product.sku, price=product.price
+        )
+```
+
+### `exc.py`
+
+模块专用异常。所有异常都继承自 `BedrockExc`，并声明 `detail` 类属性，以确保错误报告一致。
+
+```python
+from bedrock.exc import BedrockExc
+
+
+class ProductNotFoundError(BedrockExc):
+    """Raised when a requested product does not exist."""
+
+    detail = "Product not found"
+
+
+class DuplicateSkuError(BedrockExc):
+    """Raised when a product SKU already exists."""
+
+    detail = "A product with this SKU already exists"
+```
+
+### `bootstrap.py`
+
+由 registry 在特定阶段调用的生命周期 hooks。每个 hook 都会接收 `ModuleRegistry` 和模块的 `AppConfig`。
+
+```python
+from bedrock.module.registry import ModuleRegistry
+from bedrock.module.entities import AppConfig
+
+
+def on_load(registry: ModuleRegistry, app: AppConfig) -> None:
+    """Called when this module is first loaded.
+
+    Use for registering signal receivers, setting up module-level state,
+    or validating configuration.
+    """
+    print(f"Module '{app.name}' loaded (v{app.manifest.version})")
+
+
+def ready(registry: ModuleRegistry, app: AppConfig) -> None:
+    """Called after ALL modules have been loaded.
+
+    Use for cross-module setup that depends on other modules being available.
+    """
+    print(f"Module '{app.name}' ready")
+
+
+def on_shutdown(registry: ModuleRegistry, app: AppConfig) -> None:
+    """Called during graceful shutdown (reverse dependency order).
+
+    Use for cleanup: closing connections, flushing buffers, releasing resources.
+    """
+    print(f"Module '{app.name}' shutting down")
+```
+
+### `commands.py`
+
+可选的 Typer app，用于提供模块专属 CLI commands。在 manifest 中通过 `commands: "commands:app"` 引用。
+
+```python
+import typer
+
+app = typer.Typer(help="Inventory management commands")
+
+
+@app.command()
+def sync(source: str = typer.Argument(..., help="External source to sync from")):
+    """Sync inventory from an external source."""
+    typer.echo(f"Syncing inventory from {source}...")
+
+
+@app.command()
+def audit():
+    """Run an inventory audit check."""
+    typer.echo("Running audit...")
+```
+
+## Manifest 字段参考
+
+| 字段 | 类型 | 必需 | 默认值 | 说明 |
+|-------|------|----------|---------|-------------|
+| `title` | `str` | 是 | — | 用于日志和错误的人类可读显示名 |
+| `description` | `str \| None` | 否 | `None` | 模块的简短描述 |
+| `version` | `str` | 否 | `"unknown"` | 模块版本字符串（建议使用 semver） |
+| `depends_on` | `list[str]` | 否 | `[]` | 当前模块依赖的模块导入路径有序列表 |
+| `commands` | `str \| None` | 否 | `None` | 指向 Typer app 的相对导入路径，例如 `"commands:app"` |
+
+manifest 会在加载时由 `ModuleManifest` Pydantic model 进行校验。必需字段缺失或字段无效时，会抛出 `InvalidManifestError`。
+
+## 生命周期 Hooks
+
+Bedrock 模块会参与由 `ModuleRegistry` 管理的三阶段生命周期。Hooks 是定义在 `bootstrap.py` 中的可选函数。
+
+### Hook 签名
+
+所有 hooks 都接收两个参数：
+
+```python
+def hook_name(registry: ModuleRegistry, app: AppConfig) -> None: ...
+```
+
+- `registry` — 管理所有模块的 `ModuleRegistry` 实例
+- `app` — 当前模块的 `AppConfig`（包含 manifest、package 信息和状态）
+
+### 调用顺序
+
+```
+install("module_a")
+  ├── Install dependencies (recursive)
+  ├── on_load(registry, app)        ← per-module, in dependency order
+  └── Signal: module_loaded
+
+mark_ready()
+  ├── ready(registry, app)          ← per-module, in install order
+  ├── Signal: module_ready          ← per-module
+  └── Signal: registry_ready        ← once, after all modules
+
+shutdown()
+  ├── on_shutdown(registry, app)    ← per-module, REVERSE install order
+  ├── Signal: module_shutdown       ← per-module
+  └── Signal: registry_shutdown     ← once, after all modules
+```
+
+### Hook 说明
+
+| Hook | 阶段 | 说明 |
+|------|-------|-------------|
+| `on_load` | 安装 | 模块刚被加载。注册 signal receivers、校验配置、初始化模块状态。 |
+| `ready` | 就绪 | 所有模块都已加载。可以安全访问其他模块并执行跨模块初始化。 |
+| `on_shutdown` | 关闭 | 优雅拆除。关闭连接、刷新缓冲区、释放资源。 |
+
+### Signals
+
+每次生命周期转换都会发出一个外部代码可观察的 signal：
+
+| Signal | 发出时机 | Payload |
+|--------|---------------|---------|
+| `module_loaded` | `on_load` hook 之后 | `registry`, `module`, `config` |
+| `module_ready` | `ready` hook 之后 | `registry`, `module`, `config` |
+| `module_shutdown` | `on_shutdown` hook 之后 | `registry`, `module`, `config` |
+| `registry_ready` | 所有模块就绪后 | `registry`, `config` |
+| `registry_shutdown` | 所有模块关闭后 | `registry`, `config` |
+
+## 最小模块示例
+
+一个完整、可直接复制粘贴的模块示例，包含所有必需文件：
+
+```files
+my_module/
+├── __init__.py
+├── manifest.yaml
+├── entities.py
+├── service.py
+├── exc.py
+└── bootstrap.py
+```
+
+**`my_module/__init__.py`**
+
+```python
+"""My Module — a minimal Bedrock module."""
+```
+
+**`my_module/manifest.yaml`**
+
+```yaml
+title: My Module
+description: A minimal example module
+version: 0.1.0
+```
+
+**`my_module/entities.py`**
+
+```python
+from pydantic import BaseModel
+
+
+class Greeting(BaseModel):
+    """A simple greeting entity."""
+
+    message: str
+    recipient: str
+```
+
+**`my_module/service.py`**
+
+```python
+from .entities import Greeting
+
+
+class GreetingService:
+    """Service that produces greetings."""
+
+    def greet(self, name: str) -> Greeting:
+        """Create a greeting for the given name."""
+        return Greeting(message=f"Hello, {name}!", recipient=name)
+```
+
+**`my_module/exc.py`**
+
+```python
+from bedrock.exc import BedrockExc
+
+
+class GreetingError(BedrockExc):
+    """Raised when a greeting cannot be produced."""
+
+    detail = "Failed to produce greeting"
+```
+
+**`my_module/bootstrap.py`**
+
+```python
+from bedrock.module.registry import ModuleRegistry
+from bedrock.module.entities import AppConfig
+
+
+def on_load(registry: ModuleRegistry, app: AppConfig) -> None:
+    """Module loaded — initialize state."""
+    pass
+
+
+def ready(registry: ModuleRegistry, app: AppConfig) -> None:
+    """All modules ready — safe for cross-module work."""
+    pass
+
+
+def on_shutdown(registry: ModuleRegistry, app: AppConfig) -> None:
+    """Shutdown — clean up resources."""
+    pass
+```
+
+**用法：**
+
+```python
+from bedrock.module.registry import apps
+
+# Install and ready the module
+apps.populate(["my_module"])
+
+# Access the module
+module = apps.get("my_module")
+print(module.manifest.title)  # "My Module"
+```
+
+## 加载器流程
+
+运行时加载器规划为以下几个阶段：
+
+1. **discover** — 扫描模块根目录并收集 manifests
+2. **validate** — 检查 schema、重复项、缺失依赖和循环依赖
+3. **order** — 计算一个确定性的、遵循依赖关系的加载顺序
+4. **import** — 通过声明的 package paths 惰性导入模块
+5. **initialize** — 运行轻量级生命周期 hooks
