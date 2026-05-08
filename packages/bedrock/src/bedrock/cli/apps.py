@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass, field
+from importlib.util import find_spec
 
 import typer
 from rich.console import Console
@@ -20,11 +22,137 @@ apps = typer.Typer(
 )
 
 
+@dataclass
+class InspectResult:
+    """Result of a basic module inspection."""
+
+    import_path: str
+    manifest_valid: bool = False
+    module_loads: bool = False
+    has_bootstrap: bool = False
+    has_models: bool = False
+    installation_valid: bool = False
+    errors: list[str] = field(default_factory=list)
+
+
+def _status_icon(passed: bool, *, optional: bool = False) -> str:
+    """Return a colored status icon for Rich table display."""
+    if passed:
+        return "[bold green]✓[/bold green]"
+    return "[dim]-[/dim]" if optional else "[bold red]✗[/bold red]"
+
+
 def _check_installation_hooks(func: Callable):
     if not inspect_func.func_accepts_kwargs(func):
         raise InvalidModuleCallableError(
             f"Installation hook '{func.__module__}.{func.__name__}' must accept **kwargs for future extensibility."
         )
+
+
+def _run_basic_inspect(import_path: str, console: Console) -> InspectResult:
+    """Validate manifest, loadability, submodules, and installation hooks with console output."""
+    result = InspectResult(import_path=import_path)
+
+    try:
+        load_manifest(import_path)
+        result.manifest_valid = True
+        console.print(f"[bold green]✓[/bold green] Manifest for ''[bold]{import_path}[/bold]'' is valid.")
+    except InvalidManifestError as exc:
+        result.errors.append(f"Manifest validation failed: {exc}")
+        console.print(f"[bold red]✗[/bold red] Manifest validation failed: {exc}")
+        return result
+
+    try:
+        app_config = build_app_config(import_path)
+        result.module_loads = True
+        console.print(f"[bold green]✓[/bold green] Module ''[bold]{import_path}[/bold]'' loads successfully.")
+
+        if app_config.bootstrap_module:
+            result.has_bootstrap = True
+            console.print("[bold green]✓[/bold green] Bootstrap submodule is available.")
+        else:
+            console.print("[bold yellow]![/bold yellow] No bootstrap submodule found.")
+
+        if app_config.models_module:
+            result.has_models = True
+            console.print("[bold green]✓[/bold green] Models submodule is available.")
+        else:
+            console.print("[bold yellow]![/bold yellow] No models submodule found.")
+    except ModuleError as exc:
+        result.errors.append(f"Module load failed: {exc}")
+        console.print(f"[bold red]✗[/bold red] Module load failed: {exc}")
+        return result
+
+    try:
+        installation = load_optional_callable(f"{app_config.name}.installation:install")
+        if not installation:
+            result.errors.append(f"No 'install' function found in installation.py for {app_config.name}.")
+            console.print(
+                f"[bold red]✗[/bold red] No 'install' function found in installation.py for {app_config.name}."
+            )
+            return result
+        _check_installation_hooks(installation)
+        pre_install = load_optional_callable(f"{app_config.name}.installation:pre_install")
+        if pre_install:
+            _check_installation_hooks(pre_install)
+        installation()
+        post_install = load_optional_callable(f"{app_config.name}.installation:post_install")
+        if post_install:
+            _check_installation_hooks(post_install)
+        result.installation_valid = True
+        console.print(
+            f"[bold green]✓[/bold green] Installation hooks for '{app_config.name}' are valid and executable."
+        )
+    except (InvalidModuleCallableError, ModuleError) as exc:
+        result.errors.append(f"Installation hook check failed: {exc}")
+        console.print(f"[bold red]✗[/bold red] Installation hook check failed: {exc}")
+
+    return result
+
+
+def _inspect_dependency(dep_path: str) -> InspectResult:
+    """Run all inspection checks on a dependency without console output."""
+    result = InspectResult(import_path=dep_path)
+
+    spec = find_spec(dep_path)
+    if spec is None:
+        result.errors.append(f"Cannot import: package '{dep_path}' not found in Python path.")
+        return result
+
+    try:
+        load_manifest(dep_path)
+        result.manifest_valid = True
+    except InvalidManifestError as exc:
+        result.errors.append(f"Manifest: {exc}")
+        return result
+
+    try:
+        app_config = build_app_config(dep_path)
+        result.module_loads = True
+        result.has_bootstrap = app_config.bootstrap_module is not None
+        result.has_models = app_config.models_module is not None
+    except ModuleError as exc:
+        result.errors.append(f"Load: {exc}")
+        return result
+
+    try:
+        installation = load_optional_callable(f"{app_config.name}.installation:install")
+        if not installation:
+            result.errors.append(f"No 'install' function in installation.py for {app_config.name}.")
+            return result
+        _check_installation_hooks(installation)
+        pre_install = load_optional_callable(f"{app_config.name}.installation:pre_install")
+        if pre_install:
+            _check_installation_hooks(pre_install)
+        installation()
+        post_install = load_optional_callable(f"{app_config.name}.installation:post_install")
+        if post_install:
+            _check_installation_hooks(post_install)
+        result.installation_valid = True
+    except (InvalidModuleCallableError, ModuleError) as exc:
+        result.errors.append(f"Installation: {exc}")
+
+    return result
 
 
 @apps.command()
@@ -34,7 +162,8 @@ def inspect(
     """Inspect a module''s manifest format and loadability.
 
     Validates the manifest.yaml structure, checks bootstrap and models
-    submodules, and reports whether the module can be successfully loaded.
+    submodules, installation hooks, and verifies that all declared
+    dependencies (depends_on) are importable and pass basic checks.
 
     Args:
         import_path: Python import path of the module.
@@ -44,52 +173,55 @@ def inspect(
     """
     console = Console()
 
-    try:
-        load_manifest(import_path)
-        console.print(f"[bold green]\u2713[/bold green] Manifest for ''[bold]{import_path}[/bold]'' is valid.")
-    except InvalidManifestError as exc:
-        console.print(f"[bold red]\u2717[/bold red] Manifest validation failed: {exc}")
-        raise typer.Exit(1) from exc
+    result = _run_basic_inspect(import_path, console)
+    if result.errors:
+        raise typer.Exit(1)
 
-    try:
-        app_config = build_app_config(import_path)
-        console.print(f"[bold green]\u2713[/bold green] Module ''[bold]{import_path}[/bold]'' loads successfully.")
+    manifest = load_manifest(import_path)
+    if not manifest.depends_on:
+        console.print("\n[dim]No dependencies declared in depends_on.[/dim]")
+        return
 
-        if app_config.bootstrap_module:
-            console.print("[bold green]\u2713[/bold green] Bootstrap submodule is available.")
-        else:
-            console.print("[bold yellow]![/bold yellow] No bootstrap submodule found.")
+    console.print(f"\n[bold]Checking dependencies ({len(manifest.depends_on)})...[/bold]\n")
 
-        if app_config.models_module:
-            console.print("[bold green]\u2713[/bold green] Models submodule is available.")
-        else:
-            console.print("[bold yellow]![/bold yellow] No models submodule found.")
-    except ModuleError as exc:
-        console.print(f"[bold red]\u2717[/bold red] Module load failed: {exc}")
-        raise typer.Exit(1) from exc
+    dep_results: list[InspectResult] = []
+    for dep_path in manifest.depends_on:
+        dep_results.append(_inspect_dependency(dep_path))
 
-    # check installation
-    try:
-        installation = load_optional_callable(f"{app_config.name}.installation:install")
-        if not installation:
-            console.print(
-                f"[bold red]\u2717[/bold red] No 'install' function found in installation.py for {app_config.name}."
-            )
-            raise typer.Exit(1)
-        _check_installation_hooks(installation)
-        pre_install = load_optional_callable(f"{app_config.name}.installation:pre_install")
-        if pre_install:
-            _check_installation_hooks(pre_install)
-        installation()
-        post_install = load_optional_callable(f"{app_config.name}.installation:post_install")
-        if post_install:
-            _check_installation_hooks(post_install)
-        console.print(
-            f"[bold green]\u2713[/bold green] Installation hooks for '{app_config.name}' are valid and executable."
+    table = Table(title="Dependency Inspection", show_lines=True)
+    table.add_column("Module", style="bold cyan", no_wrap=True)
+    table.add_column("Importable", justify="center")
+    table.add_column("Manifest", justify="center")
+    table.add_column("Loads", justify="center")
+    table.add_column("Bootstrap", justify="center")
+    table.add_column("Models", justify="center")
+    table.add_column("Installation", justify="center")
+    table.add_column("Errors", style="red")
+
+    has_failures = False
+    for dep_result in dep_results:
+        importable = find_spec(dep_result.import_path) is not None
+        if not importable or dep_result.errors:
+            has_failures = True
+
+        table.add_row(
+            dep_result.import_path,
+            _status_icon(importable),
+            _status_icon(dep_result.manifest_valid),
+            _status_icon(dep_result.module_loads),
+            _status_icon(dep_result.has_bootstrap, optional=True),
+            _status_icon(dep_result.has_models, optional=True),
+            _status_icon(dep_result.installation_valid),
+            "; ".join(dep_result.errors) if dep_result.errors else "",
         )
-    except (InvalidModuleCallableError, ModuleError) as exc:
-        console.print(f"[bold red]\u2717[/bold red] Installation hook check failed: {exc}")
-        raise typer.Exit(1) from exc
+
+    console.print(table)
+
+    if has_failures:
+        console.print("\n[bold red]✗[/bold red] Some dependencies failed inspection.")
+        raise typer.Exit(1)
+    else:
+        console.print("\n[bold green]✓[/bold green] All dependencies pass inspection.")
 
 
 @apps.command()
