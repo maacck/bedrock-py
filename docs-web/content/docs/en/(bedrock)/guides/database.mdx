@@ -128,7 +128,9 @@ The `db` singleton is a `DatabaseManager` instance. It owns the engine, session 
 | `db.session_factory` | `property → SessionFactory` | The underlying session factory. |
 | `db.settings` | `property → DbSettings` | The resolved database settings. |
 | `db.set_session(session)` | `set_session(session: Session)` | Bind an existing session to the current execution context. |
-| `db.clear_session()` | `clear_session()` | Clear the current context-local session binding. |
+| `db.clear_session()` | `clear_session()` | Close and unbind the current context-local session. |
+| `db.session_scope()` | `contextmanager → Session` | Transactional scope with auto commit/rollback. Binds to context. |
+| `db.independent_session()` | `contextmanager → Session` | Isolated transaction that does not bind to context. |
 
 ### Error Handling
 
@@ -157,6 +159,66 @@ same_session = db.session
 assert session is same_session
 ```
 
+### Transaction Scopes with `session_scope()`
+
+The recommended way to manage transactions is `session_scope()`. It creates a new session, binds it to the current context, and guarantees commit on clean exit or rollback on exception:
+
+```python
+from bedrock.database import db
+
+db.init()
+
+# Automatic commit on success
+with db.session_scope() as session:
+    product = Product(name="Widget")
+    session.add(product)
+    # Session commits automatically when block exits cleanly
+
+# Automatic rollback on exception
+try:
+    with db.session_scope() as session:
+        session.add(Product(name="Gadget"))
+        raise ValueError("Something went wrong")  # Rolls back
+except ValueError:
+    pass  # "Gadget" was never persisted
+```
+
+**Key behaviors:**
+- Binds the session to `ContextVar` so `db.session` works inside the block
+- Commits on clean exit, rolls back on any exception (including `BaseException`)
+- Always closes the session and resets the `ContextVar` on exit
+- Raises `RuntimeError` if called while a session is already bound (prevents nesting)
+
+### Independent Sessions with `independent_session()`
+
+For side-effect writes that must not interfere with the current transaction, use `independent_session()`. It creates an isolated session that does **not** bind to the `ContextVar`:
+
+```python
+from bedrock.database import db
+
+db.init()
+
+with db.session_scope() as session:
+    # Main transaction
+    order = Order(total=100)
+    session.add(order)
+
+    # Write an audit log in a separate transaction
+    with db.independent_session() as audit_session:
+        audit_log = AuditLog(action="order_created", entity_id=order.id)
+        audit_session.add(audit_log)
+        # Commits independently — does not affect the outer session
+
+    # db.session still returns the outer session
+    assert db.session is session
+```
+
+**Use cases for `independent_session()`:**
+- Audit logging (must persist even if the main transaction rolls back)
+- Event publishing or outbox patterns
+- Reads that must not see uncommitted data from the caller
+- Background tasks that need their own transaction lifecycle
+
 ### Binding an External Session
 
 When working with frameworks that manage their own sessions (like FastAPI's dependency injection), you can bind an existing session:
@@ -176,7 +238,7 @@ db.clear_session()
 
 ### Clearing Sessions
 
-Always clear sessions when a request or task finishes to prevent stale data:
+Always clear sessions when a request or task finishes to prevent stale data. `clear_session()` closes the session before unbinding:
 
 ```python
 from bedrock.database import db
@@ -185,7 +247,23 @@ try:
     # Process request...
     result = db.session.query(Product).all()
 finally:
-    db.clear_session()
+    db.clear_session()  # Closes session, then clears ContextVar
+```
+
+### SessionFactory as Context Manager
+
+`SessionFactory` itself can be used as a context manager. On exit, it closes and unbinds the current session:
+
+```python
+from bedrock.database import db
+
+db.init()
+
+with db.session_factory:
+    session = db.session
+    session.add(Product(name="Widget"))
+    session.commit()
+# Session is closed and unbound here
 ```
 
 ## BedrockModel
