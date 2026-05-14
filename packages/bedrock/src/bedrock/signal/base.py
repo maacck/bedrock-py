@@ -10,6 +10,8 @@ from collections import defaultdict
 from contextlib import contextmanager
 from functools import cached_property
 
+from asgiref.sync import async_to_sync as asgiref_async_to_sync
+
 from ._utilities import Symbol, make_id, make_ref
 
 F = t.TypeVar("F", bound=c.Callable[..., t.Any])
@@ -224,8 +226,11 @@ class Signal:
         with any extra keyword arguments. Return a list of ``(receiver, result)``
         tuples.
 
-        If an async receiver is connected, provide ``_async_wrapper`` to adapt it
-        to sync execution, or use :meth:`asend` instead.
+        Synchronous receivers are called directly. Asynchronous receivers are
+        adapted to sync execution with ``_async_wrapper``. When no wrapper is
+        supplied, asynchronous receivers are adapted with
+        :func:`asgiref.sync.async_to_sync` when no event loop is running in the
+        current thread.
 
         Args:
             sender: The signal sender. If ``None``, receivers connected to
@@ -235,10 +240,6 @@ class Signal:
 
         Returns:
             A list of ``(receiver, result)`` tuples.
-
-        Raises:
-            RuntimeError: If an async receiver is connected and no ``_async_wrapper``
-                is provided.
         """
         return self._send_sync(
             sender,
@@ -260,6 +261,13 @@ class Signal:
         Exceptions derived from :class:`Exception` are collected in the result
         list instead of being raised. ``BaseException`` subclasses still
         propagate.
+
+        Synchronous receivers are called directly. Asynchronous receivers are
+        adapted to sync execution with ``_async_wrapper``. When no wrapper is
+        supplied, asynchronous receivers are adapted with
+        :func:`asgiref.sync.async_to_sync` when no event loop is running in the
+        current thread. In a running event loop thread, the default wrapper
+        produces a :class:`RuntimeError`, which is collected in the result list.
 
         Args:
             sender: The signal sender. If ``None``, receivers connected to
@@ -348,13 +356,14 @@ class Signal:
             return []
 
         results: DispatchResult | RobustDispatchResult = []
+        async_wrapper = _async_wrapper or self._default_async_wrapper
 
         for receiver in self.receivers_for(sender):
             try:
                 result = self._invoke_receiver_sync(
                     receiver,
                     sender,
-                    _async_wrapper=_async_wrapper,
+                    _async_wrapper=async_wrapper,
                     **kwargs,
                 )
             except Exception as exc:
@@ -438,12 +447,29 @@ class Signal:
         if not callable(receiver):
             return False
 
-        return inspect.iscoroutinefunction(receiver)
+        return inspect.iscoroutinefunction(getattr(receiver, "__call__", None))  # noqa: B004
 
     @staticmethod
     def _default_sync_wrapper(receiver: Receiver) -> AsyncReceiver:
         async def wrapped(*args: t.Any, **kwargs: t.Any) -> t.Any:
             return await asyncio.to_thread(receiver, *args, **kwargs)
+
+        return wrapped
+
+    @staticmethod
+    def _default_async_wrapper(receiver: AsyncReceiver) -> Receiver:
+        adapted = t.cast(Receiver, asgiref_async_to_sync(receiver))
+
+        def wrapped(*args: t.Any, **kwargs: t.Any) -> t.Any:
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                return adapted(*args, **kwargs)
+
+            raise RuntimeError(
+                "Cannot send to an async receiver from a running event loop thread. "
+                "Use await signal.asend(...) or provide _async_wrapper."
+            )
 
         return wrapped
 

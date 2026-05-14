@@ -63,7 +63,7 @@ class TestSignalDispatch:
         assert receiver_thread_ids
         assert receiver_thread_ids[0] != loop_thread_id
 
-    def test_send_raises_for_async_receiver_without_wrapper(self) -> None:
+    def test_send_supports_async_receivers(self) -> None:
         sig = Signal()
 
         async def async_receiver(sender, **kwargs):
@@ -71,8 +71,136 @@ class TestSignalDispatch:
 
         sig.connect(async_receiver, weak=False)
 
-        with pytest.raises(RuntimeError, match="Use await signal.asend"):
-            sig.send("worker")
+        result = sig.send("worker")
+
+        assert result == [(async_receiver, "ok")]
+
+    def test_send_supports_mixed_sync_and_async_receivers(self) -> None:
+        sig = Signal()
+
+        def sync_receiver(sender, **kwargs):
+            return ("sync", sender, kwargs["value"])
+
+        async def async_receiver(sender, **kwargs):
+            return ("async", sender, kwargs["value"])
+
+        sig.connect(sync_receiver, weak=False)
+        sig.connect(async_receiver, weak=False)
+
+        result = sig.send("worker", value=2)
+
+        assert sorted(item[1] for item in result) == [
+            ("async", "worker", 2),
+            ("sync", "worker", 2),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_send_supports_sync_receivers_in_running_loop(self) -> None:
+        sig = Signal()
+
+        def sync_receiver(sender, **kwargs):
+            return ("sync", sender, kwargs["value"])
+
+        sig.connect(sync_receiver, weak=False)
+
+        result = sig.send("worker", value=42)
+
+        assert result == [(sync_receiver, ("sync", "worker", 42))]
+
+    @pytest.mark.asyncio
+    async def test_send_raises_for_async_receivers_in_running_loop(self) -> None:
+        sig = Signal()
+
+        async def async_receiver(sender, **kwargs):
+            return ("async", sender, kwargs["value"])
+
+        sig.connect(async_receiver, weak=False)
+
+        with pytest.raises(RuntimeError, match=r"Use await signal\.asend\(\.\.\.\) or provide _async_wrapper"):
+            sig.send("worker", value=42)
+
+    @pytest.mark.asyncio
+    async def test_send_raises_for_mixed_receivers_in_running_loop(self) -> None:
+        sig = Signal()
+
+        def sync_receiver(sender, **kwargs):
+            return ("sync", sender, kwargs["value"])
+
+        async def async_receiver(sender, **kwargs):
+            return ("async", sender, kwargs["value"])
+
+        sig.connect(sync_receiver, weak=False)
+        sig.connect(async_receiver, weak=False)
+
+        with pytest.raises(RuntimeError, match="running event loop thread"):
+            sig.send("worker", value=7)
+
+    @pytest.mark.asyncio
+    async def test_send_supports_async_receivers_in_running_loop_with_explicit_wrapper(self) -> None:
+        sig = Signal()
+
+        async def async_receiver(sender, **kwargs):
+            return ("async", sender, kwargs["value"])
+
+        sig.connect(async_receiver, weak=False)
+
+        def async_to_sync(receiver):
+            def wrapped(sender, **kwargs):
+                result = None
+                error = None
+
+                def run_in_thread() -> None:
+                    nonlocal result, error
+                    import asyncio
+
+                    try:
+                        result = asyncio.run(receiver(sender, **kwargs))
+                    except BaseException as exc:  # pragma: no cover - defensive passthrough
+                        error = exc
+
+                thread = threading.Thread(target=run_in_thread)
+                thread.start()
+                thread.join()
+
+                if error is not None:
+                    raise error
+
+                return result
+
+            return wrapped
+
+        result = sig.send("worker", value=7, _async_wrapper=async_to_sync)
+
+        assert result == [(async_receiver, ("async", "worker", 7))]
+
+    def test_send_supports_async_callable_objects(self) -> None:
+        sig = Signal()
+
+        class AsyncCallable:
+            async def __call__(self, sender, **kwargs):
+                return ("callable", sender, kwargs["value"])
+
+        receiver = AsyncCallable()
+        sig.connect(receiver, weak=False)
+
+        result = sig.send("worker", value=99)
+
+        assert result == [(receiver, ("callable", "worker", 99))]
+
+    @pytest.mark.asyncio
+    async def test_asend_supports_async_callable_objects(self) -> None:
+        sig = Signal()
+
+        class AsyncCallable:
+            async def __call__(self, sender, **kwargs):
+                return ("callable", sender, kwargs["value"])
+
+        receiver = AsyncCallable()
+        sig.connect(receiver, weak=False)
+
+        result = await sig.asend("worker", value=99)
+
+        assert result == [(receiver, ("callable", "worker", 99))]
 
     def test_send_robust_collects_sync_and_async_failures(self) -> None:
         sig = Signal()
@@ -94,19 +222,7 @@ class TestSignalDispatch:
         sig.connect(ok_async, weak=False)
         sig.connect(bad_async, weak=False)
 
-        def async_to_sync(receiver):
-            def wrapped(sender, **kwargs):
-                import asyncio
-
-                loop = asyncio.new_event_loop()
-                try:
-                    return loop.run_until_complete(receiver(sender, **kwargs))
-                finally:
-                    loop.close()
-
-            return wrapped
-
-        result = sig.send_robust("worker", _async_wrapper=async_to_sync)
+        result = sig.send_robust("worker")
         values = {receiver.__name__: value for receiver, value in result}
 
         assert values["ok_sync"] == "ok-sync"
