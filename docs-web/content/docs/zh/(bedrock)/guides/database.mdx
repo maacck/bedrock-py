@@ -128,7 +128,9 @@ db.init(url="postgresql+psycopg2://admin:secret@localhost:5432/myapp")
 | `db.session_factory` | `property → SessionFactory` | 底层 session factory。 |
 | `db.settings` | `property → DbSettings` | 解析后的数据库 settings。 |
 | `db.set_session(session)` | `set_session(session: Session)` | 将现有 session 绑定到当前执行上下文。 |
-| `db.clear_session()` | `clear_session()` | 清除当前上下文局部 session 绑定。 |
+| `db.clear_session()` | `clear_session()` | 关闭并解绑当前上下文局部 session。 |
+| `db.session_scope()` | `contextmanager → Session` | 事务作用域，自动提交/回滚。绑定到上下文。 |
+| `db.independent_session()` | `contextmanager → Session` | 隔离事务，不绑定到上下文。 |
 
 ### 错误处理
 
@@ -157,6 +159,66 @@ same_session = db.session
 assert session is same_session
 ```
 
+### 使用 `session_scope()` 管理事务
+
+推荐使用 `session_scope()` 来管理事务。它会创建一个新 session，绑定到当前上下文，并在正常退出时自动提交，异常时自动回滚：
+
+```python
+from bedrock.database import db
+
+db.init()
+
+# 成功时自动提交
+with db.session_scope() as session:
+    product = Product(name="Widget")
+    session.add(product)
+    # 块正常退出时 session 自动提交
+
+# 异常时自动回滚
+try:
+    with db.session_scope() as session:
+        session.add(Product(name="Gadget"))
+        raise ValueError("出错了")  # 回滚
+except ValueError:
+    pass  # "Gadget" 永远不会被持久化
+```
+
+**关键行为：**
+- 将 session 绑定到 `ContextVar`，块内可正常使用 `db.session`
+- 正常退出时提交，任何异常（包括 `BaseException`）时回滚
+- 退出时始终关闭 session 并重置 `ContextVar`
+- 如果在已绑定 session 的上下文中调用会抛出 `RuntimeError`（防止嵌套）
+
+### 使用 `independent_session()` 进行独立事务
+
+对于需要写入但不影响当前事务的副作用操作，使用 `independent_session()`。它创建一个**不**绑定到 `ContextVar` 的隔离 session：
+
+```python
+from bedrock.database import db
+
+db.init()
+
+with db.session_scope() as session:
+    # 主事务
+    order = Order(total=100)
+    session.add(order)
+
+    # 在独立事务中写入审计日志
+    with db.independent_session() as audit_session:
+        audit_log = AuditLog(action="order_created", entity_id=order.id)
+        audit_session.add(audit_log)
+        # 独立提交 — 不影响外部 session
+
+    # db.session 仍然返回外部 session
+    assert db.session is session
+```
+
+**`independent_session()` 适用场景：**
+- 审计日志（即使主事务回滚也必须持久化）
+- 事件发布或 outbox 模式
+- 需要读取调用方未提交数据之外的数据
+- 需要独立事务生命周期的后台任务
+
 ### 绑定外部 Session
 
 当你使用会自行管理 session 的框架（例如 FastAPI 的依赖注入）时，可以绑定一个现有 session：
@@ -176,7 +238,7 @@ db.clear_session()
 
 ### 清理 Session
 
-请求或任务结束时务必清理 session，以防止陈旧数据残留：
+请求或任务结束时务必清理 session，以防止陈旧数据残留。`clear_session()` 会先关闭 session 再解绑：
 
 ```python
 from bedrock.database import db
@@ -185,7 +247,23 @@ try:
     # Process request...
     result = db.session.query(Product).all()
 finally:
-    db.clear_session()
+    db.clear_session()  # 关闭 session，然后清除 ContextVar
+```
+
+### SessionFactory 作为上下文管理器
+
+`SessionFactory` 本身可以作为上下文管理器使用。退出时会关闭并解绑当前 session：
+
+```python
+from bedrock.database import db
+
+db.init()
+
+with db.session_factory:
+    session = db.session
+    session.add(Product(name="Widget"))
+    session.commit()
+# session 在此处被关闭和解绑
 ```
 
 ## BedrockModel

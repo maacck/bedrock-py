@@ -88,6 +88,61 @@ def create_user(name: str, email: str) -> UserModel:
     return user
 ```
 
+### Transaction Scopes with `session_scope()`
+
+The recommended way to manage transactions — automatic commit on success, rollback on exception:
+
+```python
+from bedrock.database import db
+
+# Automatic commit on clean exit
+with db.session_scope() as session:
+    user = UserModel(name="Alice", email="alice@example.com")
+    session.add(user)
+    # Commits automatically when block exits without exception
+
+# Automatic rollback on exception
+try:
+    with db.session_scope() as session:
+        session.add(UserModel(name="Bob", email="bob@example.com"))
+        raise ValueError("Something went wrong")  # Rolls back
+except ValueError:
+    pass  # "Bob" was never persisted
+```
+
+**Key behaviors:**
+- Binds session to `ContextVar` so `db.session` works inside the block
+- Commits on clean exit, rolls back on any exception
+- Always closes session and resets `ContextVar` on exit
+- Raises `RuntimeError` if called while a session is already bound
+
+### Independent Sessions with `independent_session()`
+
+For side-effect writes that must not interfere with the current transaction:
+
+```python
+from bedrock.database import db
+
+with db.session_scope() as session:
+    order = Order(total=100)
+    session.add(order)
+
+    # Write audit log in separate transaction
+    with db.independent_session() as audit_session:
+        audit_log = AuditLog(action="order_created")
+        audit_session.add(audit_log)
+        # Commits independently — does not affect outer session
+
+    # db.session still returns the outer session
+    assert db.session is session
+```
+
+**Use cases:**
+- Audit logging (persists even if main transaction rolls back)
+- Event publishing or outbox patterns
+- Reads that must not see uncommitted data from the caller
+- Background tasks with their own transaction lifecycle
+
 ### Manual Session Binding
 
 For middleware or request lifecycle management:
@@ -96,8 +151,20 @@ For middleware or request lifecycle management:
 # Bind an external session to current context
 db.set_session(my_session)
 
-# Clear binding when done
+# Clear binding when done (closes session, then clears ContextVar)
 db.clear_session()
+```
+
+### SessionFactory as Context Manager
+
+`SessionFactory` can be used as a context manager — closes and unbinds session on exit:
+
+```python
+with db.session_factory:
+    session = db.session
+    session.add(UserModel(name="Charlie", email="charlie@example.com"))
+    session.commit()
+# Session is closed and unbound here
 ```
 
 ---
@@ -636,7 +703,9 @@ The `db` singleton is a `DatabaseManager` instance. It owns the engine, session 
 | `db.session_factory` | The underlying session factory. |
 | `db.settings` | The resolved database settings. |
 | `db.set_session(session)` | Bind an existing session to the current execution context. |
-| `db.clear_session()` | Clear the current context-local session binding. |
+| `db.clear_session()` | Close and unbind the current context-local session. |
+| `db.session_scope()` | Context manager — transactional scope with auto commit/rollback. Binds to context. |
+| `db.independent_session()` | Context manager — isolated transaction that does not bind to context. |
 
 ### Error Handling
 
