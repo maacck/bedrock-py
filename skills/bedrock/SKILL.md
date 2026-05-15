@@ -18,11 +18,15 @@ Bedrock is a modular Python framework for building applications with manifest-dr
 |---------|-----------|--------|
 | Module Registry | `apps` | `from bedrock.module import apps` |
 | Database | `db` | `from bedrock.database import db` |
+| DI Container | `container` | `from bedrock.di import container` |
+| Hook Registry | `hooks` | `from bedrock.hooks import hooks` |
 | Settings | `settings` | `from bedrock.settings import settings` |
 
 ## When to Read References
 
 - **Creating or modifying a module** → Read `references/module-guide.md`
+- **Using dependency injection** → Read `references/di-guide.md`
+- **Using the hook system** → Read `references/hooks-guide.md`
 - **Using database features** → Read `references/database-guide.md`
 - **Using CLI commands** → Read `references/cli-guide.md`
 - **Using signals / events** → Read `references/signals-guide.md`
@@ -202,7 +206,7 @@ def on_shutdown(registry: ModuleRegistry, app: AppConfig) -> None:
 | `ready` | After ALL modules are installed | Configure services, initialization      |
 | `on_shutdown` | During `shutdown()`, in REVERSE order | Cleanup, close connections              |
 
-Hook signature is always `(registry: ModuleRegistry, app: AppConfig) -> None`.
+Hook signature is always `(registry: ModuleRegistry, app: AppConfig) -> None`. Bootstrap hooks also accept optional named kwargs: `container` (the global DI container) and `hooks` (the global hook registry). The registry introspects each hook's parameters and injects only what it declares.
 
 ### 8. Database Models
 
@@ -297,7 +301,7 @@ class DbSettings(BaseSettings):
 
 ### 11. Signal System
 
-Bedrock provides lifecycle signals for cross-module communication:
+Bedrock provides lifecycle signals for cross-module notification (fire-and-forget):
 
 ```python
 from bedrock.signal import Signal
@@ -342,6 +346,29 @@ from bedrock.module.signals import (
 | `module_loaded` | React to a specific module being loaded |
 | `registry_ready` | Run setup that needs ALL modules available |
 | `module_shutdown` | Coordinate cleanup across modules |
+
+### 12. Hook System (Call/Response)
+
+For structured, multi-implementation extension points that return values, use the hook system instead of signals:
+
+```python
+from bedrock.hooks import HookNamespace
+
+auth = HookNamespace("auth")
+
+@auth.spec(firstresult=True)
+def authenticate(request):
+    """Hook spec: first non-None result wins."""
+
+@auth.impl(priority=10)
+def default_auth(request):
+    return verify_token(request.token)
+
+# Dispatch
+results = auth.call("authenticate", request=req)
+```
+
+**Signals vs Hooks**: Signals are notification-only (no return value). Hooks are call/response (implementations return values, ordered by priority, with optional `firstresult` short-circuit).
 
 ## Anti-Patterns (Avoid These)
 

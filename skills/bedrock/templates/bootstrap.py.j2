@@ -11,14 +11,17 @@ from bedrock.module import AppConfig, ModuleRegistry
 
 def on_load(**kwargs) -> None:
     """Called when the module is installed into the registry.
+    Named kwargs: registry, app, container, hooks
     """
 
 
-def ready(**kwargs) -> None:
+def ready(registry: ModuleRegistry, app: AppConfig, **kwargs) -> None:
     """Called after all modules have been loaded and the application is ready.
+    Named kwargs: container, hooks
     """
 
 
 def on_shutdown(**kwargs) -> None:
     """Called during application shutdown.
+    Named kwargs: registry, app, container, hooks
     """
