@@ -10,7 +10,12 @@ from collections import defaultdict
 from contextlib import contextmanager
 from functools import cached_property
 
-from asgiref.sync import async_to_sync as asgiref_async_to_sync
+from asgiref.sync import (
+    async_to_sync as asgiref_async_to_sync,
+)
+from asgiref.sync import (
+    sync_to_async as asgiref_sync_to_async,
+)
 
 from ._utilities import Symbol, make_id, make_ref
 
@@ -451,10 +456,7 @@ class Signal:
 
     @staticmethod
     def _default_sync_wrapper(receiver: Receiver) -> AsyncReceiver:
-        async def wrapped(*args: t.Any, **kwargs: t.Any) -> t.Any:
-            return await asyncio.to_thread(receiver, *args, **kwargs)
-
-        return wrapped
+        return t.cast(AsyncReceiver, asgiref_sync_to_async(receiver))
 
     @staticmethod
     def _default_async_wrapper(receiver: AsyncReceiver) -> Receiver:
