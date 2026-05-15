@@ -31,14 +31,13 @@ Bedrock 提供了可选依赖组，以支持更多后端：
 
 <Tabs items={['Redis Cache', 'Memcached Cache']}>
   <Tab value="Redis Cache"><CodeBlock code={'uv add bedrock[cache-redis]'} lang={'bash'} /></Tab>
-  <Tab value="Memcached Cache"><CodeBlock code={'uv add bedrock[cache-memcached]'} lang={'bash'} /></Tab>
+
 
 </Tabs>
 
 | 扩展 | 包 | 说明 |
 |-------|----------|-------------|
 | `cache-redis` | `redis>=4.2.0` | 基于 Redis 的分布式缓存 |
-| `cache-memcached` | `aiomcache>=0.7.0`, `pymemcache>=4.0.0` | Memcached 缓存后端 |
 
 ## 项目初始化
 
