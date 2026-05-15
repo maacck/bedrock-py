@@ -4,8 +4,8 @@ requires-python = ">=3.12"
 
 [manifest]
 members = [
-    "bedrock",
     "bedrock-cli",
+    "bedrock-core",
     "bedrock-mono",
 ]
 
@@ -42,7 +42,26 @@ wheels = [
 ]
 
 [[package]]
-name = "bedrock"
+name = "bedrock-cli"
+version = "0.0.1"
+source = { editable = "packages/bedrock-cli" }
+dependencies = [
+    { name = "jinja2" },
+    { name = "pyyaml" },
+    { name = "rich" },
+    { name = "typer" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "jinja2", specifier = ">=3.1.6" },
+    { name = "pyyaml", specifier = ">=6.0.2" },
+    { name = "rich", specifier = ">=14.3.4" },
+    { name = "typer", specifier = ">=0.24.1" },
+]
+
+[[package]]
+name = "bedrock-core"
 version = "0.1.0"
 source = { editable = "packages/bedrock" }
 dependencies = [
@@ -84,31 +103,9 @@ provides-extras = ["cache-redis"]
 dev = [{ name = "pytest", specifier = ">=9.0.3" }]
 
 [[package]]
-name = "bedrock-cli"
-version = "0.0.1"
-source = { editable = "packages/bedrock-cli" }
-dependencies = [
-    { name = "jinja2" },
-    { name = "pyyaml" },
-    { name = "rich" },
-    { name = "typer" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "jinja2", specifier = ">=3.1.6" },
-    { name = "pyyaml", specifier = ">=6.0.2" },
-    { name = "rich", specifier = ">=14.3.4" },
-    { name = "typer", specifier = ">=0.24.1" },
-]
-
-[[package]]
 name = "bedrock-mono"
 version = "0.1.0"
 source = { virtual = "." }
-dependencies = [
-    { name = "bedrock" },
-]
 
 [package.dev-dependencies]
 dev = [
@@ -125,7 +122,6 @@ docs = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "bedrock", editable = "packages/bedrock" }]
 
 [package.metadata.requires-dev]
 dev = [
