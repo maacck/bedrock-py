@@ -152,23 +152,26 @@ class DuplicateSkuError(BedrockExc):
 
 ### `bootstrap.py`
 
-由 registry 在特定阶段调用的生命周期 hooks。每个 hook 都会接收 `ModuleRegistry` 和模块的 `AppConfig`。
+由 registry 在特定阶段调用的生命周期 hooks。Hooks 可以按名称声明关键字参数，registry 会自动注入。传统的 `(registry, app)` 位置参数签名仍然有效。
 
 ```python
 from bedrock.module.registry import ModuleRegistry
 from bedrock.module.entities import AppConfig
 
 
-def on_load(registry: ModuleRegistry, app: AppConfig) -> None:
+def on_load(*, registry: ModuleRegistry, app: AppConfig, container, hooks) -> None:
     """Called when this module is first loaded.
 
-    Use for registering signal receivers, setting up module-level state,
-    or validating configuration.
+    Parameters are injected by name:
+    - registry: the ModuleRegistry instance
+    - app: this module's AppConfig
+    - container: the global DI container (bedrock.di.container)
+    - hooks: the global HookRegistry (bedrock.hooks.hooks)
     """
     print(f"Module '{app.name}' loaded (v{app.manifest.version})")
 
 
-def ready(registry: ModuleRegistry, app: AppConfig) -> None:
+def ready(*, registry: ModuleRegistry, app: AppConfig) -> None:
     """Called after ALL modules have been loaded.
 
     Use for cross-module setup that depends on other modules being available.
@@ -176,7 +179,7 @@ def ready(registry: ModuleRegistry, app: AppConfig) -> None:
     print(f"Module '{app.name}' ready")
 
 
-def on_shutdown(registry: ModuleRegistry, app: AppConfig) -> None:
+def on_shutdown(*, registry: ModuleRegistry, app: AppConfig) -> None:
     """Called during graceful shutdown (reverse dependency order).
 
     Use for cleanup: closing connections, flushing buffers, releasing resources.
@@ -224,14 +227,22 @@ Bedrock 模块会参与由 `ModuleRegistry` 管理的三阶段生命周期。Hoo
 
 ### Hook 签名
 
-所有 hooks 都接收两个参数：
+Hooks 可以按名称声明关键字参数。Registry 会检查函数签名并自动注入匹配的参数：
 
 ```python
-def hook_name(registry: ModuleRegistry, app: AppConfig) -> None: ...
+def hook_name(*, registry, app, container, hooks) -> None: ...
 ```
 
-- `registry` — 管理所有模块的 `ModuleRegistry` 实例
-- `app` — 当前模块的 `AppConfig`（包含 manifest、package 信息和状态）
+| 参数 | 类型 | 说明 |
+|-----------|------|-------------|
+| `registry` | `ModuleRegistry` | 管理所有模块的注册表 |
+| `app` | `AppConfig` | 当前模块的配置（manifest、package 信息和状态） |
+| `container` | `Container` | 全局 DI 容器（`bedrock.di.container`） |
+| `hooks` | `HookRegistry` | 全局 hook 注册表（`bedrock.hooks.hooks`） |
+
+更完整的 API 说明请见[依赖注入](/docs/guides/di)与[Hook 系统](/docs/guides/hooks)。
+
+传统的 `def hook_name(registry, app)` 位置参数签名仍然有效。只需声明你需要的参数即可。
 
 ### 调用顺序
 
@@ -346,17 +357,17 @@ from bedrock.module.registry import ModuleRegistry
 from bedrock.module.entities import AppConfig
 
 
-def on_load(registry: ModuleRegistry, app: AppConfig) -> None:
+def on_load(*, registry: ModuleRegistry, app: AppConfig) -> None:
     """Module loaded — initialize state."""
     pass
 
 
-def ready(registry: ModuleRegistry, app: AppConfig) -> None:
+def ready(*, registry: ModuleRegistry, app: AppConfig) -> None:
     """All modules ready — safe for cross-module work."""
     pass
 
 
-def on_shutdown(registry: ModuleRegistry, app: AppConfig) -> None:
+def on_shutdown(*, registry: ModuleRegistry, app: AppConfig) -> None:
     """Shutdown — clean up resources."""
     pass
 ```

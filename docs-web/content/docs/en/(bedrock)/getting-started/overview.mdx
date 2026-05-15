@@ -12,6 +12,8 @@ Bedrock is a modular Python application framework designed for teams that want p
 This is not a blueprint or proof-of-concept. Bedrock contains production-ready subsystems:
 
 - Module registry with dependency resolution and lifecycle hooks
+- Dependency injection container with singleton/transient/scoped lifetimes
+- Hook system for structured call/response extension points
 - SQLAlchemy 2.0 database layer with Alembic migrations
 - Signal/event system (blinker-derived)
 - Typer-based CLI for module and database management
@@ -64,6 +66,8 @@ Bedrock provides key singletons for common operations:
 | Singleton | Class | Purpose |
 |-----------|-------|---------|
 | `bedrock.apps` | `ModuleRegistry` | Module lifecycle |
+| `bedrock.di.container` | `Container` | Dependency injection |
+| `bedrock.hooks.hooks` | `HookRegistry` | Hook specs and implementations |
 | `bedrock.db` | `DatabaseManager` | Database operations |
 
 ## Architecture
@@ -73,6 +77,8 @@ graph TB
     App[Your Application] --> Bedrock[Bedrock Runtime]
     Bedrock --> Registry[Module Registry]
     Bedrock --> DB[Database Layer]
+    Bedrock --> DI[DI Container]
+    Bedrock --> HookSys[Hook System]
     Bedrock --> Signal[Signal System]
 
     Registry --> Modules[Business Modules]
@@ -142,6 +148,42 @@ def on_user_created(sender, user):
     print(f"User created: {user.name}")
 
 user_created.send(current_app, user=new_user)
+```
+
+### Dependency Injection
+
+```python
+from bedrock.di import container, provider, inject, Lifetime
+
+@provider(lifetime=Lifetime.SCOPED)
+class UserService:
+    def get_user(self, user_id: str) -> User: ...
+
+@inject(user_service=UserService)
+def handle_request(*, user_service):
+    return user_service.get_user("u-42")
+
+# Scoped resolution
+with container.scope():
+    result = handle_request()
+```
+
+### Hook System
+
+```python
+from bedrock.hooks import hooks
+
+ns = hooks.namespace("auth")
+
+@ns.spec(firstresult=True)
+def authenticate(user, password): ...
+
+@ns.impl(priority=10)
+def check_password(user, password):
+    return verify_password(user, password)
+
+# Dispatch
+results = ns.call("authenticate", user="alice", password="s3cret")
 ```
 
 ## CLI Commands

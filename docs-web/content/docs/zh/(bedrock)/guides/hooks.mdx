@@ -1,0 +1,216 @@
+---
+title: Hook 系统
+description: 使用 hookspec 与 hook implementation 定义结构化扩展点
+---
+
+# Hook 系统
+
+Bedrock 在 `bedrock.hooks` 中提供了一个结构化 Hook 系统，用于那些需要
+“有序执行 + 返回值”的模块扩展点。
+
+当调用方需要从一个或多个实现中获得结果时，使用 hooks。
+如果只是广播“某件事发生了”，使用 signals。
+
+## 快速开始
+
+```python
+from bedrock.hooks import HookNamespace
+
+payment_hooks = HookNamespace("payment")
+
+
+@payment_hooks.spec(firstresult=True)
+def process(method: str, amount: int) -> str | None:
+    ...
+
+
+class CardHooks:
+    @payment_hooks.impl(priority=0)
+    def process(self, method: str, amount: int) -> str | None:
+        if method == "card":
+            return "charged"
+        return None
+
+
+payment_hooks.add_impls_from(CardHooks(), module="card_gateway")
+
+
+result = payment_hooks.call("process", method="card", amount=100)
+assert result == ["charged"]
+```
+
+## 核心概念
+
+### Hook registry
+
+`bedrock.hooks.hooks` 是全局 `HookRegistry`，负责按全限定名保存所有 spec 与 impl。
+
+### Hook namespace
+
+`HookNamespace("auth")` 会把 hook 名称限定在模块自己的命名空间下，例如：
+
+- `auth.authenticate`
+- `auth.get_permissions`
+
+### hookspec 与 hookimpl
+
+| 概念 | 作用 |
+|---|---|
+| `@hookspec` | 声明扩展点 |
+| `@hookimpl` | 提供扩展点的一个实现 |
+
+## 声明 Specs
+
+```python
+from bedrock.hooks import HookNamespace
+
+auth_hooks = HookNamespace("auth")
+
+
+@auth_hooks.spec(firstresult=True)
+def authenticate(token: str) -> str | None:
+    ...
+
+
+@auth_hooks.spec
+def get_permissions(user_id: str) -> list[str]:
+    ...
+```
+
+如果 `firstresult=True`，分发会在遇到第一个非 `None` 结果后停止。
+
+## 注册实现
+
+```python
+from bedrock.hooks import hookimpl
+
+
+class JwtHooks:
+    @hookimpl(priority=0)
+    def authenticate(self, token: str) -> str | None:
+        if token == "jwt-token":
+            return "user-1"
+        return None
+```
+
+```python
+auth_hooks.add_impls_from(JwtHooks(), module="jwt_auth")
+```
+
+优先级数值越小，执行越早。
+
+## 调用 Hooks
+
+### 同步调用
+
+```python
+results = auth_hooks.call("get_permissions", user_id="user-1")
+```
+
+### 异步调用
+
+```python
+results = await auth_hooks.acall("get_permissions", user_id="user-1")
+```
+
+异步 hook 调用会直接等待 async 实现，并把 sync 实现自动包裹到 `asyncio.to_thread()`。
+
+### Robust 调用
+
+```python
+results = auth_hooks.call_robust("get_permissions", user_id="user-1")
+```
+
+robust 调用会收集 `Exception` 结果，而不是立即抛出。
+
+## 通过扫描注册
+
+对于较大的 hook 集合，可以结合 marker 装饰器与扫描方式。
+
+```python
+from bedrock.hooks import HookNamespace, hookimpl, hookspec
+
+search_hooks = HookNamespace("search")
+
+
+class SearchSpecs:
+    @hookspec
+    def providers(self) -> list[str]:
+        ...
+
+
+class ElasticHooks:
+    @hookimpl(priority=0)
+    def providers(self) -> list[str]:
+        return ["elastic"]
+```
+
+```python
+search_hooks.add_specs_from(SearchSpecs)
+search_hooks.add_impls_from(ElasticHooks(), module="elastic")
+```
+
+## 在模块 bootstrap 中使用 Hooks
+
+模块最常见的用法是在 `bootstrap.py` 中注册实现。
+
+```python
+from modules.auth.hookspecs import auth_hooks
+
+
+class ApiKeyHooks:
+    def authenticate(self, token: str) -> str | None:
+        if token == "api-key":
+            return "user-2"
+        return None
+
+
+def on_load(*, app, **kwargs) -> None:
+    auth_hooks.add_impls_from(ApiKeyHooks(), module=app.name)
+```
+
+如果需要，也可以通过参数名直接请求全局 `hooks` registry。
+
+## 校验与自省
+
+```python
+warnings = auth_hooks._registry.validate()
+impls = auth_hooks.get_impls("authenticate")
+spec_names = auth_hooks.specs()
+```
+
+在 registry ready 阶段，Bedrock 会校验已注册 hooks，并对以下情况记录 warning：
+
+- impl 存在但没有对应 spec
+- spec 存在但没有任何 impl
+
+## Signals vs Hooks
+
+| 需求 | 选择 |
+|---|---|
+| fire-and-forget 通知 | Signals |
+| 有序 call/response 扩展点 | Hooks |
+| 需要 receiver 返回值 | Hooks |
+| 解耦事件广播 | Signals |
+
+事件模型请见 [信号](/docs/guides/signals)。
+
+## 测试工具
+
+Bedrock 在 `bedrock.testing` 下提供了 hooks 的 pytest fixtures：
+
+- `clean_hooks`
+- `hook_registry`
+- `hook_namespace`
+
+## 反模式
+
+- 如果普通函数调用已经足够简单，不要强行使用 hooks
+- 如果调用方需要有序返回值，不要使用 signals
+- 不要让无关模块拥有别的模块的 namespace；定义 spec 的模块应该拥有该 namespace
+
+## 另见
+
+- [信号](/docs/guides/signals)
+- [依赖注入](/docs/guides/di)
+- [模块解剖](/docs/guides/module-anatomy)

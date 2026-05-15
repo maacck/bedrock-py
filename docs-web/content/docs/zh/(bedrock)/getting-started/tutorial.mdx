@@ -133,7 +133,7 @@ class InventoryService:
 
 ## 步骤 5：添加 Bootstrap Hooks
 
-Bootstrap hooks 允许你在特定生命周期阶段运行代码，注册表会自动调用它们。
+Bootstrap hooks 允许你在特定生命周期阶段运行代码，注册表会自动调用它们。Hooks 按名称声明关键字参数，registry 会自动注入 `registry`、`app`、`container` 和 `hooks`。只需声明你需要的参数。
 
 创建 `inventory/bootstrap.py`：
 
@@ -149,17 +149,17 @@ from .service import InventoryService
 inventory_service = InventoryService()
 
 
-def on_load(registry: ModuleRegistry, app: AppConfig) -> None:
+def on_load(*, registry: ModuleRegistry, app: AppConfig) -> None:
     """Called when the module is first loaded."""
     print(f"[inventory] Module loaded (v{app.manifest.version})")
 
 
-def ready(registry: ModuleRegistry, app: AppConfig) -> None:
+def ready(*, registry: ModuleRegistry, app: AppConfig) -> None:
     """Called after all modules have been loaded."""
     print("[inventory] Module ready")
 
 
-def on_shutdown(registry: ModuleRegistry, app: AppConfig) -> None:
+def on_shutdown(*, registry: ModuleRegistry, app: AppConfig) -> None:
     """Called during graceful shutdown."""
     print("[inventory] Module shutting down")
 ```

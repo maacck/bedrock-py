@@ -1,0 +1,229 @@
+---
+title: 依赖注入
+description: 使用 bedrock.di 注册、解析、作用域化与覆盖服务
+---
+
+# 依赖注入
+
+Bedrock 在 `bedrock.di` 中提供了一个轻量级依赖注入容器。
+它让模块可以用一致的方式注册服务、解析依赖、管理请求级资源，并在测试中临时覆盖实现。
+
+## 快速开始
+
+```python
+from bedrock.di import Lifetime, container
+
+
+class Mailer:
+    def send(self, to: str, subject: str, body: str) -> None:
+        print(to, subject)
+
+
+container.register(Mailer, factory=Mailer, lifetime=Lifetime.SINGLETON)
+
+mailer = container.resolve(Mailer)
+mailer.send("alice@example.com", "Welcome", "Hello")
+```
+
+## 核心概念
+
+### Service key
+
+服务可以注册在两类 key 之下：
+
+- Python 类型，例如 `Mailer`
+- 字符串 key，例如 `"cache.primary"`
+
+### 生命周期
+
+| 生命周期 | 行为 | 适合场景 |
+|---|---|---|
+| `Lifetime.SINGLETON` | 创建一次后缓存 | 共享管理器、客户端、全局服务 |
+| `Lifetime.TRANSIENT` | 每次 `resolve()` 都新建 | 无状态 helper |
+| `Lifetime.SCOPED` | 在当前作用域内复用 | request/session/unit-of-work |
+
+## 注册服务
+
+### 注册 factory
+
+```python
+from bedrock.di import Lifetime, container
+
+
+class InventoryService:
+    def check(self, sku: str) -> int:
+        return 10
+
+
+container.register(
+    InventoryService,
+    factory=InventoryService,
+    lifetime=Lifetime.SINGLETON,
+)
+```
+
+### 注册预构建实例
+
+```python
+from bedrock.di import container
+
+config = {"region": "ap-southeast-1"}
+container.register_instance("app.config", config)
+```
+
+## 解析服务
+
+```python
+service = container.resolve(InventoryService)
+config = container.resolve("app.config")
+```
+
+如果 key 未注册，`resolve()` 会抛出 `ServiceNotFoundError`。
+
+## Scoped 服务
+
+```python
+from bedrock.di import Lifetime, container
+
+
+class Session:
+    def close(self) -> None:
+        print("closed")
+
+
+container.register(Session, factory=Session, lifetime=Lifetime.SCOPED)
+
+with container.scope("request"):
+    session_a = container.resolve(Session)
+    session_b = container.resolve(Session)
+    assert session_a is session_b
+```
+
+当 scope 退出时，Bedrock 会对提供 `.close()` 方法的 scoped 服务调用清理逻辑。
+
+## 测试中的覆盖
+
+```python
+from bedrock.di import container
+
+
+class Mailer:
+    def send(self, to: str, subject: str, body: str) -> None:
+        raise NotImplementedError
+
+
+class FakeMailer(Mailer):
+    def __init__(self) -> None:
+        self.sent: list[str] = []
+
+    def send(self, to: str, subject: str, body: str) -> None:
+        self.sent.append(to)
+
+
+with container.override(Mailer, FakeMailer()):
+    mailer = container.resolve(Mailer)
+    mailer.send("alice@example.com", "Hello", "...")
+```
+
+## 装饰器
+
+### `@provider`
+
+`@provider` 会把类注册到全局容器中。
+
+```python
+from bedrock.di import Lifetime, provider
+
+
+@provider(lifetime=Lifetime.SINGLETON)
+class AuditService:
+    def write(self, message: str) -> None:
+        print(message)
+```
+
+### `@inject`
+
+`@inject` 会从全局容器中解析命名参数。
+
+```python
+from bedrock.di import inject
+
+
+class Mailer:
+    def send(self, to: str, subject: str, body: str) -> None:
+        print(to)
+
+
+@inject(mailer=Mailer)
+def send_welcome(user_email: str, *, mailer: Mailer) -> None:
+    mailer.send(user_email, "Welcome", "Hello")
+```
+
+显式传入的关键字参数优先级高于自动注入的值。
+
+## 在模块中使用 DI
+
+最常见的注册位置是 `bootstrap.py`。
+
+```python
+from bedrock.di import Lifetime
+
+
+class InventoryService:
+    def check(self, sku: str) -> int:
+        return 10
+
+
+def on_load(*, container, **kwargs) -> None:
+    container.register(
+        InventoryService,
+        factory=InventoryService,
+        lifetime=Lifetime.SINGLETON,
+    )
+```
+
+bootstrap hook 可以通过参数名直接请求 `container`。完整生命周期可见
+[模块解剖](/docs/guides/module-anatomy)。
+
+## 测试工具
+
+Bedrock 还在 `bedrock.testing` 下提供了 pytest fixtures：
+
+- `clean_container`
+- `di_container`
+- `override_service`
+
+## 常见模式
+
+### 接口 + 实现
+
+```python
+class Mailer:
+    def send(self, to: str, subject: str, body: str) -> None:
+        raise NotImplementedError
+
+
+class SmtpMailer(Mailer):
+    def send(self, to: str, subject: str, body: str) -> None:
+        print(to)
+```
+
+```python
+container.register(Mailer, factory=SmtpMailer)
+```
+
+### 请求级资源
+
+对在单次请求内需要复用、但不能全局共享的资源，使用 `Lifetime.SCOPED`。
+
+## 反模式
+
+- 不要把容器当成一切依赖的隐藏全局变量；依赖装配仍应尽量显式
+- 不要在错误的 import 边界过早注册服务
+- 如果直接依赖已经足够清晰，就不要为了 DI 而 DI
+
+## 另见
+
+- [模块解剖](/docs/guides/module-anatomy)
+- [信号](/docs/guides/signals)
+- [Hook 系统](/docs/guides/hooks)

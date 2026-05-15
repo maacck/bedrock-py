@@ -1,0 +1,239 @@
+---
+title: Dependency Injection
+description: Register, resolve, scope, and override services with bedrock.di
+---
+
+# Dependency Injection
+
+Bedrock includes a lightweight dependency injection container in `bedrock.di`.
+It gives modules a consistent way to register services, resolve dependencies,
+scope request-local resources, and override implementations in tests.
+
+## Quick Start
+
+```python
+from bedrock.di import Lifetime, container
+
+
+class Mailer:
+    def send(self, to: str, subject: str, body: str) -> None:
+        print(to, subject)
+
+
+container.register(Mailer, factory=Mailer, lifetime=Lifetime.SINGLETON)
+
+mailer = container.resolve(Mailer)
+mailer.send("alice@example.com", "Welcome", "Hello")
+```
+
+## Core Concepts
+
+### Service key
+
+A service is registered under either:
+
+- a Python type, such as `Mailer`
+- a string key, such as `"cache.primary"`
+
+Type keys are best when you control the interface. String keys are useful for
+dynamic or configuration-driven registrations.
+
+### Lifetimes
+
+| Lifetime | Behavior | Good for |
+|---|---|---|
+| `Lifetime.SINGLETON` | Created once, then cached | shared managers, clients, settings-like services |
+| `Lifetime.TRANSIENT` | Created on every `resolve()` | stateless helpers |
+| `Lifetime.SCOPED` | Reused within the current active scope | per-request sessions, unit-of-work objects |
+
+## Registering Services
+
+### Register a factory
+
+```python
+from bedrock.di import Lifetime, container
+
+
+class InventoryService:
+    def check(self, sku: str) -> int:
+        return 10
+
+
+container.register(
+    InventoryService,
+    factory=InventoryService,
+    lifetime=Lifetime.SINGLETON,
+)
+```
+
+### Register a pre-built instance
+
+```python
+from bedrock.di import container
+
+config = {"region": "ap-southeast-1"}
+container.register_instance("app.config", config)
+```
+
+## Resolving Services
+
+```python
+service = container.resolve(InventoryService)
+config = container.resolve("app.config")
+```
+
+If a key has not been registered, `resolve()` raises `ServiceNotFoundError`.
+
+## Scoped Services
+
+Scoped services require an active scope.
+
+```python
+from bedrock.di import Lifetime, container
+
+
+class Session:
+    def close(self) -> None:
+        print("closed")
+
+
+container.register(Session, factory=Session, lifetime=Lifetime.SCOPED)
+
+with container.scope("request"):
+    session_a = container.resolve(Session)
+    session_b = container.resolve(Session)
+    assert session_a is session_b
+```
+
+When the scope exits, Bedrock calls `.close()` on scoped services that provide
+that method.
+
+## Overrides for Tests
+
+Use `override()` when a test needs to swap in a fake service temporarily.
+
+```python
+from bedrock.di import container
+
+
+class Mailer:
+    def send(self, to: str, subject: str, body: str) -> None:
+        raise NotImplementedError
+
+
+class FakeMailer(Mailer):
+    def __init__(self) -> None:
+        self.sent: list[str] = []
+
+    def send(self, to: str, subject: str, body: str) -> None:
+        self.sent.append(to)
+
+
+with container.override(Mailer, FakeMailer()):
+    mailer = container.resolve(Mailer)
+    mailer.send("alice@example.com", "Hello", "...")
+```
+
+## Decorators
+
+### `@provider`
+
+`@provider` registers a class in the global container.
+
+```python
+from bedrock.di import Lifetime, provider
+
+
+@provider(lifetime=Lifetime.SINGLETON)
+class AuditService:
+    def write(self, message: str) -> None:
+        print(message)
+```
+
+### `@inject`
+
+`@inject` resolves named parameters from the global container.
+
+```python
+from bedrock.di import inject
+
+
+class Mailer:
+    def send(self, to: str, subject: str, body: str) -> None:
+        print(to)
+
+
+@inject(mailer=Mailer)
+def send_welcome(user_email: str, *, mailer: Mailer) -> None:
+    mailer.send(user_email, "Welcome", "Hello")
+```
+
+Explicit keyword arguments always win over injected values.
+
+## Using DI in Modules
+
+The most common place to register services is `bootstrap.py`.
+
+```python
+from bedrock.di import Lifetime
+
+
+class InventoryService:
+    def check(self, sku: str) -> int:
+        return 10
+
+
+def on_load(*, container, **kwargs) -> None:
+    container.register(
+        InventoryService,
+        factory=InventoryService,
+        lifetime=Lifetime.SINGLETON,
+    )
+```
+
+Bootstrap hooks may request `container` by name. See
+[`Module Anatomy`](/docs/guides/module-anatomy) for the full lifecycle shape.
+
+## Testing Utilities
+
+Bedrock also exposes reusable pytest fixtures under `bedrock.testing`:
+
+- `clean_container`
+- `di_container`
+- `override_service`
+
+## Common Patterns
+
+### Service interface + implementation
+
+```python
+class Mailer:
+    def send(self, to: str, subject: str, body: str) -> None:
+        raise NotImplementedError
+
+
+class SmtpMailer(Mailer):
+    def send(self, to: str, subject: str, body: str) -> None:
+        print(to)
+```
+
+```python
+container.register(Mailer, factory=SmtpMailer)
+```
+
+### Per-request resources
+
+Use `Lifetime.SCOPED` for resources that must be reused within a request but
+not shared globally.
+
+## Anti-Patterns
+
+- Do not use the container as a hidden global for everything; keep wiring explicit
+- Do not register services eagerly at import time unless that module is the intended registration boundary
+- Do not use DI where a direct local dependency is simpler and clearer
+
+## See Also
+
+- [Module Anatomy](/docs/guides/module-anatomy)
+- [Signals](/docs/guides/signals)
+- [Hook System](/docs/guides/hooks)

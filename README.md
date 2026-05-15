@@ -11,6 +11,8 @@ Framework-agnostic core — no HTTP dependency in the runtime.
 What exists today:
 
 - Module registry with dependency resolution and lifecycle hooks
+- Dependency injection container with singleton/transient/scoped lifetimes
+- Hook system for structured call/response extension points (sync, async, robust)
 - SQLAlchemy 2.0 database layer with Alembic migrations
 - Cache system with memory and Redis.
 - Signal/event system (inspired by Blinker)
@@ -113,6 +115,52 @@ def ready():
 def on_shutdown():
     """Called during graceful shutdown."""
     pass
+```
+
+Hooks may declare keyword parameters by name and receive runtime objects automatically:
+
+```python
+def on_load(*, registry, app, container, hooks):
+    """registry=ModuleRegistry, app=AppConfig, container=DI container, hooks=HookRegistry"""
+    pass
+```
+
+### Dependency injection
+
+Lightweight DI container with three service lifetimes:
+
+```python
+from bedrock.di import container, provider, inject, Lifetime
+
+@provider
+class MyService:
+    pass
+
+@inject(svc=MyService)
+def do_work(*, svc):
+    svc.do_something()
+
+# Override for tests
+with container.override(MyService, FakeService()):
+    do_work()
+```
+
+### Hook system
+
+Structured extension points where modules declare specs and register implementations:
+
+```python
+from bedrock.hooks import hooks
+
+ns = hooks.namespace("auth")
+
+@ns.spec
+def authenticate(user, password): ...
+
+@ns.impl(priority=10)
+def check_password(user, password): ...
+
+ns.call("authenticate", user="alice", password="s3cret")
 ```
 
 ### Database layer
