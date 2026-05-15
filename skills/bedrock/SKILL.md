@@ -54,17 +54,17 @@ bedrock.setup("myproject.modules.users")
 Settings (`settings.py`):
 
 ```python
-from bedrock.conf import LazySettings
-from pydantic_settings import SettingsConfigDict
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from bedrock.conf import SettingsProxy
 
 
-class AppSettings(LazySettings):
+class AppSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="MYAPP_")
     DEBUG: bool = False
     DATABASE_URL: str = "sqlite:///app.db"
 
 
-app_settings = AppSettings()
+app_settings: AppSettings = SettingsProxy(AppSettings)  # type: ignore[assignment]
 ```
 
 First module (`modules/users/manifest.yaml`):
@@ -261,24 +261,24 @@ result = search_filter_sort_paginate(
 
 ### 10. Settings
 
-Create module-level settings by extending `LazySettings` for app-level configuration:
+Create module-level settings using `BaseSettings`. Wrap with `SettingsProxy` when you need deferred initialization (module-level singletons where env vars may not be ready at import time):
 
 ```python
-from bedrock.conf import LazySettings
-from pydantic_settings import SettingsConfigDict
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from bedrock.conf import SettingsProxy
 
 
-class MyModuleSettings(LazySettings):
+class MyModuleSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="MYMODULE_")
     API_KEY: str = ""
     DEBUG: bool = False
     MAX_RETRIES: int = 3
 
 
-my_settings = MyModuleSettings()  # Instantiate — env vars read on first access
+my_settings: MyModuleSettings = SettingsProxy(MyModuleSettings)  # type: ignore[assignment]
 ```
 
-**For database/backend settings**, use `BaseSettings` directly:
+When environment variables are guaranteed to be ready at construction time (e.g. inside a `ready()` hook), use `BaseSettings` directly:
 
 ```python
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -291,8 +291,8 @@ class DbSettings(BaseSettings):
 ```
 
 **Rules**:
-- Use `LazySettings` for app-level settings (lazy initialization)
-- Use `BaseSettings` for database/backend settings (eager initialization)
+- Use `SettingsProxy` for module-level singletons that may be imported before env vars are ready
+- Use `BaseSettings` directly when env vars are guaranteed ready at construction time
 - Always use `env_prefix` in `model_config` to namespace environment variables
 
 ### 11. Signal System

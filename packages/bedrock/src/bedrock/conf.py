@@ -1,82 +1,98 @@
-"""Bedrock configuration module with lazy-initialised settings."""
+"""Bedrock configuration module with optional lazy-initialised settings proxy."""
 
 from __future__ import annotations
 
-import contextvars
-from typing import Any
+import threading
+from collections.abc import Callable
+from typing import Any, TypeVar
 
 from pydantic_settings import BaseSettings
 
-_is_lazy_setup: contextvars.ContextVar[bool] = contextvars.ContextVar("_is_lazy_setup", default=False)
+T = TypeVar("T", bound=BaseSettings)
 
 
-class _LazySettingsProxy:
-    """Internal proxy that defers ``BaseSettings`` instantiation until first access."""
+class SettingsProxy:
+    """Thread-safe lazy proxy that defers ``BaseSettings`` instantiation until first access.
 
-    _wrapped: BaseSettings | None
+    Use this to wrap module-level settings singletons so that environment
+    variables are **not** read at import time.  The underlying settings
+    object is created on the first attribute access and cached thereafter.
 
-    def __init__(
-        self,
-        target_cls: type[BaseSettings],
-        *args: object,
-        **kwargs: object,
-    ) -> None:
-        self._target_cls: type[BaseSettings] = target_cls
-        self._args: tuple[object, ...] = args
-        self._kwargs: dict[str, object] = kwargs
-        self._wrapped = None
+    Example::
+
+        class AppSettings(BaseSettings):
+            model_config = SettingsConfigDict(env_prefix="APP_")
+            DEBUG: bool = False
+
+        settings: AppSettings = SettingsProxy(AppSettings)  # type: ignore[assignment]
+
+    Args:
+        factory: A ``BaseSettings`` subclass (or any callable returning one).
+    """
+
+    def __init__(self, factory: type[T] | Callable[[], T]) -> None:
+        object.__setattr__(self, "_factory", factory)
+        object.__setattr__(self, "_wrapped", None)
+        object.__setattr__(self, "_lock", threading.Lock())
 
     def _setup(self) -> None:
-        """Trigger actual instantiation of the underlying settings object."""
+        """Instantiate the wrapped settings object if not already done (double-checked locking)."""
         if self._wrapped is None:
-            token = _is_lazy_setup.set(True)
-            try:
-                self._wrapped = self._target_cls(*self._args, **self._kwargs)
-            finally:
-                _is_lazy_setup.reset(token)
+            with self._lock:
+                if self._wrapped is None:
+                    wrapped = self._factory()
+                    object.__setattr__(self, "_wrapped", wrapped)
 
     def __getattr__(self, name: str) -> Any:
         self._setup()
         return getattr(self._wrapped, name)
 
     def __setattr__(self, name: str, value: object) -> None:
-        if name in ("_target_cls", "_args", "_kwargs", "_wrapped"):
-            super().__setattr__(name, value)
+        if name in ("_factory", "_wrapped", "_lock"):
+            object.__setattr__(self, name, value)
         else:
             self._setup()
             setattr(self._wrapped, name, value)
 
+    def __delattr__(self, name: str) -> None:
+        self._setup()
+        delattr(self._wrapped, name)
+
+    def __repr__(self) -> str:
+        self._setup()
+        return repr(self._wrapped)
+
+    def __str__(self) -> str:
+        self._setup()
+        return str(self._wrapped)
+
+    def __bool__(self) -> bool:
+        self._setup()
+        return bool(self._wrapped)
+
+    def __eq__(self, other: object) -> bool:
+        self._setup()
+        return self._wrapped == other
+
+    def __hash__(self) -> int:
+        self._setup()
+        return hash(self._wrapped)
+
     @property
-    def __class__(self) -> type[BaseSettings]:
+    def __class__(self) -> type:
         """Masquerade as the target class for ``isinstance`` checks."""
-        return self._target_cls
+        if self._wrapped is not None:
+            return type(self._wrapped)
+        factory = object.__getattribute__(self, "_factory")
+        return factory if isinstance(factory, type) else type(factory)
 
     def __dir__(self) -> list[str]:
-        """Return union of target class attributes and Pydantic field names."""
-        attrs: set[str] = set(dir(self._target_cls))
-        if hasattr(self._target_cls, "model_fields"):
-            attrs.update(self._target_cls.model_fields.keys())
-        return list(attrs)
+        """Return attributes of the wrapped object or the factory class."""
+        factory = object.__getattribute__(self, "_factory")
+        attrs: set[str] = set(dir(factory))
+        if hasattr(factory, "model_fields"):
+            attrs.update(factory.model_fields.keys())
+        return sorted(attrs)
 
 
-class LazySettings(BaseSettings):
-    """Bedrock settings that defer validation until first attribute access.
-
-    Usage mirrors ``pydantic_settings.BaseSettings``, but instantiation is
-    lazy: calling the constructor returns a :class:`_LazySettingsProxy`
-    instead, so no environment variables are read until a setting is
-    actually accessed.
-    """
-
-    def __new__(cls, *args: object, **kwargs: object) -> BaseSettings | _LazySettingsProxy:
-        if _is_lazy_setup.get():
-            return super().__new__(cls)
-
-        return _LazySettingsProxy(cls, *args, **kwargs)
-
-
-class BedrockSettings(LazySettings):
-    pass
-
-
-__all__ = ["BedrockSettings", "LazySettings"]
+__all__ = ["SettingsProxy"]

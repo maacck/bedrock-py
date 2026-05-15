@@ -560,6 +560,6 @@ bedrock/database/
 
 **Don't hardcode database URLs.** Use environment variables or `DbSettings` so configuration stays external to code.
 
-**Don't use `BaseSettings` directly for new settings.** Extend `LazySettings` to preserve deferred initialization.
+**Don't instantiate settings eagerly at module level if env vars may not be ready.** Wrap module-level singletons with `SettingsProxy` from `bedrock.conf` to defer initialization.
 
 **Don't import `contrib` modules from core code.** The core runtime must not depend on contrib packages.

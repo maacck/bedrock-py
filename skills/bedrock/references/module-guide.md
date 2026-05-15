@@ -285,23 +285,23 @@ await user_created.asend(sender, user=new_user)
 
 ## Settings Pattern
 
-Create module-level settings using `LazySettings`. The settings object defers environment variable reading until first attribute access, preventing import-time side effects.
+Create module-level settings using `BaseSettings`. Wrap module-level singletons with `SettingsProxy` to defer environment variable reading until first attribute access, preventing import-time side effects.
 
 ### Creating Module Settings
 
 ```python
-from bedrock.conf import LazySettings
-from pydantic_settings import SettingsConfigDict
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from bedrock.conf import SettingsProxy
 
 
-class MyModuleSettings(LazySettings):
+class MyModuleSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="MYMODULE_")
     API_KEY: str = ""
     DEBUG: bool = False
     MAX_RETRIES: int = 3
 
 
-my_settings = MyModuleSettings()  # Returns a proxy — no env vars read yet
+my_settings: MyModuleSettings = SettingsProxy(MyModuleSettings)  # type: ignore[assignment]
 ```
 
 ### Usage
@@ -314,9 +314,9 @@ if my_settings.DEBUG:
 
 ### Rules
 
-- ALWAYS extend `LazySettings`, NEVER `BaseSettings` directly
+- Use `SettingsProxy` for module-level singletons that may be imported before env vars are ready
+- Use `BaseSettings` directly when env vars are guaranteed ready at construction time
 - Use `env_prefix` in `model_config` to namespace env vars (e.g. `MYMODULE_API_KEY`)
-- Instantiate at module level — the proxy ensures lazy initialization
 - Never force early initialization by accessing settings at import time
 
 ### Built-in Settings References

@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Signal/event system (blinker-derived) with sync and async dispatch
 - Typer-based CLI for module and database management
 - Utility library: lazy loading, proxy objects, introspection, string helpers
-- LazySettings pattern deferring environment reads until first access
+- SettingsProxy for optional deferred environment reads on module-level singletons
 - Exception hierarchy with `BedrockExc` base and `detail` attribute pattern
 - Pydantic entity base class with `arbitrary_types_allowed`
 - Fumadocs documentation site (`docs-web/`)
