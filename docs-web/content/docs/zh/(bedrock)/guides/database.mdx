@@ -560,6 +560,6 @@ bedrock/database/
 
 **不要硬编码数据库 URL。** 使用环境变量或 `DbSettings`，让配置保持在代码之外。
 
-**不要直接为新配置使用 `BaseSettings`。** 应继承 `LazySettings` 以保留延迟初始化特性。
+**不要在模块级别直接实例化 settings（如果环境变量可能尚未就绪）。** 使用 `bedrock.conf` 中的 `SettingsProxy` 包装模块级单例以延迟初始化。
 
 **不要在核心代码中导入 `contrib` 模块。** 核心运行时不能依赖 contrib 包。

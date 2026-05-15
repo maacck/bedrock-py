@@ -1,18 +1,19 @@
-from pydantic_settings import SettingsConfigDict
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from .conf import LazySettings
+from .conf import SettingsProxy
 
 
-class BedrockSettings(LazySettings):
+class BedrockSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="BEDROCK_")
     APP: str | None = None
 
 
-class BedrockRuntimeSettings(LazySettings):
+class BedrockRuntimeSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="BEDROCK_RUNTIME_")
     APP: str | None = None
     APP_FACTORY: str
 
 
-runtime_settings = BedrockRuntimeSettings()
-settings = BedrockSettings()
+settings: BedrockSettings = SettingsProxy(BedrockSettings)  # type: ignore[assignment]
+
+__all__ = ["settings"]

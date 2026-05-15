@@ -17,7 +17,7 @@ src/bedrock/
 ├── module/        # Core runtime: registry, manifest parser, entities, lifecycle signals
 ├── signal/        # Custom blinker-derived signal system (sync + async)
 ├── utils/         # lazyload, proxy_obj, string_helpers, inspect_func
-├── conf.py        # LazySettings proxy (defers BaseSettings init until first access)
+├── conf.py        # SettingsProxy (optional thread-safe lazy wrapper for BaseSettings singletons)
 ├── constants.py   # StrEnum base class
 ├── entities.py    # BedrockEntity (Pydantic BaseModel base)
 ├── exc.py         # BedrockExc hierarchy (detail attribute pattern)
@@ -32,7 +32,7 @@ src/bedrock/
 - Database model base: `database/base.py` (`BedrockModel`, `CrudMixin`)
 - Database session management: `database/manager.py` (`DatabaseManager`, `db` singleton)
 - Cache backend registration: `contrib/cache/service.py` (`_BACKEND_REGISTRY`)
-- Settings pattern: `conf.py` (`LazySettings`, `_LazySettingsProxy`)
+- Settings pattern: `conf.py` (`SettingsProxy`), `settings.py` (`BedrockSettings`)
 - Dynamic imports: `utils/lazyload.py` (`load_string`, `load_callable`, `cached_import`)
 - Signal system: `signal/base.py` (`Signal`, `Namespace`, `ANY`)
 - Exception hierarchy: `exc.py` (base), `module/exc.py` (module-specific)
@@ -42,7 +42,7 @@ src/bedrock/
 - **Singletons**: `apps` (ModuleRegistry), `db` (DatabaseManager), `cache` (CacheService). Import from their modules, not from `__init__`.
 - **Async prefix**: async methods use `a` prefix: `aget`, `aset`, `adelete`, `aclear`, `asend`.
 - **Exception pattern**: subclass `BedrockExc`, set a `detail` class attribute, accept optional `msg` override in `__init__`.
-- **Settings**: extend `LazySettings` (not `BaseSettings` directly). Use `env_prefix` in `model_config`.
+- **Settings**: extend `BaseSettings` directly. Use `env_prefix` in `model_config`. Wrap module-level singletons with `SettingsProxy` for deferred init.
 - **Manifests**: YAML files at package root. Parsed by `ModuleManifest` (Pydantic model). Required fields: `title`, `version`.
 - **Bootstrap hooks**: optional `bootstrap.py` in module packages. Hook names: `on_load`, `ready`, `on_shutdown`. Called by registry, not imported manually.
 - **Contrib modules**: live under `contrib/`, own their `manifest.yaml`, follow same lifecycle as business modules.
@@ -57,6 +57,6 @@ src/bedrock/
 - Do not bypass `ModuleRegistry.install()` to load modules manually. Dependency resolution and lifecycle hooks will be skipped.
 - Do not put HTTP-specific types (Request, Response) in service or entity layers. Keep them at adapter boundaries.
 - Do not subclass `BedrockExc` without setting a `detail` string. Error messages depend on it.
-- Do not use `BaseSettings` directly for new settings classes. Always extend `LazySettings` to preserve deferred init.
+- Do not instantiate settings eagerly at module level without `SettingsProxy` if the environment may not be ready at import time.
 - Do not hardcode cache backend names. Use `register_backend()` and the `ClassRegistry` pattern.
 - Do not import `contrib` modules from core code. Core must not depend on contrib.

@@ -72,7 +72,7 @@ cd starlight-docs && npm run build  # Production build
 - **Type hints**: Strict, always include
 - **Async prefix**: `a` (e.g., `aget()`, `aset()`, `adelete()`)
 - **Exceptions**: `BedrockExc` hierarchy with `detail` attribute
-- **Settings**: `Pydantic BaseSettings` with lazy proxy
+- **Settings**: `Pydantic BaseSettings` with optional `SettingsProxy` for lazy singletons
 - **Imports**: Relative within-package, absolute cross-package
 
 ## Exceptions
