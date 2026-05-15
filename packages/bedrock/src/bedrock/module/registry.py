@@ -157,6 +157,7 @@ class ModuleRegistry:
         with self._lock:
             self._ready = True
 
+        self._validate_hooks()
         registry_ready.send(self, registry=self, config=self.config)
         return modules
 
@@ -215,7 +216,12 @@ class ModuleRegistry:
         return app
 
     def _call_hook(self, app: AppConfig, hook_name: str) -> None:
-        """Call a bootstrap hook if present, passing registry and module.
+        """Call a bootstrap hook if present, with introspected kwargs.
+
+        Legacy hooks with signature ``(registry, app)`` continue to work via
+        positional pass-through.  New-style hooks may declare ``container``
+        and/or ``hooks`` keyword parameters and receive the global DI
+        container or hook registry respectively.
 
         Args:
             app: The module whose bootstrap hook should be called.
@@ -228,7 +234,32 @@ class ModuleRegistry:
         if hook is None:
             return
         try:
-            hook(self, app)
+            from ..utils.inspect_func import func_accepts_kwargs, func_supports_parameter
+
+            kwargs: dict[str, Any] = {}
+            use_kwargs = False
+
+            if func_supports_parameter(hook, "registry"):
+                kwargs["registry"] = self
+                use_kwargs = True
+            if func_supports_parameter(hook, "app"):
+                kwargs["app"] = app
+                use_kwargs = True
+            if func_supports_parameter(hook, "container"):
+                from ..di import container
+
+                kwargs["container"] = container
+                use_kwargs = True
+            if func_supports_parameter(hook, "hooks"):
+                from ..hooks import hooks
+
+                kwargs["hooks"] = hooks
+                use_kwargs = True
+
+            if use_kwargs and not func_accepts_kwargs(hook):
+                hook(**kwargs)
+            else:
+                hook(self, app)
         except Exception as exc:
             raise ModuleLifecycleError(f"Hook '{hook_name}' in module '{app.name}' raised an error: {exc}") from exc
 
@@ -240,6 +271,22 @@ class ModuleRegistry:
         """
         if not self._ready:
             raise AppRegistryNotReady()
+
+    @staticmethod
+    def _validate_hooks() -> None:
+        """Run hook validation and log warnings for orphaned impls or empty specs."""
+        try:
+            from ..hooks import hooks as _hooks
+
+            warnings = _hooks.validate()
+            if warnings:
+                from ..logging import get_logger
+
+                logger = get_logger(__name__)
+                for warning in warnings:
+                    logger.warning(f"Hook validation: {warning}")
+        except ImportError:
+            pass
 
 
 apps = ModuleRegistry()
