@@ -23,7 +23,7 @@ This project follows a standard code of conduct. By participating, you are expec
 2. Clone your fork locally
 3. Create a branch for your changes
 4. Make your changes
-5. Submit a pull request
+5. Submit a pull request to the `dev` branch
 
 ## Development Setup
 
@@ -36,7 +36,7 @@ This project follows a standard code of conduct. By participating, you are expec
 
 1. Clone your fork:
    ```bash
-   git clone https://github.com/maacck/bedrock.git
+   git clone https://github.com/maacck/bedrock-py.git
    cd bedrock
    ```
 
