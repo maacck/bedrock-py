@@ -239,7 +239,7 @@ bedrock run <module> <command>  # Execute module-specific CLI
 - `typer` — CLI framework
 
 **Optional:**
-- `redis` — Redis cache backend (`uv add bedrock[cache-redis]`)
+- `redis` — Redis cache backend (`uv add bedrock-core[cache-redis]`)
 
 ## Architecture principles
 
