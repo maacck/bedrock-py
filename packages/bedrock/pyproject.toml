@@ -53,5 +53,8 @@ module-name = "bedrock"
 
 [dependency-groups]
 dev = [
-    "pytest>=9.0.3",
+    "pytest>=8.4.2",
+    "pytest-asyncio>=1.2.0",
+    "coverage>=7.13.5",
+    "pytest-cov>=7.1.0",
 ]
