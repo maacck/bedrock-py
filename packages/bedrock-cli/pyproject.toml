@@ -13,7 +13,7 @@ dependencies = [
 
 [project.urls]
 Documentation = "https://bedrock-py.com"
-Source = "https://github.com/maacck/bedrock/"
+Source = "https://github.com/maacck/bedrock-py/"
 
 
 [project.scripts]

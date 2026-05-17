@@ -61,4 +61,4 @@ Bedrock includes security-conscious defaults:
 
 For security concerns, contact the project maintainers directly via email.
 
-For non-security issues, please use [GitHub Issues](https://github.com/maacck/bedrock/issues).
+For non-security issues, please use [GitHub Issues](https://github.com/maacck/bedrock-py/issues).

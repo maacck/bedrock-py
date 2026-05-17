@@ -207,7 +207,7 @@ class TestFeature:
 
 ### Bug Reports
 
-Use the [Bug Report](https://github.com/maacck/bedrock/issues/new?template=bug_report.yml) template. Include:
+Use the [Bug Report](https://github.com/maacck/bedrock-py/issues/new?template=bug_report.yml) template. Include:
 
 - Clear description of the bug
 - Steps to reproduce
@@ -217,7 +217,7 @@ Use the [Bug Report](https://github.com/maacck/bedrock/issues/new?template=bug_r
 
 ### Feature Requests
 
-Use the [Feature Request](https://github.com/maacck/bedrock/issues/new?template=feature_request.yml) template. Include:
+Use the [Feature Request](https://github.com/maacck/bedrock-py/issues/new?template=feature_request.yml) template. Include:
 
 - Problem description
 - Proposed solution
@@ -228,7 +228,7 @@ Use the [Feature Request](https://github.com/maacck/bedrock/issues/new?template=
 If you have questions about contributing, feel free to:
 
 1. Check the [README](README.md) for project overview
-2. Open a [Discussion](https://github.com/maacck/bedrock/discussions) for general questions
+2. Open a [Discussion](https://github.com/maacck/bedrock-py/discussions) for general questions
 3. Join the community channels (if available)
 
 Thank you for contributing to Bedrock!

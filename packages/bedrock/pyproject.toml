@@ -32,10 +32,10 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/maacck/bedrock"
-Repository = "https://github.com/maacck/bedrock"
+Homepage = "https://github.com/maacck/bedrock-py"
+Repository = "https://github.com/maacck/bedrock-py"
 Documentation = "https://bedrock-py.com"
-"Bug Tracker" = "https://github.com/maacck/bedrock/issues"
+"Bug Tracker" = "https://github.com/maacck/bedrock-py/issues"
 
 [project.optional-dependencies]
 cache-redis = ["redis>=4.2.0"]
