@@ -171,23 +171,36 @@ class HookRegistry:
         """
         return fqn in self._specs
 
-    def validate(self) -> list[str]:
+    def validate(self, namespace: str | None = None) -> list[str]:
         """Validate the registry and return warning messages.
 
         Checks:
         - Implementations registered for non-existent specs.
         - Specs with zero implementations.
 
+        Args:
+            namespace: Optional namespace filter. When provided, only warnings for
+                that namespace are returned.
+
         Returns:
             List of human-readable warning strings.
         """
         warnings: list[str] = []
 
+        def in_scope(fqn: str) -> bool:
+            if namespace is None:
+                return True
+            return fqn.startswith(f"{namespace}.")
+
         for fqn in self._impls:
+            if not in_scope(fqn):
+                continue
             if fqn not in self._specs:
                 warnings.append(f"Hook impl registered for non-existent spec: {fqn}")
 
         for fqn in self._specs:
+            if not in_scope(fqn):
+                continue
             if fqn not in self._impls or not self._impls[fqn]:
                 warnings.append(f"Hook spec has no implementations: {fqn}")
 

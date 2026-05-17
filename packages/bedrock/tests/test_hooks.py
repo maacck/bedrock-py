@@ -107,6 +107,15 @@ class TestHookRegistry:
         warnings = reg.validate()
         assert warnings == []
 
+    def test_validate_can_filter_by_namespace(self) -> None:
+        reg = HookRegistry()
+        reg.register_spec("auth.login", lambda **kw: None, firstresult=False, namespace="auth")
+        reg.register_spec("cache.evict", lambda **kw: None, firstresult=False, namespace="cache")
+
+        warnings = reg.validate(namespace="auth")
+
+        assert warnings == ["Hook spec has no implementations: auth.login"]
+
     def test_namespaces_lists_registered_namespaces(self) -> None:
         reg = HookRegistry()
         reg.register_spec("auth.login", lambda **kw: None, firstresult=False, namespace="auth")
@@ -337,6 +346,30 @@ class TestHookNamespace:
         ns.add_specs_from(Spec)
 
         assert ns.specs() == ["login", "logout"]
+
+    def test_validate_only_reports_namespace_warnings(self) -> None:
+        reg = HookRegistry()
+        auth = HookNamespace("auth", registry=reg)
+        cache = HookNamespace("cache", registry=reg)
+
+        class AuthSpec:
+            @hookspec
+            def login(self, user: str) -> bool: ...
+
+        class CacheSpec:
+            @hookspec
+            def evict(self, key: str) -> None: ...
+
+        class CacheImpl:
+            @hookimpl
+            def evict(self, key: str) -> None:
+                return None
+
+        auth.add_specs_from(AuthSpec)
+        cache.add_specs_from(CacheSpec)
+        cache.add_impls_from(CacheImpl())
+
+        assert auth.validate() == ["Hook spec has no implementations: auth.login"]
 
     def test_reset_clears_only_this_namespace(self) -> None:
         reg = HookRegistry()

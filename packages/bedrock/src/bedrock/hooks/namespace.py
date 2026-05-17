@@ -209,6 +209,10 @@ class HookNamespace:
         prefix = f"{self._name}."
         return sorted(fqn[len(prefix) :] for fqn in self._registry._specs if fqn.startswith(prefix))
 
+    def validate(self) -> list[str]:
+        """Validate only the specs and implementations in this namespace."""
+        return self._registry.validate(namespace=self._name)
+
     def reset(self) -> None:
         """Clear all specs and impls belonging to this namespace only."""
         self._registry.reset(namespace=self._name)
