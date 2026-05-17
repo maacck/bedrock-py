@@ -11,6 +11,8 @@ It provides manifest-driven module loading, lifecycle management, and first-part
 This package contains production-ready subsystems:
 
 - Module registry with dependency resolution and lifecycle hooks
+- Dependency injection container with singleton/transient/scoped lifetimes
+- Hook system for structured call/response extension points (sync, async, robust)
 - SQLAlchemy 2.0 database layer with Alembic migrations
 - Cache system with memory and Redis backends
 - Signal/event system (blinker-derived)
@@ -49,6 +51,8 @@ from bedrock.contrib.cache import cache  # CacheService
 | Singleton | Class | Import |
 |-----------|-------|--------|
 | `apps` | `ModuleRegistry` | `from bedrock.module import apps` |
+| `container` | `Container` | `from bedrock.di import container` |
+| `hooks` | `HookRegistry` | `from bedrock.hooks import hooks` |
 | `db` | `DatabaseManager` | `from bedrock.database import db` |
 | `cache` | `CacheService` | `from bedrock.contrib.cache import cache` |
 

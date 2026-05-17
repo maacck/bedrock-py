@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import threading
 from typing import Any
 
@@ -127,15 +128,14 @@ class ModuleRegistry:
                 raise RuntimeError("populate() is not reentrant.")
             self._loading = True
 
-        for import_path in import_paths:
-            self.install(import_path)
+        try:
+            for import_path in import_paths:
+                self.install(import_path)
 
-        result = self.mark_ready()
-
-        with self._lock:
-            self._loading = False
-
-        return result
+            return self.mark_ready()
+        finally:
+            with self._lock:
+                self._loading = False
 
     def mark_ready(self) -> list[AppConfig]:
         """Call each module's ``ready`` hook then emit registry-level signals.
@@ -157,6 +157,7 @@ class ModuleRegistry:
         with self._lock:
             self._ready = True
 
+        self._validate_hooks()
         registry_ready.send(self, registry=self, config=self.config)
         return modules
 
@@ -215,7 +216,12 @@ class ModuleRegistry:
         return app
 
     def _call_hook(self, app: AppConfig, hook_name: str) -> None:
-        """Call a bootstrap hook if present, passing registry and module.
+        """Call a bootstrap hook if present using keyword injection only.
+
+        Hooks must accept keyword invocation using the injected names
+        ``registry``, ``app``, ``container``, and ``hooks``. Hooks may declare
+        any supported subset or ``**kwargs`` to receive all injected values.
+        Legacy positional-only contracts are rejected with a clear error.
 
         Args:
             app: The module whose bootstrap hook should be called.
@@ -228,9 +234,95 @@ class ModuleRegistry:
         if hook is None:
             return
         try:
-            hook(self, app)
+            hook(**self._get_hook_kwargs(app=app, hook_name=hook_name, hook=hook))
         except Exception as exc:
             raise ModuleLifecycleError(f"Hook '{hook_name}' in module '{app.name}' raised an error: {exc}") from exc
+
+    def _get_hook_kwargs(self, app: AppConfig, hook_name: str, hook: Any) -> dict[str, Any]:
+        """Return injected kwargs for a bootstrap hook or raise on invalid signatures.
+
+        Args:
+            app: Module app config associated with the hook.
+            hook_name: Lifecycle hook name.
+            hook: Hook callable.
+
+        Returns:
+            Keyword arguments that should be passed to the hook.
+
+        Raises:
+            TypeError: If the hook cannot be invoked via the supported keyword contract.
+        """
+        from ..di import container
+        from ..hooks import hooks
+
+        provided_kwargs = {
+            "registry": self,
+            "app": app,
+            "container": container,
+            "hooks": hooks,
+        }
+
+        parameters = tuple(inspect.signature(hook).parameters.values())
+        accepts_var_keyword = any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters)
+
+        kwargs: dict[str, Any] = {}
+        missing_required: list[str] = []
+        positional_only: list[str] = []
+
+        for parameter in parameters:
+            if parameter.kind == inspect.Parameter.VAR_KEYWORD:
+                continue
+
+            if parameter.kind == inspect.Parameter.VAR_POSITIONAL:
+                continue
+
+            if parameter.kind == inspect.Parameter.POSITIONAL_ONLY:
+                positional_only.append(parameter.name)
+                if parameter.default is inspect.Parameter.empty:
+                    missing_required.append(parameter.name)
+                continue
+
+            if parameter.name in provided_kwargs:
+                kwargs[parameter.name] = provided_kwargs[parameter.name]
+                continue
+
+            if parameter.default is inspect.Parameter.empty:
+                missing_required.append(parameter.name)
+
+        if missing_required:
+            raise TypeError(self._format_invalid_hook_signature_error(app=app, hook_name=hook_name, missing_required=missing_required, positional_only=positional_only))
+
+        if accepts_var_keyword:
+            return provided_kwargs
+
+        if kwargs:
+            return kwargs
+
+        raise TypeError(self._format_invalid_hook_signature_error(app=app, hook_name=hook_name, missing_required=[], positional_only=positional_only))
+
+    @staticmethod
+    def _format_invalid_hook_signature_error(
+        app: AppConfig,
+        hook_name: str,
+        missing_required: list[str],
+        positional_only: list[str],
+    ) -> str:
+        """Return a human-readable bootstrap hook signature error message."""
+        details = [
+            f"Bootstrap hook '{hook_name}' in module '{app.name}' must accept keyword invocation using the injected names "
+            "'registry', 'app', 'container', and 'hooks'."
+        ]
+
+        if missing_required:
+            details.append(f"Unsupported required parameters: {', '.join(missing_required)}.")
+
+        if positional_only:
+            details.append(f"Positional-only parameters cannot be injected by keyword: {', '.join(positional_only)}.")
+
+        if not missing_required and not positional_only:
+            details.append("The hook signature does not declare any supported injected keyword parameters.")
+
+        return " ".join(details)
 
     def _check_ready(self) -> None:
         """Raise if the registry has not been fully readied.
@@ -240,6 +332,22 @@ class ModuleRegistry:
         """
         if not self._ready:
             raise AppRegistryNotReady()
+
+    @staticmethod
+    def _validate_hooks() -> None:
+        """Run hook validation and log warnings for orphaned impls or empty specs."""
+        try:
+            from ..hooks import hooks as _hooks
+
+            warnings = _hooks.validate()
+            if warnings:
+                from ..logging import get_logger
+
+                logger = get_logger(__name__)
+                for warning in warnings:
+                    logger.warning(f"Hook validation: {warning}")
+        except ImportError:
+            pass
 
 
 apps = ModuleRegistry()

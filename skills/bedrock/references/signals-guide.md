@@ -2,6 +2,8 @@
 
 Blinker-derived event system with sync/async support and lifecycle signals. Implementation: `bedrock.signal`.
 
+> **Need call/response with return values?** Use the hook system (`bedrock.hooks`) instead. Signals are notification-only.
+
 ## Table of Contents
 
 1. [Creating Signals](#creating-signals)
@@ -12,7 +14,8 @@ Blinker-derived event system with sync/async support and lifecycle signals. Impl
 6. [Lifecycle Signals](#lifecycle-signals)
 7. [Weak References](#weak-references)
 8. [Sync/Async Interop](#syncasync-interop)
-9. [Anti-Patterns](#anti-patterns)
+9. [Signals vs Hooks](#signals-vs-hooks)
+10. [Anti-Patterns](#anti-patterns)
 
 ---
 
@@ -411,6 +414,57 @@ await order_placed.asend(app, order_id="ORD-001")
 ```
 
 **Rule**: In mixed sync/async codebases, prefer `asend()` as the default dispatch method. It handles both sync and async receivers seamlessly. Sync receivers are automatically wrapped via `asyncio.to_thread`.
+
+---
+
+## Signals vs Hooks
+
+Bedrock offers two distinct mechanisms for cross-module communication:
+
+| Aspect | Signals (`bedrock.signal`) | Hooks (`bedrock.hooks`) |
+|--------|---------------------------|------------------------|
+| **Pattern** | Notification (fire-and-forget) | Call/response (returns values) |
+| **Return values** | Ignored by sender | Collected and returned to caller |
+| **Ordering** | Unspecified (set-based) | Priority-sorted (lower runs first) |
+| **Short-circuit** | No | `firstresult=True` stops after first non-None result |
+| **Registration** | `signal.connect(receiver)` | `@hookimpl` decorator or `ns.impl()` |
+| **Dispatch** | `signal.send()` / `signal.asend()` | `hooks.call(fqn)` / `hooks.acall(fqn)` |
+| **Best for** | Lifecycle events, loose coupling | Extension points, middleware chains |
+
+**Use signals when** you want to notify listeners about something that happened, and you don't care about return values. Example: "a user was created, update your cache."
+
+**Use hooks when** you want to define an extension point where implementations contribute behavior or return values. Example: "authenticate this request, first valid result wins."
+
+```python
+# SIGNAL: notification only
+from bedrock.signal import Signal
+user_created = Signal("user_created")
+
+@user_created.connect
+def on_user_created(sender, **kwargs):
+    send_welcome_email(kwargs["user"])  # Fire-and-forget
+
+user_created.send(sender, user=new_user)
+
+
+# HOOK: call/response with return values
+from bedrock.hooks import HookNamespace
+auth = HookNamespace("auth")
+
+@auth.spec(firstresult=True)
+def authenticate(request):
+    """Return user if authenticated, None otherwise."""
+
+@auth.impl(priority=10)
+def check_token(request):
+    if valid_token(request.token):
+        return get_user_from_token(request.token)
+    return None  # Let next impl try
+
+request = Request(token="...")
+results = auth.call("authenticate", request=request)
+user = results[0] if results else None
+```
 
 ---
 

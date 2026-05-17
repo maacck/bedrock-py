@@ -81,7 +81,7 @@ commands: "commands:app"
 在使用 Bedrock 时，不要这样做：
 
 - 不要在 service 层导入 HTTP 类型
-- 不要直接使用 `BaseSettings`（请使用 `LazySettings`）
+- 不要在模块级别直接实例化 settings（如果环境变量可能尚未就绪），请使用 `SettingsProxy`
 - 不要绕过 `ModuleRegistry.install()` 加载模块
 - 不要把 API endpoints 放进 service 文件
 

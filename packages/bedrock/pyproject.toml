@@ -1,5 +1,5 @@
 [project]
-name = "bedrock"
+name = "bedrock-core"
 version = "0.1.0"
 description = "A modular Python application framework with manifest-driven module loading, lifecycle management, and contrib modules."
 readme = "README.md"
@@ -39,7 +39,6 @@ Documentation = "https://bedrock-py.com"
 
 [project.optional-dependencies]
 cache-redis = ["redis>=4.2.0"]
-cache-memcached = ["aiomcache>=0.7.0", "pymemcache>=4.0.0"]
 
 [project.scripts]
 bedrock = "bedrock.cli.main:entrypoint"
@@ -47,6 +46,10 @@ bedrock = "bedrock.cli.main:entrypoint"
 [build-system]
 requires = ["uv_build>=0.8.15,<0.9.0"]
 build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-root = "src"
+module-name = "bedrock"
 
 [dependency-groups]
 dev = [

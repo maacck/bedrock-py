@@ -5,6 +5,9 @@ description: Blinker-derived event system with sync/async support and lifecycle 
 
 Bedrock includes a signal system derived from [Blinker](https://blinker.readthedocs.io/) that provides decoupled event notifications with first-class async support. The implementation lives under `bedrock.signal`.
 
+If you need structured extension points with ordered execution and return values,
+see [Hook System](/docs/guides/hooks) instead.
+
 ## Quick Start
 
 Create a signal, connect a receiver, and send it:
@@ -432,6 +435,25 @@ Use the `receivers` attribute for a quick boolean check:
 if order_placed.receivers:
     print("At least one receiver is connected")
 ```
+
+## Signals vs Hooks
+
+Bedrock has two extension mechanisms: **signals** and **hooks**. They serve different purposes.
+
+| | Signals | Hooks |
+|---|---------|-------|
+| **Pattern** | Fire-and-forget notification | Structured call/response |
+| **Return values** | Receivers return values, but senders typically ignore them | Implementations' return values are collected and returned to the caller |
+| **Ordering** | No guaranteed order (uses a set) | Priority-sorted, deterministic |
+| **Extension** | Anyone can connect a receiver | Modules declare specs and register implementations |
+| **Error handling** | `send_robust` catches per-receiver | `call_robust` catches per-implementation |
+| **Use case** | Decoupled event notifications | Pluggable extension points where the caller needs results |
+
+**When to use signals:** You want to notify listeners that something happened, and you don't care about their response. Lifecycle events (`module_loaded`, `registry_ready`) are a good example.
+
+**When to use hooks:** You want to let modules contribute behavior to a well-defined call, and you need the combined results back. Authentication, validation, and transformation pipelines are good examples.
+
+For more on the hook system, see the [Hooks guide](/docs/guides/hooks).
 
 ## Anti-Patterns
 

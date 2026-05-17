@@ -171,23 +171,26 @@ class DuplicateSkuError(BedrockExc):
 
 ### `bootstrap.py`
 
-Lifecycle hooks called by the registry at specific stages. Each hook receives the `ModuleRegistry` and the module's `AppConfig`.
+Lifecycle hooks called by the registry at specific stages. Hooks use keyword-only signatures — the registry inspects each hook's parameters and injects them by name automatically.
 
 ```python
 from bedrock.module.registry import ModuleRegistry
 from bedrock.module.entities import AppConfig
 
 
-def on_load(registry: ModuleRegistry, app: AppConfig) -> None:
+def on_load(*, registry: ModuleRegistry, app: AppConfig, container, hooks) -> None:
     """Called when this module is first loaded.
 
-    Use for registering signal receivers, setting up module-level state,
-    or validating configuration.
+    Parameters are injected by name:
+    - registry: the ModuleRegistry instance
+    - app: this module's AppConfig
+    - container: the global DI container (bedrock.di.container)
+    - hooks: the global HookRegistry (bedrock.hooks.hooks)
     """
     print(f"Module '{app.name}' loaded (v{app.manifest.version})")
 
 
-def ready(registry: ModuleRegistry, app: AppConfig) -> None:
+def ready(*, registry: ModuleRegistry, app: AppConfig) -> None:
     """Called after ALL modules have been loaded.
 
     Use for cross-module setup that depends on other modules being available.
@@ -195,7 +198,7 @@ def ready(registry: ModuleRegistry, app: AppConfig) -> None:
     print(f"Module '{app.name}' ready")
 
 
-def on_shutdown(registry: ModuleRegistry, app: AppConfig) -> None:
+def on_shutdown(*, registry: ModuleRegistry, app: AppConfig) -> None:
     """Called during graceful shutdown (reverse dependency order).
 
     Use for cleanup: closing connections, flushing buffers, releasing resources.
@@ -243,30 +246,39 @@ Bedrock modules participate in a three-phase lifecycle managed by the `ModuleReg
 
 ### Hook Signatures
 
-All hooks receive two arguments:
+Hooks may declare keyword parameters by name. The registry inspects the signature and injects matching arguments automatically:
 
 ```python
-def hook_name(registry: ModuleRegistry, app: AppConfig) -> None: ...
+def hook_name(*, registry, app, container, hooks) -> None: ...
 ```
 
-- `registry` — the `ModuleRegistry` instance managing all modules
-- `app` — the current module's `AppConfig` (contains manifest, package info, state)
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `registry` | `ModuleRegistry` | The registry managing all modules |
+| `app` | `AppConfig` | The current module's config (manifest, package info, state) |
+| `container` | `Container` | The global DI container (`bedrock.di.container`) |
+| `hooks` | `HookRegistry` | The global hook registry (`bedrock.hooks.hooks`) |
+
+For dedicated API details, see [Dependency Injection](/docs/guides/di) and
+[Hook System](/docs/guides/hooks).
+
+Only declare the parameters you need — the registry injects only what it finds in the signature.
 
 ### Call Order
 
 ```
 install("module_a")
   ├── Install dependencies (recursive)
-  ├── on_load(registry, app)        ← per-module, in dependency order
+  ├── on_load(*, registry, app)     ← per-module, in dependency order
   └── Signal: module_loaded
 
 mark_ready()
-  ├── ready(registry, app)          ← per-module, in install order
+  ├── ready(*, registry, app)       ← per-module, in install order
   ├── Signal: module_ready          ← per-module
   └── Signal: registry_ready        ← once, after all modules
 
 shutdown()
-  ├── on_shutdown(registry, app)    ← per-module, REVERSE install order
+  ├── on_shutdown(*, registry, app) ← per-module, REVERSE install order
   ├── Signal: module_shutdown       ← per-module
   └── Signal: registry_shutdown     ← once, after all modules
 ```
@@ -365,17 +377,17 @@ from bedrock.module.registry import ModuleRegistry
 from bedrock.module.entities import AppConfig
 
 
-def on_load(registry: ModuleRegistry, app: AppConfig) -> None:
+def on_load(*, registry: ModuleRegistry, app: AppConfig) -> None:
     """Module loaded — initialize state."""
     pass
 
 
-def ready(registry: ModuleRegistry, app: AppConfig) -> None:
+def ready(*, registry: ModuleRegistry, app: AppConfig) -> None:
     """All modules ready — safe for cross-module work."""
     pass
 
 
-def on_shutdown(registry: ModuleRegistry, app: AppConfig) -> None:
+def on_shutdown(*, registry: ModuleRegistry, app: AppConfig) -> None:
     """Shutdown — clean up resources."""
     pass
 ```

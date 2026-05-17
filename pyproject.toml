@@ -3,7 +3,7 @@ name = "bedrock-mono"
 version = "0.1.0"
 description = "Bedrock monorepo workspace coordinator"
 requires-python = ">=3.12"
-dependencies = ["bedrock"]
+dependencies = []
 
 [tool.uv.workspace]
 members = ["packages/*"]
@@ -23,7 +23,7 @@ docs = [
 ]
 
 [tool.uv.sources]
-bedrock = { workspace = true }
+bedrock-core = { workspace = true }
 bedrock-cli = { workspace = true }
 
 

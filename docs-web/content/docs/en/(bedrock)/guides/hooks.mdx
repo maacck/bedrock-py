@@ -1,0 +1,220 @@
+---
+title: Hook System
+description: Define structured extension points with hookspecs and hook implementations
+---
+
+# Hook System
+
+Bedrock includes a structured hook system in `bedrock.hooks` for module
+extension points that need ordered execution and return values.
+
+Use hooks when a caller needs a response from one or more implementations.
+Use signals when you only want to broadcast that something happened.
+
+## Quick Start
+
+```python
+from bedrock.hooks import HookNamespace
+
+payment_hooks = HookNamespace("payment")
+
+
+@payment_hooks.spec(firstresult=True)
+def process(method: str, amount: int) -> str | None:
+    ...
+
+
+class CardHooks:
+    @payment_hooks.impl(priority=0)
+    def process(self, method: str, amount: int) -> str | None:
+        if method == "card":
+            return "charged"
+        return None
+
+
+payment_hooks.add_impls_from(CardHooks(), module="card_gateway")
+
+
+result = payment_hooks.call("process", method="card", amount=100)
+assert result == ["charged"]
+```
+
+## Core Concepts
+
+### Hook registry
+
+`bedrock.hooks.hooks` is the global `HookRegistry`. It stores all hook specs and
+implementations by fully-qualified name.
+
+### Hook namespace
+
+`HookNamespace("auth")` scopes hook names under a module-owned namespace such as:
+
+- `auth.authenticate`
+- `auth.get_permissions`
+
+This keeps extension points explicit and avoids global name collisions.
+
+### Hookspec vs hookimpl
+
+| Concept | Purpose |
+|---|---|
+| `@hookspec` | Declares an extension point |
+| `@hookimpl` | Provides one implementation of that extension point |
+
+## Declaring Specs
+
+```python
+from bedrock.hooks import HookNamespace
+
+auth_hooks = HookNamespace("auth")
+
+
+@auth_hooks.spec(firstresult=True)
+def authenticate(token: str) -> str | None:
+    ...
+
+
+@auth_hooks.spec
+def get_permissions(user_id: str) -> list[str]:
+    ...
+```
+
+If `firstresult=True`, dispatch stops after the first non-`None` result.
+
+## Registering Implementations
+
+```python
+from bedrock.hooks import hookimpl
+
+
+class JwtHooks:
+    @hookimpl(priority=0)
+    def authenticate(self, token: str) -> str | None:
+        if token == "jwt-token":
+            return "user-1"
+        return None
+```
+
+```python
+auth_hooks.add_impls_from(JwtHooks(), module="jwt_auth")
+```
+
+Lower priority values run first.
+
+## Calling Hooks
+
+### Synchronous calls
+
+```python
+results = auth_hooks.call("get_permissions", user_id="user-1")
+```
+
+### Asynchronous calls
+
+```python
+results = await auth_hooks.acall("get_permissions", user_id="user-1")
+```
+
+Async hook calls await async implementations and automatically wrap sync
+implementations with `asyncio.to_thread()`.
+
+### Robust calls
+
+```python
+results = auth_hooks.call_robust("get_permissions", user_id="user-1")
+```
+
+Robust calls collect `Exception` results instead of raising immediately.
+
+## Registration by Scanning
+
+For larger hook sets, use marker decorators plus scanning.
+
+```python
+from bedrock.hooks import HookNamespace, hookimpl, hookspec
+
+search_hooks = HookNamespace("search")
+
+
+class SearchSpecs:
+    @hookspec
+    def providers(self) -> list[str]:
+        ...
+
+
+class ElasticHooks:
+    @hookimpl(priority=0)
+    def providers(self) -> list[str]:
+        return ["elastic"]
+```
+
+```python
+search_hooks.add_specs_from(SearchSpecs)
+search_hooks.add_impls_from(ElasticHooks(), module="elastic")
+```
+
+## Hooks in Module Bootstrap
+
+Modules usually register implementations in `bootstrap.py`.
+
+```python
+from modules.auth.hookspecs import auth_hooks
+
+
+class ApiKeyHooks:
+    def authenticate(self, token: str) -> str | None:
+        if token == "api-key":
+            return "user-2"
+        return None
+
+
+def on_load(*, app) -> None:
+    auth_hooks.add_impls_from(ApiKeyHooks(), module=app.name)
+```
+
+Bootstrap hooks may request the global `hooks` registry by name if needed.
+
+## Validation and Introspection
+
+```python
+warnings = auth_hooks.validate()
+impls = auth_hooks.get_impls("authenticate")
+spec_names = auth_hooks.specs()
+```
+
+At registry ready time, Bedrock validates registered hooks and logs warnings for:
+
+- implementations without a matching spec
+- specs with zero implementations
+
+## Signals vs Hooks
+
+| Need | Use |
+|---|---|
+| Fire-and-forget notification | Signals |
+| Ordered call/response extension point | Hooks |
+| Receiver return values | Hooks |
+| Decoupled event broadcast | Signals |
+
+See [Signals](/docs/guides/signals) for the event model.
+
+## Testing Utilities
+
+Bedrock exposes pytest fixtures for hooks under `bedrock.testing`:
+
+- `clean_hooks`
+- `hook_registry`
+- `hook_namespace`
+
+## Anti-Patterns
+
+- Do not use hooks when a normal function call is simpler
+- Do not use signals when the caller needs ordered return values
+- Do not let unrelated modules own another module's namespace; the spec owner should define the namespace
+
+## See Also
+
+- [Signals](/docs/guides/signals)
+- [Dependency Injection](/docs/guides/di)
+- [Module Anatomy](/docs/guides/module-anatomy)

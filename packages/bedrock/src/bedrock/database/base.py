@@ -18,7 +18,7 @@ class CrudMixin:
                 setattr(self, key, value)
 
     def delete(self):
-        if self._object_session is not None:
+        if self._object_session is None:
             raise BedrockExc("Cannot delete an object that is not attached to a session.")
         self._object_session.delete(self)
 

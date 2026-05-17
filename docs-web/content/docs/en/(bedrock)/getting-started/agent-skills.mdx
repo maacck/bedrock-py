@@ -81,7 +81,7 @@ Where different types of code belong:
 What NOT to do when working with Bedrock:
 
 - Don't import HTTP types in service layer
-- Don't use `BaseSettings` directly (use `LazySettings`)
+- Don't eagerly instantiate settings at module level without `SettingsProxy` if env vars may not be ready
 - Don't bypass `ModuleRegistry.install()` for loading modules
 - Don't put API endpoints in service files
 

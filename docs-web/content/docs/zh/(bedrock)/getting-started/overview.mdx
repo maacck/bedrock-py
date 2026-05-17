@@ -12,6 +12,8 @@ Bedrock 是一个模块化 Python 应用框架，适合希望拥有可预测架�
 这不是蓝图，也不是概念验证。Bedrock 已包含可用于生产的子系统：
 
 - 带依赖解析和生命周期钩子的模块注册表
+- 依赖注入容器，支持 singleton/transient/scoped 服务生命周期
+- 用于结构化调用/响应扩展点的 Hook 系统
 - 基于 SQLAlchemy 2.0 和 Alembic migrations 的数据库层
 - 信号/事件系统（衍生自 blinker）
 - 基于 Typer 的 CLI，用于模块和数据库管理
@@ -63,6 +65,8 @@ Bedrock 为常见操作提供了几个关键单例：
 | 单例 | 类 | 用途 |
 |-----------|-------|---------|
 | `bedrock.apps` | `ModuleRegistry` | 模块生命周期 |
+| `bedrock.di.container` | `Container` | 依赖注入 |
+| `bedrock.hooks.hooks` | `HookRegistry` | Hook specs 和 implementations |
 | `bedrock.db` | `DatabaseManager` | 数据库操作 |
 
 ## 架构
@@ -72,6 +76,8 @@ graph TB
     App[Your Application] --> Bedrock[Bedrock Runtime]
     Bedrock --> Registry[Module Registry]
     Bedrock --> DB[Database Layer]
+    Bedrock --> DI[DI Container]
+    Bedrock --> HookSys[Hook System]
     Bedrock --> Signal[Signal System]
 
     Registry --> Modules[Business Modules]
@@ -141,6 +147,42 @@ def on_user_created(sender, user):
     print(f"User created: {user.name}")
 
 user_created.send(current_app, user=new_user)
+```
+
+### 依赖注入
+
+```python
+from bedrock.di import container, provider, inject, Lifetime
+
+@provider(lifetime=Lifetime.SCOPED)
+class UserService:
+    def get_user(self, user_id: str) -> User: ...
+
+@inject(user_service=UserService)
+def handle_request(*, user_service):
+    return user_service.get_user("u-42")
+
+# Scoped resolution
+with container.scope():
+    result = handle_request()
+```
+
+### Hook 系统
+
+```python
+from bedrock.hooks import hooks
+
+ns = hooks.namespace("auth")
+
+@ns.spec(firstresult=True)
+def authenticate(user, password): ...
+
+@ns.impl(priority=10)
+def check_password(user, password):
+    return verify_password(user, password)
+
+# Dispatch
+results = ns.call("authenticate", user="alice", password="s3cret")
 ```
 
 ## CLI 命令

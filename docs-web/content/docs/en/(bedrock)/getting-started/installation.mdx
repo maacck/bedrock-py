@@ -31,14 +31,13 @@ Bedrock provides optional dependency groups for additional backends:
 
 <Tabs items={['Redis Cache', 'Memcached Cache']}>
   <Tab value="Redis Cache"><CodeBlock code={'uv add bedrock[cache-redis]'} lang={'bash'} /></Tab>
-  <Tab value="Memcached Cache"><CodeBlock code={'uv add bedrock[cache-memcached]'} lang={'bash'} /></Tab>
+
 
 </Tabs>
 
 | Extra | Packages | Description |
 |-------|----------|-------------|
 | `cache-redis` | `redis>=4.2.0` | Redis-backed distributed cache |
-| `cache-memcached` | `aiomcache>=0.7.0`, `pymemcache>=4.0.0` | Memcached cache backend |
 
 ## Project Initialization
 
