@@ -155,6 +155,28 @@ class TestPopulate:
         with pytest.raises(RuntimeError, match="not reentrant"):
             registry.populate(["reent"])
 
+    def test_populate_resets_loading_flag_after_hook_failure(self, fake_package: Path) -> None:
+        make_fake_module(
+            fake_package,
+            "bad_load",
+            manifest={"title": "BadLoad", "version": "1"},
+            bootstrap="def on_load(r, a): pass\n",
+        )
+        make_fake_module(fake_package, "good_load", manifest={"title": "GoodLoad", "version": "1"})
+
+        registry = ModuleRegistry()
+
+        with pytest.raises(ModuleLifecycleError, match="must accept keyword invocation"):
+            registry.populate(["bad_load"])
+
+        assert registry._loading is False
+        assert registry.is_installed("bad_load") is True
+
+        result = registry.populate(["good_load"])
+
+        assert registry.ready is True
+        assert [app.name for app in result] == ["bad_load", "good_load"]
+
 
 class TestMarkReady:
     """Lifecycle transition from *loaded* to *ready*."""
@@ -162,14 +184,14 @@ class TestMarkReady:
     def test_calls_ready_hooks_and_emits_signals(self, fake_package: Path) -> None:
         calls: list[str] = []
 
-        def ready_hook(registry: ModuleRegistry, app: AppConfig) -> None:
+        def ready_hook(*, registry: ModuleRegistry, app: AppConfig) -> None:
             calls.append(f"ready:{app.name}")
 
         make_fake_module(
             fake_package,
             "ready_mod",
             manifest={"title": "Ready", "version": "1"},
-            bootstrap="def ready(r, a): __import__('builtins')._test_calls.append(f'ready:{a.name}')\n",
+            bootstrap="def ready(*, app): __import__('builtins')._test_calls.append(f'ready:{app.name}')\n",
         )
 
         # Patch the hook into the bootstrap module after import
@@ -214,7 +236,7 @@ class TestMarkReady:
             fake_package,
             "bad_ready",
             manifest={"title": "Bad Ready", "version": "1"},
-            bootstrap="def ready(r, a): raise ValueError('boom')\n",
+            bootstrap="def ready(*, registry, app): raise ValueError('boom')\n",
         )
 
         registry = ModuleRegistry()
@@ -232,13 +254,13 @@ class TestShutdown:
             fake_package,
             "first",
             manifest={"title": "First", "version": "1"},
-            bootstrap="def on_shutdown(r, a): __import__('builtins')._shutdown_order.append(a.name)\n",
+            bootstrap="def on_shutdown(*, app): __import__('builtins')._shutdown_order.append(app.name)\n",
         )
         make_fake_module(
             fake_package,
             "second",
             manifest={"title": "Second", "version": "1", "depends_on": ["first"]},
-            bootstrap="def on_shutdown(r, a): __import__('builtins')._shutdown_order.append(a.name)\n",
+            bootstrap="def on_shutdown(*, app): __import__('builtins')._shutdown_order.append(app.name)\n",
         )
 
         import builtins
@@ -273,7 +295,7 @@ class TestShutdown:
             fake_package,
             "bad_shutdown",
             manifest={"title": "Bad Shutdown", "version": "1"},
-            bootstrap="def on_shutdown(r, a): raise RuntimeError('shutdown boom')\n",
+            bootstrap="def on_shutdown(*, registry, app): raise RuntimeError('shutdown boom')\n",
         )
 
         registry = ModuleRegistry()
@@ -291,7 +313,7 @@ class TestLifecycleHooks:
             fake_package,
             "load_mod",
             manifest={"title": "Load", "version": "1"},
-            bootstrap="def on_load(r, a): __import__('builtins')._load_calls.append(a.name)\n",
+            bootstrap="def on_load(*, app): __import__('builtins')._load_calls.append(app.name)\n",
         )
 
         import builtins
@@ -308,13 +330,28 @@ class TestLifecycleHooks:
             fake_package,
             "bad_load",
             manifest={"title": "Bad Load", "version": "1"},
-            bootstrap="def on_load(r, a): raise ZeroDivisionError('load boom')\n",
+            bootstrap="def on_load(*, registry, app): raise ZeroDivisionError('load boom')\n",
         )
 
         registry = ModuleRegistry()
 
         with pytest.raises(ModuleLifecycleError, match="on_load.*raised an error"):
             registry.install("bad_load")
+
+    def test_unsupported_legacy_positional_hook_raises_clear_error(self, fake_package: Path) -> None:
+        make_fake_module(
+            fake_package,
+            "legacy_bad_load",
+            manifest={"title": "Legacy Bad Load", "version": "1"},
+            bootstrap="def on_load(r, a): pass\n",
+        )
+
+        registry = ModuleRegistry()
+
+        with pytest.raises(ModuleLifecycleError, match="must accept keyword invocation") as exc_info:
+            registry.install("legacy_bad_load")
+
+        assert "Unsupported required parameters: r, a" in str(exc_info.value)
 
     def test_module_loaded_signal_emitted(self, fake_package: Path) -> None:
         make_fake_module(fake_package, "sig_mod", manifest={"title": "Sig", "version": "1"})

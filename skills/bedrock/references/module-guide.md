@@ -188,7 +188,7 @@ except UserError as e:
 ## Bootstrap Hooks
 
 **File**: `bootstrap.py`
-**Signature**: `(registry: ModuleRegistry, app: AppConfig) -> None`
+**Contract**: Bedrock always calls hooks with keyword arguments. Use keyword-only signatures.
 
 ### Available Hooks
 
@@ -198,23 +198,35 @@ except UserError as e:
 | `ready` | After ALL modules are installed | Configure services, start background tasks |
 | `on_shutdown` | During `shutdown()`, in REVERSE order | Cleanup, close connections |
 
+### Available Named Parameters
+
+The registry inspects each hook's signature and injects only the parameters it declares:
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `registry` | `ModuleRegistry` | The global module registry |
+| `app` | `AppConfig` | This module's configuration |
+| `container` | `Container` | The global DI container (`from bedrock.di`) |
+| `hooks` | `HookRegistry` | The global hook registry (`from bedrock.hooks`) |
+
 ### Example
 
 ```python
-
-def on_load(**kwargs) -> None:
+def on_load(*, registry, app) -> None:
     """Called during module installation."""
     if not registry.is_installed("myproject.core"):
         raise RuntimeError("myproject.core must be installed first")
 
 
-def ready(**kwargs) -> None:
+def ready(*, registry, app, container, hooks) -> None:
     """Called after all modules are installed."""
     from .service import user_service
     user_service.initialize()
+    # Register services in the DI container
+    container.register(IUserRepo, factory=UserRepo, lifetime=Lifetime.SINGLETON)
 
 
-def on_shutdown(**kwargs) -> None:
+def on_shutdown(*, registry, app) -> None:
     """Called during shutdown."""
     from .service import user_service
     user_service.cleanup()
@@ -222,7 +234,8 @@ def on_shutdown(**kwargs) -> None:
 
 ### Rules
 
-- Hook signature is ALWAYS `(registry: ModuleRegistry, app: AppConfig) -> None`
+- Use keyword-only signatures (`def on_load(*, registry, app)`) — Bedrock always passes keyword arguments
+- Declare only the parameters you need; the registry injects only what it finds in the signature
 - Hooks are called by the registry — do NOT import or call them manually
 - `ready` is the most common hook for service initialization
 - `on_shutdown` runs in REVERSE install order (last installed = first shutdown)
@@ -279,6 +292,128 @@ user_created.send(sender, user=new_user)
 
 # Send (async)
 await user_created.asend(sender, user=new_user)
+```
+
+---
+
+## Signals vs Hooks
+
+Bedrock has two cross-module communication mechanisms. Use the right one for the job:
+
+| Aspect | Signals | Hooks |
+|--------|---------|-------|
+| Pattern | Notification (fire-and-forget) | Call/response (returns values) |
+| Return values | Ignored | Collected and returned |
+| Ordering | Unspecified | Priority-sorted (lower runs first) |
+| Short-circuit | No | `firstresult=True` stops after first non-None |
+| Registration | `signal.connect(receiver)` | `@hookimpl` decorator or `ns.impl()` |
+| Best for | Lifecycle events, loose coupling | Extension points, middleware, authentication |
+
+**Rule of thumb**: If you need a return value to drive logic, use hooks. If you just want to notify listeners, use signals.
+
+---
+
+## Dependency Injection
+
+The DI container (`bedrock.di.container`) provides service registration and resolution with three lifetimes.
+
+### Registering Services
+
+```python
+from bedrock.di import container, Lifetime
+
+# Register a factory (singleton by default)
+container.register(IUserRepo, factory=UserRepo, lifetime=Lifetime.SINGLETON)
+
+# Register a pre-built instance
+container.register_instance("cache", my_cache_service)
+
+# Or use the @provider decorator (auto-registers in global container)
+from bedrock.di import provider
+
+@provider
+class UserService:
+    ...
+
+@provider(IUserRepo, lifetime=Lifetime.TRANSIENT)
+class PostgresUserRepo:
+    ...
+```
+
+For normal Bedrock modules, prefer the default global container shown above.
+Reach for a custom `Container()` only when you need an isolated registration
+graph, such as tests or sandboxed plugin execution.
+
+```python
+from bedrock.di import Container, Lifetime
+
+custom = Container()
+
+
+@custom.provider(IUserRepo, lifetime=Lifetime.SINGLETON)
+class SandboxUserRepo:
+    ...
+
+
+@custom.inject(repo=IUserRepo)
+def run_preview(*, repo: IUserRepo) -> None:
+    ...
+```
+
+### Resolving Services
+
+```python
+from bedrock.di import container
+
+# By type
+repo = container.resolve(IUserRepo)
+
+# By string key
+cache = container.resolve("cache")
+
+# Check registration
+if container.is_registered(IUserRepo):
+    repo = container.resolve(IUserRepo)
+```
+
+### Scoped Services
+
+```python
+from bedrock.di import container, Lifetime
+
+container.register(IDbSession, factory=create_session, lifetime=Lifetime.SCOPED)
+
+# Scoped services share one instance within a scope
+with container.scope("request"):
+    s1 = container.resolve(IDbSession)
+    s2 = container.resolve(IDbSession)
+    assert s1 is s2  # Same instance
+```
+
+### Testing with Overrides
+
+```python
+from bedrock.di import container
+
+# Temporarily replace a service
+with container.override(IUserRepo, FakeUserRepo()):
+    # Code here sees the fake
+    repo = container.resolve(IUserRepo)
+    assert isinstance(repo, FakeUserRepo)
+# Original restored automatically
+```
+
+### Using @inject
+
+```python
+from bedrock.di import inject
+
+@inject(repo=IUserRepo, cache="cache")
+def get_user_profile(user_id: int, *, repo, cache):
+    cached = cache.get(f"user:{user_id}")
+    if cached:
+        return cached
+    return repo.get_by_id(user_id)
 ```
 
 ---

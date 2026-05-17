@@ -5,6 +5,9 @@ description: 源自 Blinker、支持同步/异步与生命周期信号的事件�
 
 Bedrock 内置了一套源自 [Blinker](https://blinker.readthedocs.io/) 的信号系统，用于提供解耦的事件通知，并原生支持异步。其实现位于 `bedrock.signal` 下。
 
+如果你需要的是带顺序控制和返回值的结构化扩展点，请改用
+[Hook 系统](/docs/guides/hooks)。
+
 ## 快速开始
 
 创建一个信号，连接一个接收器，然后发送它：
@@ -375,6 +378,25 @@ def setup():
 if order_placed.receivers:
     print("At least one receiver is connected")
 ```
+
+## 信号 vs Hooks
+
+Bedrock 有两种扩展机制：**信号**和 **hooks**。它们服务于不同的目的。
+
+| | 信号 | Hooks |
+|---|---------|-------|
+| **模式** | 发出即忘的通知 | 结构化调用/响应 |
+| **返回值** | 接收器会返回值，但发送者通常忽略 | implementations 的返回值会被收集并返回给调用者 |
+| **顺序** | 无保证顺序（使用 set） | 按优先级排序，确定性顺序 |
+| **扩展方式** | 任何人都可以连接接收器 | 模块声明 specs 并注册 implementations |
+| **错误处理** | `send_robust` 按接收器捕获异常 | `call_robust` 按 implementation 捕获异常 |
+| **使用场景** | 解耦的事件通知 | 需要返回结果的可插拔扩展点 |
+
+**何时使用信号：** 你想通知监听者某件事发生了，且不关心它们的响应。生命周期事件（`module_loaded`、`registry_ready`）就是很好的例子。
+
+**何时使用 hooks：** 你想让模块为一个明确定义的调用贡献行为，并且需要拿回组合后的结果。认证、校验和转换管道都是很好的例子。
+
+关于 hook 系统的更多内容，请参阅 [Hooks 指南](/docs/guides/hooks)。
 
 ## 反模式
 
