@@ -8,7 +8,7 @@ Blinker-derived event system with sync/async support and lifecycle signals. Impl
 
 1. [Creating Signals](#creating-signals)
 2. [Connecting Receivers](#connecting-receivers)
-3. [Sending Signals](#sending-signal)
+3. [Sending Signals](#sending-signals)
 4. [Sender Filtering](#sender-filtering)
 5. [Context Managers](#context-managers)
 6. [Lifecycle Signals](#lifecycle-signals)
@@ -451,7 +451,8 @@ def check_token(request):
         return get_user_from_token(request.token)
     return None  # Let next impl try
 
-results = auth.call("authenticate", request=req)
+request = Request(token="...")
+results = auth.call("authenticate", request=request)
 user = results[0] if results else None
 ```
 

@@ -177,25 +177,25 @@ Every exception MUST set a `detail` class attribute with a default message. Cons
 
 ### 7. Bootstrap Hooks
 
-Lifecycle hooks execute at specific points during module loading:
+Lifecycle hooks execute at specific points during module loading. Bedrock always calls hooks with keyword arguments — use keyword-only signatures:
 
 ```python
 # bootstrap.py
 from bedrock.module import ModuleRegistry, AppConfig
 
 
-def on_load(registry: ModuleRegistry, app: AppConfig) -> None:
+def on_load(*, registry: ModuleRegistry, app: AppConfig) -> None:
     """Called during install(), after module is added."""
     pass
 
 
-def ready(registry: ModuleRegistry, app: AppConfig) -> None:
+def ready(*, registry: ModuleRegistry, app: AppConfig) -> None:
     """Called after ALL modules are installed."""
     from .service import user_service
     user_service.initialize()
 
 
-def on_shutdown(registry: ModuleRegistry, app: AppConfig) -> None:
+def on_shutdown(*, registry: ModuleRegistry, app: AppConfig) -> None:
     """Called during shutdown, in REVERSE install order."""
     pass
 ```
@@ -206,7 +206,7 @@ def on_shutdown(registry: ModuleRegistry, app: AppConfig) -> None:
 | `ready` | After ALL modules are installed | Configure services, initialization      |
 | `on_shutdown` | During `shutdown()`, in REVERSE order | Cleanup, close connections              |
 
-Hook signature is always `(registry: ModuleRegistry, app: AppConfig) -> None`. Bootstrap hooks also accept optional named kwargs: `container` (the global DI container) and `hooks` (the global hook registry). The registry introspects each hook's parameters and injects only what it declares.
+Hooks use keyword-only signatures. The registry inspects each hook's parameters and injects only what it declares: `registry` (ModuleRegistry), `app` (AppConfig), `container` (DI container), `hooks` (HookRegistry).
 
 ### 8. Database Models
 
@@ -365,7 +365,8 @@ def default_auth(request):
     return verify_token(request.token)
 
 # Dispatch
-results = auth.call("authenticate", request=req)
+request = {"token": "..."}
+results = auth.call("authenticate", request=request)
 ```
 
 **Signals vs Hooks**: Signals are notification-only (no return value). Hooks are call/response (implementations return values, ordered by priority, with optional `firstresult` short-circuit).

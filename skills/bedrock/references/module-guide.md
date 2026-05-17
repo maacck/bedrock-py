@@ -188,7 +188,7 @@ except UserError as e:
 ## Bootstrap Hooks
 
 **File**: `bootstrap.py`
-**Signature**: `(registry: ModuleRegistry, app: AppConfig, **kwargs) -> None`
+**Contract**: Bedrock always calls hooks with keyword arguments. Use keyword-only signatures.
 
 ### Available Hooks
 
@@ -200,7 +200,7 @@ except UserError as e:
 
 ### Available Named Parameters
 
-The registry introspects each hook's parameters and injects only what it declares:
+The registry inspects each hook's signature and injects only the parameters it declares:
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -212,13 +212,13 @@ The registry introspects each hook's parameters and injects only what it declare
 ### Example
 
 ```python
-def on_load(**kwargs) -> None:
+def on_load(*, registry, app) -> None:
     """Called during module installation."""
     if not registry.is_installed("myproject.core"):
         raise RuntimeError("myproject.core must be installed first")
 
 
-def ready(registry, app, container, hooks) -> None:
+def ready(*, registry, app, container, hooks) -> None:
     """Called after all modules are installed."""
     from .service import user_service
     user_service.initialize()
@@ -226,7 +226,7 @@ def ready(registry, app, container, hooks) -> None:
     container.register(IUserRepo, factory=UserRepo, lifetime=Lifetime.SINGLETON)
 
 
-def on_shutdown(**kwargs) -> None:
+def on_shutdown(*, registry, app) -> None:
     """Called during shutdown."""
     from .service import user_service
     user_service.cleanup()
@@ -234,8 +234,8 @@ def on_shutdown(**kwargs) -> None:
 
 ### Rules
 
-- Hook signature is ALWAYS `(registry: ModuleRegistry, app: AppConfig) -> None` for positional form
-- Named kwargs (`container`, `hooks`) are injected only if the hook declares them
+- Use keyword-only signatures (`def on_load(*, registry, app)`) — Bedrock always passes keyword arguments
+- Declare only the parameters you need; the registry injects only what it finds in the signature
 - Hooks are called by the registry — do NOT import or call them manually
 - `ready` is the most common hook for service initialization
 - `on_shutdown` runs in REVERSE install order (last installed = first shutdown)
