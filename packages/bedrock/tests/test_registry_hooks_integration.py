@@ -1,4 +1,4 @@
-"""Integration tests for ModuleRegistry._call_hook with DI container and hooks."""
+"""Integration tests for ModuleRegistry bootstrap hook keyword invocation."""
 
 from pathlib import Path
 
@@ -9,52 +9,29 @@ from bedrock.module.registry import ModuleRegistry
 from tests.helpers import make_fake_module
 
 
-class TestCallHookLegacyPositional:
-    """Legacy bootstrap hooks called via positional (registry, app)."""
-
-    def test_legacy_positional_hook_receives_registry_and_app(self, fake_package: Path) -> None:
-        make_fake_module(
-            fake_package,
-            "legacy_pos",
-            manifest={"title": "LegacyPos", "version": "1"},
-            bootstrap=(
-                "def on_load(r, a):\n"
-                "    import builtins\n"
-                "    builtins._hook_log.append(('legacy_pos', type(r).__name__, a.name))\n"
-            ),
-        )
-
-        import builtins
-
-        builtins._hook_log = []
-
-        registry = ModuleRegistry()
-        registry.install("legacy_pos")
-
-        assert ("legacy_pos", "ModuleRegistry", "legacy_pos") in builtins._hook_log
-
-    def test_legacy_with_registry_app_named_params(self, fake_package: Path) -> None:
-        make_fake_module(
-            fake_package,
-            "legacy_named",
-            manifest={"title": "LegacyNamed", "version": "1"},
-            bootstrap=(
-                "def on_load(registry, app):\n    import builtins\n    builtins._hook_log.append(('named', app.name))\n"
-            ),
-        )
-
-        import builtins
-
-        builtins._hook_log = []
-
-        registry = ModuleRegistry()
-        registry.install("legacy_named")
-
-        assert ("named", "legacy_named") in builtins._hook_log
-
-
 class TestCallHookKeywordInjection:
-    """New-style hooks with keyword-injected container and hooks."""
+    """Bootstrap hooks are invoked through the keyword-only contract."""
+
+    def test_hook_receives_registry_and_app_keywords(self, fake_package: Path) -> None:
+        make_fake_module(
+            fake_package,
+            "kw_registry_app",
+            manifest={"title": "KWRegistryApp", "version": "1"},
+            bootstrap=(
+                "def on_load(*, registry, app):\n"
+                "    import builtins\n"
+                "    builtins._hook_log.append(('registry_app', type(registry).__name__, app.name))\n"
+            ),
+        )
+
+        import builtins
+
+        builtins._hook_log = []
+
+        registry = ModuleRegistry()
+        registry.install("kw_registry_app")
+
+        assert ("registry_app", "ModuleRegistry", "kw_registry_app") in builtins._hook_log
 
     def test_hook_receives_container_kwarg(self, fake_package: Path) -> None:
         make_fake_module(
@@ -62,7 +39,7 @@ class TestCallHookKeywordInjection:
             "kw_container",
             manifest={"title": "KWContainer", "version": "1"},
             bootstrap=(
-                "def on_load(registry, app, container):\n"
+                "def on_load(*, container):\n"
                 "    import builtins\n"
                 "    builtins._hook_log.append(('container', type(container).__name__))\n"
             ),
@@ -83,7 +60,7 @@ class TestCallHookKeywordInjection:
             "kw_hooks",
             manifest={"title": "KWHooks", "version": "1"},
             bootstrap=(
-                "def on_load(registry, app, hooks):\n"
+                "def on_load(*, hooks):\n"
                 "    import builtins\n"
                 "    builtins._hook_log.append(('hooks', type(hooks).__name__))\n"
             ),
@@ -104,9 +81,9 @@ class TestCallHookKeywordInjection:
             "kw_all",
             manifest={"title": "KWAll", "version": "1"},
             bootstrap=(
-                "def on_load(registry, app, container, hooks):\n"
+                "def on_load(*, registry, app, container, hooks):\n"
                 "    import builtins\n"
-                "    builtins._hook_log.append(('all', app.name, type(container).__name__, type(hooks).__name__))\n"
+                "    builtins._hook_log.append(('all', app.name, type(container).__name__, type(hooks).__name__, type(registry).__name__))\n"
             ),
         )
 
@@ -117,17 +94,17 @@ class TestCallHookKeywordInjection:
         registry = ModuleRegistry()
         registry.install("kw_all")
 
-        assert ("all", "kw_all", "Container", "HookRegistry") in builtins._hook_log
+        assert ("all", "kw_all", "Container", "HookRegistry", "ModuleRegistry") in builtins._hook_log
 
-    def test_hook_with_kwargs_falls_back_to_positional(self, fake_package: Path) -> None:
+    def test_hook_with_kwargs_receives_all_named_injections(self, fake_package: Path) -> None:
         make_fake_module(
             fake_package,
             "kw_splat",
             manifest={"title": "KWSplat", "version": "1"},
             bootstrap=(
-                "def on_load(registry, app, **kwargs):\n"
+                "def on_load(**kwargs):\n"
                 "    import builtins\n"
-                "    builtins._hook_log.append(('splat', app.name))\n"
+                "    builtins._hook_log.append(('splat', sorted(kwargs)))\n"
             ),
         )
 
@@ -138,7 +115,89 @@ class TestCallHookKeywordInjection:
         registry = ModuleRegistry()
         registry.install("kw_splat")
 
-        assert ("splat", "kw_splat") in builtins._hook_log
+        assert ("splat", ["app", "container", "hooks", "registry"]) in builtins._hook_log
+
+    def test_hook_with_named_param_and_kwargs_receives_all_named_injections(self, fake_package: Path) -> None:
+        make_fake_module(
+            fake_package,
+            "kw_mixed_kwargs",
+            manifest={"title": "KWMixedKwargs", "version": "1"},
+            bootstrap=(
+                "def on_load(*, app, **kwargs):\n"
+                "    import builtins\n"
+                "    builtins._hook_log.append(('mixed', app.name, sorted(kwargs)))\n"
+            ),
+        )
+
+        import builtins
+
+        builtins._hook_log = []
+
+        registry = ModuleRegistry()
+        registry.install("kw_mixed_kwargs")
+
+        assert ("mixed", "kw_mixed_kwargs", ["container", "hooks", "registry"]) in builtins._hook_log
+
+
+class TestCallHookUnsupportedSignatures:
+    """Unsupported legacy signatures fail with clear errors."""
+
+    def test_legacy_positional_names_are_rejected(self, fake_package: Path) -> None:
+        make_fake_module(
+            fake_package,
+            "legacy_pos",
+            manifest={"title": "LegacyPos", "version": "1"},
+            bootstrap="def on_load(r, a): pass\n",
+        )
+
+        registry = ModuleRegistry()
+
+        with pytest.raises(ModuleLifecycleError, match="must accept keyword invocation") as exc_info:
+            registry.install("legacy_pos")
+
+        message = str(exc_info.value)
+        assert "Unsupported required parameters: r, a" in message
+
+    def test_positional_only_parameters_are_rejected(self, fake_package: Path) -> None:
+        make_fake_module(
+            fake_package,
+            "pos_only",
+            manifest={"title": "PosOnly", "version": "1"},
+            bootstrap="def on_load(registry, /, app): pass\n",
+        )
+
+        registry = ModuleRegistry()
+
+        with pytest.raises(ModuleLifecycleError, match="Positional-only parameters cannot be injected by keyword") as exc_info:
+            registry.install("pos_only")
+
+        assert "Unsupported required parameters: registry" in str(exc_info.value)
+
+    def test_hook_with_no_supported_injected_parameters_is_rejected(self, fake_package: Path) -> None:
+        make_fake_module(
+            fake_package,
+            "no_supported_params",
+            manifest={"title": "NoSupportedParams", "version": "1"},
+            bootstrap="def on_load(flag=False): pass\n",
+        )
+
+        registry = ModuleRegistry()
+
+        with pytest.raises(ModuleLifecycleError, match="does not declare any supported injected keyword parameters"):
+            registry.install("no_supported_params")
+
+    def test_unknown_required_parameter_is_rejected(self, fake_package: Path) -> None:
+        make_fake_module(
+            fake_package,
+            "unknown_required",
+            manifest={"title": "UnknownRequired", "version": "1"},
+            bootstrap="def on_load(*, service): pass\n",
+        )
+
+        registry = ModuleRegistry()
+
+        with pytest.raises(ModuleLifecycleError, match="Unsupported required parameters: service"):
+            registry.install("unknown_required")
 
 
 class TestCallHookNoHook:
@@ -173,25 +232,12 @@ class TestCallHookNoHook:
 class TestCallHookErrorWrapping:
     """Hook exceptions are wrapped in ModuleLifecycleError."""
 
-    def test_positional_hook_error_wrapped(self, fake_package: Path) -> None:
-        make_fake_module(
-            fake_package,
-            "err_pos",
-            manifest={"title": "ErrPos", "version": "1"},
-            bootstrap="def on_load(r, a): raise RuntimeError('positional boom')\n",
-        )
-
-        registry = ModuleRegistry()
-
-        with pytest.raises(ModuleLifecycleError, match="on_load.*raised an error"):
-            registry.install("err_pos")
-
     def test_keyword_hook_error_wrapped(self, fake_package: Path) -> None:
         make_fake_module(
             fake_package,
             "err_kw",
             manifest={"title": "ErrKW", "version": "1"},
-            bootstrap="def on_load(registry, app, container): raise ValueError('keyword boom')\n",
+            bootstrap="def on_load(*, registry, app, container): raise ValueError('keyword boom')\n",
         )
 
         registry = ModuleRegistry()
@@ -204,7 +250,7 @@ class TestCallHookErrorWrapping:
             fake_package,
             "err_ready",
             manifest={"title": "ErrReady", "version": "1"},
-            bootstrap="def ready(registry, app): raise RuntimeError('ready boom')\n",
+            bootstrap="def ready(*, registry, app): raise RuntimeError('ready boom')\n",
         )
 
         registry = ModuleRegistry()
@@ -215,7 +261,7 @@ class TestCallHookErrorWrapping:
 
 
 class TestCallHookLifecycleIntegration:
-    """Full lifecycle: on_load → ready → on_shutdown with keyword injection."""
+    """Full lifecycle uses keyword-based hook injection."""
 
     def test_full_lifecycle_with_hooks(self, fake_package: Path) -> None:
         make_fake_module(
@@ -223,15 +269,15 @@ class TestCallHookLifecycleIntegration:
             "lifecycle",
             manifest={"title": "Lifecycle", "version": "1"},
             bootstrap=(
-                "def on_load(registry, app, container):\n"
+                "def on_load(*, app, container):\n"
                 "    import builtins\n"
-                "    builtins._hook_log.append(('on_load', app.name))\n"
+                "    builtins._hook_log.append(('on_load', app.name, type(container).__name__))\n"
                 "\n"
-                "def ready(registry, app, hooks):\n"
+                "def ready(*, registry, app, hooks):\n"
                 "    import builtins\n"
-                "    builtins._hook_log.append(('ready', app.name))\n"
+                "    builtins._hook_log.append(('ready', app.name, type(registry).__name__, type(hooks).__name__))\n"
                 "\n"
-                "def on_shutdown(registry, app):\n"
+                "def on_shutdown(*, app):\n"
                 "    import builtins\n"
                 "    builtins._hook_log.append(('on_shutdown', app.name))\n"
             ),
@@ -246,12 +292,12 @@ class TestCallHookLifecycleIntegration:
         registry.shutdown()
 
         log = builtins._hook_log
-        on_load_entry = next(e for e in log if e[0] == "on_load")
-        ready_entry = next(e for e in log if e[0] == "ready")
-        shutdown_entry = next(e for e in log if e[0] == "on_shutdown")
+        on_load_entry = next(entry for entry in log if entry[0] == "on_load")
+        ready_entry = next(entry for entry in log if entry[0] == "ready")
+        shutdown_entry = next(entry for entry in log if entry[0] == "on_shutdown")
 
-        assert on_load_entry == ("on_load", "lifecycle")
-        assert ready_entry == ("ready", "lifecycle")
+        assert on_load_entry == ("on_load", "lifecycle", "Container")
+        assert ready_entry == ("ready", "lifecycle", "ModuleRegistry", "HookRegistry")
         assert shutdown_entry == ("on_shutdown", "lifecycle")
 
     def test_dependency_order_with_hooks(self, fake_package: Path) -> None:
@@ -260,7 +306,9 @@ class TestCallHookLifecycleIntegration:
             "base_mod",
             manifest={"title": "Base", "version": "1"},
             bootstrap=(
-                "def on_load(registry, app):\n    import builtins\n    builtins._hook_log.append(('load', app.name))\n"
+                "def on_load(*, app):\n"
+                "    import builtins\n"
+                "    builtins._hook_log.append(('load', app.name))\n"
             ),
         )
         make_fake_module(
@@ -268,7 +316,9 @@ class TestCallHookLifecycleIntegration:
             "dep_mod",
             manifest={"title": "Dep", "version": "1", "depends_on": ["base_mod"]},
             bootstrap=(
-                "def on_load(registry, app):\n    import builtins\n    builtins._hook_log.append(('load', app.name))\n"
+                "def on_load(*, app):\n"
+                "    import builtins\n"
+                "    builtins._hook_log.append(('load', app.name))\n"
             ),
         )
 
@@ -279,25 +329,25 @@ class TestCallHookLifecycleIntegration:
         registry = ModuleRegistry()
         registry.populate(["dep_mod"])
 
-        load_entries = [e for e in builtins._hook_log if e[0] == "load"]
-        assert [e[1] for e in load_entries] == ["base_mod", "dep_mod"]
+        load_entries = [entry for entry in builtins._hook_log if entry[0] == "load"]
+        assert [entry[1] for entry in load_entries] == ["base_mod", "dep_mod"]
 
-    def test_multiple_modules_mixed_hook_styles(self, fake_package: Path) -> None:
+    def test_multiple_modules_require_keyword_contract(self, fake_package: Path) -> None:
         make_fake_module(
             fake_package,
-            "mod_legacy",
-            manifest={"title": "Legacy", "version": "1"},
-            bootstrap=("def on_load(r, a):\n    import builtins\n    builtins._hook_log.append(('legacy', a.name))\n"),
+            "mod_keyword_only",
+            manifest={"title": "KeywordOnly", "version": "1"},
+            bootstrap=(
+                "def on_load(*, app):\n"
+                "    import builtins\n"
+                "    builtins._hook_log.append(('keyword_only', app.name))\n"
+            ),
         )
         make_fake_module(
             fake_package,
-            "mod_new",
-            manifest={"title": "New", "version": "1", "depends_on": ["mod_legacy"]},
-            bootstrap=(
-                "def on_load(registry, app, container):\n"
-                "    import builtins\n"
-                "    builtins._hook_log.append(('new', app.name, type(container).__name__))\n"
-            ),
+            "mod_bad_legacy",
+            manifest={"title": "BadLegacy", "version": "1", "depends_on": ["mod_keyword_only"]},
+            bootstrap="def on_load(r, a): pass\n",
         )
 
         import builtins
@@ -305,7 +355,8 @@ class TestCallHookLifecycleIntegration:
         builtins._hook_log = []
 
         registry = ModuleRegistry()
-        registry.populate(["mod_new"])
 
-        assert ("legacy", "mod_legacy") in builtins._hook_log
-        assert ("new", "mod_new", "Container") in builtins._hook_log
+        with pytest.raises(ModuleLifecycleError, match="Unsupported required parameters: r, a"):
+            registry.populate(["mod_bad_legacy"])
+
+        assert ("keyword_only", "mod_keyword_only") in builtins._hook_log
