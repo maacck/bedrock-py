@@ -7,9 +7,14 @@ description: Project scaffolding and code generation CLI for Bedrock application
 
 ## Installation
 
-```bash
-uv add bedrock-cli
-```
+<Callout type="info">
+  `bedrock-cli` is currently only available from GitHub. PyPI publishing is planned but not yet active.
+</Callout>
+
+<Tabs items={['uv', 'pip']}>
+  <Tab value="uv"><CodeBlock code={'uv add "bedrock-cli @ git+https://github.com/maacck/bedrock-py#subdirectory=packages/bedrock-cli"'} lang={'bash'} /></Tab>
+  <Tab value="pip"><CodeBlock code={'pip install "git+https://github.com/maacck/bedrock-py#subdirectory=packages/bedrock-cli"'} lang={'bash'} /></Tab>
+</Tabs>
 
 The CLI registers itself as the `bedrock-cli` command (separate from the runtime `bedrock` command).
 

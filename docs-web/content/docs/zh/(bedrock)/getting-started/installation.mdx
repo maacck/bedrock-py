@@ -40,6 +40,21 @@ Bedrock 提供了可选依赖组，以支持更多后端：
 |-------|----------|-------------|
 | `cache-redis` | `redis>=4.2.0` | 基于 Redis 的分布式缓存 |
 
+## Bedrock CLI（脚手架工具）
+
+`bedrock-cli` 是 Bedrock 的脚手架配套工具——项目初始化、模块脚手架和代码生成。
+
+<Callout type="info">
+  `bedrock-cli` 目前仅支持从 GitHub 安装。PyPI 发布尚在计划中。
+</Callout>
+
+<Tabs items={['uv', 'pip']}>
+  <Tab value="uv"><CodeBlock code={'uv add "bedrock-cli @ git+https://github.com/maacck/bedrock-py#subdirectory=packages/bedrock-cli"'} lang={'bash'} /></Tab>
+  <Tab value="pip"><CodeBlock code={'pip install "git+https://github.com/maacck/bedrock-py#subdirectory=packages/bedrock-cli"'} lang={'bash'} /></Tab>
+</Tabs>
+
+完整用法请参见 [Bedrock CLI 文档](/docs/bedrock-cli)。
+
 ## 项目初始化
 
 使用标准目录结构创建一个新的 Bedrock 项目：

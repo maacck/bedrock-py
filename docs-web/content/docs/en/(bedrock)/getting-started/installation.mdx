@@ -38,6 +38,21 @@ Bedrock provides optional dependency groups for additional backends:
 |-------|----------|-------------|
 | `cache-redis` | `redis>=4.2.0` | Redis-backed distributed cache |
 
+## Bedrock CLI (Scaffolding)
+
+`bedrock-cli` is the scaffolding companion for Bedrock — project initialization, module scaffolding, and code generation.
+
+<Callout type="info">
+  `bedrock-cli` is currently only available from GitHub. PyPI publishing is planned but not yet active.
+</Callout>
+
+<Tabs items={['uv', 'pip']}>
+  <Tab value="uv"><CodeBlock code={'uv add "bedrock-cli @ git+https://github.com/maacck/bedrock-py#subdirectory=packages/bedrock-cli"'} lang={'bash'} /></Tab>
+  <Tab value="pip"><CodeBlock code={'pip install "git+https://github.com/maacck/bedrock-py#subdirectory=packages/bedrock-cli"'} lang={'bash'} /></Tab>
+</Tabs>
+
+See the [Bedrock CLI docs](/docs/bedrock-cli) for full usage.
+
 ## Project Initialization
 
 Create a new Bedrock project with the standard directory structure:
