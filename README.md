@@ -103,25 +103,29 @@ commands: "commands:app"  # Optional: Typer app for CLI integration
 
 **Lifecycle hooks** (in `bootstrap.py`):
 
+Bedrock always calls bootstrap hooks with keyword arguments. Hooks should explicitly declare the named parameters they need using keyword-only signatures:
+
 ```python
-def on_load():
-    """Called when module is first loaded."""
+def on_load(*, registry, app):
+    """Called when module is first loaded.
+    registry=ModuleRegistry, app=AppConfig
+    """
     pass
 
-def ready():
+def ready(*, registry, app):
     """Called when all modules are loaded and ready."""
     pass
 
-def on_shutdown():
+def on_shutdown(*, registry, app):
     """Called during graceful shutdown."""
     pass
 ```
 
-Hooks may declare keyword parameters by name and receive runtime objects automatically:
+Available named parameters (`registry`, `app`, `container`, `hooks`) are injected by the registry based on what each hook declares:
 
 ```python
 def on_load(*, registry, app, container, hooks):
-    """registry=ModuleRegistry, app=AppConfig, container=DI container, hooks=HookRegistry"""
+    """All four parameters available: registry, app, container, hooks"""
     pass
 ```
 

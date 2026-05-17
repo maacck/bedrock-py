@@ -165,7 +165,7 @@ class ApiKeyHooks:
         return None
 
 
-def on_load(*, app, **kwargs) -> None:
+def on_load(*, app) -> None:
     auth_hooks.add_impls_from(ApiKeyHooks(), module=app.name)
 ```
 

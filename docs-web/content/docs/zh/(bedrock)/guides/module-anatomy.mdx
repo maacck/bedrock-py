@@ -152,7 +152,7 @@ class DuplicateSkuError(BedrockExc):
 
 ### `bootstrap.py`
 
-由 registry 在特定阶段调用的生命周期 hooks。Hooks 可以按名称声明关键字参数，registry 会自动注入。传统的 `(registry, app)` 位置参数签名仍然有效。
+由 registry 在特定阶段调用的生命周期 hooks。Hooks 使用关键字参数签名 — registry 会检查每个 hook 的参数并按名称自动注入。
 
 ```python
 from bedrock.module.registry import ModuleRegistry
@@ -242,23 +242,23 @@ def hook_name(*, registry, app, container, hooks) -> None: ...
 
 更完整的 API 说明请见[依赖注入](/docs/guides/di)与[Hook 系统](/docs/guides/hooks)。
 
-传统的 `def hook_name(registry, app)` 位置参数签名仍然有效。只需声明你需要的参数即可。
+只需声明你需要的参数即可 — registry 只会注入签名中声明的参数。
 
 ### 调用顺序
 
 ```
 install("module_a")
   ├── Install dependencies (recursive)
-  ├── on_load(registry, app)        ← per-module, in dependency order
+  ├── on_load(*, registry, app)     ← per-module, in dependency order
   └── Signal: module_loaded
 
 mark_ready()
-  ├── ready(registry, app)          ← per-module, in install order
+  ├── ready(*, registry, app)       ← per-module, in install order
   ├── Signal: module_ready          ← per-module
   └── Signal: registry_ready        ← once, after all modules
 
 shutdown()
-  ├── on_shutdown(registry, app)    ← per-module, REVERSE install order
+  ├── on_shutdown(*, registry, app) ← per-module, REVERSE install order
   ├── Signal: module_shutdown       ← per-module
   └── Signal: registry_shutdown     ← once, after all modules
 ```

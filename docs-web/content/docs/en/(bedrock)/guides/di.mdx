@@ -244,7 +244,7 @@ class InventoryService:
         return 10
 
 
-def on_load(*, container, **kwargs) -> None:
+def on_load(*, container) -> None:
     container.register(
         InventoryService,
         factory=InventoryService,

@@ -171,7 +171,7 @@ class DuplicateSkuError(BedrockExc):
 
 ### `bootstrap.py`
 
-Lifecycle hooks called by the registry at specific stages. Hooks may declare keyword parameters by name, and the registry injects them automatically. The legacy `(registry, app)` positional signature still works.
+Lifecycle hooks called by the registry at specific stages. Hooks use keyword-only signatures — the registry inspects each hook's parameters and injects them by name automatically.
 
 ```python
 from bedrock.module.registry import ModuleRegistry
@@ -262,23 +262,23 @@ def hook_name(*, registry, app, container, hooks) -> None: ...
 For dedicated API details, see [Dependency Injection](/docs/guides/di) and
 [Hook System](/docs/guides/hooks).
 
-The legacy positional signature `def hook_name(registry, app)` continues to work. Only declare the parameters you need.
+Only declare the parameters you need — the registry injects only what it finds in the signature.
 
 ### Call Order
 
 ```
 install("module_a")
   ├── Install dependencies (recursive)
-  ├── on_load(registry, app)        ← per-module, in dependency order
+  ├── on_load(*, registry, app)     ← per-module, in dependency order
   └── Signal: module_loaded
 
 mark_ready()
-  ├── ready(registry, app)          ← per-module, in install order
+  ├── ready(*, registry, app)       ← per-module, in install order
   ├── Signal: module_ready          ← per-module
   └── Signal: registry_ready        ← once, after all modules
 
 shutdown()
-  ├── on_shutdown(registry, app)    ← per-module, REVERSE install order
+  ├── on_shutdown(*, registry, app) ← per-module, REVERSE install order
   ├── Signal: module_shutdown       ← per-module
   └── Signal: registry_shutdown     ← once, after all modules
 ```
