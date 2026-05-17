@@ -313,6 +313,31 @@ class TestProviderDecorator:
         instance = container.resolve(IRepo)
         assert isinstance(instance, SqlRepo)
 
+    def test_provider_with_explicit_key_and_default_lifetime(self) -> None:
+        from bedrock.di.decorators import provider
+
+        class IRepository:
+            pass
+
+        @provider(IRepository)
+        class SqlRepository(IRepository):
+            pass
+
+        assert container.is_registered(IRepository) is True
+        assert container.is_registered(SqlRepository) is False
+        instance = container.resolve(IRepository)
+        assert isinstance(instance, SqlRepository)
+
+    def test_provider_bare_decorator_still_registers_concrete_class(self) -> None:
+        from bedrock.di.decorators import provider
+
+        @provider
+        class ConcreteService:
+            pass
+
+        assert container.is_registered(ConcreteService) is True
+        assert isinstance(container.resolve(ConcreteService), ConcreteService)
+
     def test_provider_with_lifetime(self) -> None:
         from bedrock.di.decorators import provider
 
@@ -364,6 +389,22 @@ class TestProviderDecorator:
             pass
 
         assert custom.is_registered(IService) is True
+        assert container.is_registered(IService) is False
+        assert isinstance(custom.resolve(IService), MyService)
+
+    def test_container_provider_with_explicit_key_and_default_lifetime(self) -> None:
+        custom = Container()
+        container.reset()
+
+        class IService:
+            pass
+
+        @custom.provider(IService)
+        class MyService(IService):
+            pass
+
+        assert custom.is_registered(IService) is True
+        assert custom.is_registered(MyService) is False
         assert container.is_registered(IService) is False
         assert isinstance(custom.resolve(IService), MyService)
 

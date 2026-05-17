@@ -1,6 +1,7 @@
 """Decorators for DI container integration."""
 
 import functools
+import inspect
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, overload
 
@@ -10,6 +11,32 @@ if TYPE_CHECKING:
     from .container import Container
 
 _LIFETIME_DEFAULT = object()
+
+
+def _is_bound_type_reference(candidate: type[Any]) -> bool:
+    """Return whether ``candidate`` is already bound in the caller namespace.
+
+    Bare ``@provider`` receives the freshly created decorated class object,
+    which is not yet bound in the caller frame. Decorator-factory forms like
+    ``@provider(SomeInterface)`` receive an existing type reference that is
+    already available in the caller namespace.
+    """
+    frame = inspect.currentframe()
+    caller = frame.f_back if frame is not None else None
+
+    try:
+        while caller is not None and caller.f_code.co_filename == __file__:
+            caller = caller.f_back
+
+        if caller is None:
+            return False
+
+        return any(value is candidate for value in caller.f_locals.values()) or any(
+            value is candidate for value in caller.f_globals.values()
+        )
+    finally:
+        del frame
+        del caller
 
 
 def build_provider(container: "Container") -> Callable[..., Any]:
@@ -55,7 +82,7 @@ def build_provider(container: "Container") -> Callable[..., Any]:
             return cls
 
         if key is not None and isinstance(key, type):
-            if lifetime is _LIFETIME_DEFAULT:
+            if lifetime is _LIFETIME_DEFAULT and not _is_bound_type_reference(key):
                 return _do_register(key, key, actual_lifetime)
 
             def _decorator_with_key(cls: type[T]) -> type[T]:
