@@ -32,7 +32,7 @@ export default async function HomePage({
         `${t.deepDiveLifecycleBullet2Title} — ${t.deepDiveLifecycleBullet2Desc}`,
         `${t.deepDiveLifecycleBullet3Title} — ${t.deepDiveLifecycleBullet3Desc}`,
       ],
-      codeSnippet: 'def ready():\n    """Called when all modules are ready"""',
+      codeSnippet: 'def ready(*, app):\n    """Called when all modules are ready"""',
     },
     {
       icon: Bot,
