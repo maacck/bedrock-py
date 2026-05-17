@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from importlib.util import find_spec
@@ -271,20 +272,98 @@ def info(
     console.print(table)
 
 
+def _bootstrap_migrations_manager():
+    """Build a MigrationsManager from the current settings."""
+    from bedrock.database.config import DbSettings
+    from bedrock.database.migrations_manager import MigrationsManager
+    from bedrock.module import apps
+
+    database_url = DbSettings().SQLALCHEMY_DATABASE_URI
+    return MigrationsManager(registry=apps, database_url=database_url)
+
+
 @apps.command()
 def install(
     import_path: str = typer.Argument(..., help="Python import path of the module, e.g., ''bedrock.contrib.cache''."),
+    skip_migrations: bool = typer.Option(
+        False, "--skip-migrations", help="Skip running database migrations during installation."
+    ),
 ) -> None:
     """Install a Bedrock module.
 
-    This command is a skeleton placeholder and is not yet implemented.
+    For the module this command:
+
+    1. Ensures the database schema is up to date (create tables on first install,
+       upgrade if behind head).
+    2. Runs the optional ``installation.py`` lifecycle hooks
+       (``pre_install`` → ``install`` → ``post_install``).
 
     Args:
         import_path: Python import path of the module.
+        skip_migrations: Skip database migrations if True.
+
+    Raises:
+        typer.Exit: If the module cannot be loaded or installation fails.
     """
+    from bedrock.module import apps
+
     console = Console()
-    console.print("[bold yellow]⚠[/bold yellow] Install command is not yet implemented.")
-    console.print(f"[dim]Module: {import_path}[/dim]")
+
+    try:
+        app_config = apps.get(import_path)
+    except KeyError as exc:
+        console.print(f"[bold red]✗[/bold red] Module '{import_path}' not found.")
+        raise typer.Exit(1) from exc
+
+    console.print(f"[bold blue]Installing module:[/bold blue] {app_config.name} {app_config.manifest.version}")
+
+    manager = None if skip_migrations else _bootstrap_migrations_manager()
+
+    if manager is not None and app_config.models_module is not None:
+        from bedrock.database.migrations_manager import MigrationError
+
+        try:
+            status = manager.ensure_schema(app_config.name)
+            _status_labels = {
+                "created": "[bold green]✓[/bold green] Schema created (tables initialised and stamped at head).",
+                "upgraded": "[bold green]✓[/bold green] Schema upgraded to head.",
+                "up-to-date": "[dim]Schema already at head — no migration needed.[/dim]",
+            }
+            console.print(_status_labels.get(status, f"[dim]Schema {status}.[/dim]"))
+        except MigrationError as exc:
+            console.print(f"[bold red]✗ Migration failed for {app_config.name}:[/bold red] {exc}")
+            raise typer.Exit(1) from exc
+    elif manager is not None and app_config.models_module is None:
+        console.print(f"[dim]No models module for {app_config.name} — skipping schema step.[/dim]")
+
+    if not os.path.exists(app_config.package_dir / "installation.py"):
+        console.print(
+            f"[bold yellow]![/bold yellow] No installation.py found for {app_config.name}, skipping installation hooks."
+        )
+        console.print("[bold green]✓[/bold green] Module installed successfully.")
+        return
+
+    installation = load_optional_callable(f"{app_config.name}.installation:install")
+    if not installation:
+        console.print(
+            f"[bold yellow]![/bold yellow] No 'install' function found in installation.py for {app_config.name}, skipping."
+        )
+        console.print("[bold green]✓[/bold green] Module installed successfully.")
+        return
+
+    pre_install = load_optional_callable(f"{app_config.name}.installation:pre_install")
+    if pre_install:
+        console.print(f"[bold blue]Running pre-install hook for {app_config.name}...[/bold blue]")
+        pre_install()
+
+    installation()
+
+    post_install = load_optional_callable(f"{app_config.name}.installation:post_install")
+    if post_install:
+        console.print(f"[bold blue]Running post-install hook for {app_config.name}...[/bold blue]")
+        post_install()
+
+    console.print("[bold green]✓[/bold green] Module installed successfully.")
 
 
 __all__ = ["apps"]
