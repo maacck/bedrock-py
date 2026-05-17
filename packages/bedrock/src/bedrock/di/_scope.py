@@ -3,11 +3,6 @@
 import contextvars
 from typing import Any
 
-_scope_stack: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar(
-    "bedrock_di_scope",
-    default=None,
-)
-
 
 class ScopeManager:
     """Manages the ContextVar-backed scope for SCOPED services.
@@ -15,6 +10,12 @@ class ScopeManager:
     Each scope is a simple dictionary that acts as a frame. Nested scopes
     are supported by pushing/popping via ``contextvars.Token``.
     """
+
+    def __init__(self) -> None:
+        self._scope_stack: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar(
+            "bedrock_di_scope",
+            default=None,
+        )
 
     def enter(self, name: str) -> contextvars.Token:
         """Enter a new scope.
@@ -26,7 +27,7 @@ class ScopeManager:
             A ``contextvars.Token`` that can be used to restore the previous scope.
         """
         new_frame: dict[str, Any] = {"__scope_name__": name}
-        return _scope_stack.set(new_frame)
+        return self._scope_stack.set(new_frame)
 
     def exit(self, token: contextvars.Token) -> dict[str, Any]:
         """Exit the current scope, restoring the previous one.
@@ -37,8 +38,8 @@ class ScopeManager:
         Returns:
             The exited scope frame (useful for cleanup).
         """
-        frame = _scope_stack.get() or {}
-        _scope_stack.reset(token)
+        frame = self._scope_stack.get() or {}
+        self._scope_stack.reset(token)
         return frame
 
     def get(self, key: str) -> Any | None:
@@ -50,7 +51,7 @@ class ScopeManager:
         Returns:
             The value, or ``None`` if no scope is active or key is missing.
         """
-        frame = _scope_stack.get()
+        frame = self._scope_stack.get()
         if frame is None:
             return None
         return frame.get(key)
@@ -65,7 +66,7 @@ class ScopeManager:
         Raises:
             RuntimeError: If no scope is currently active.
         """
-        frame = _scope_stack.get()
+        frame = self._scope_stack.get()
         if frame is None:
             raise RuntimeError("No active scope")
         frame[key] = value
@@ -77,4 +78,4 @@ class ScopeManager:
         Returns:
             ``True`` if a scope frame exists in the current context.
         """
-        return _scope_stack.get() is not None
+        return self._scope_stack.get() is not None

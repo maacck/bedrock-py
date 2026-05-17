@@ -192,6 +192,25 @@ class TestContainerScope:
                 inner = c.resolve(_FakeService)
                 assert inner is not outer
 
+    def test_scopes_are_isolated_between_containers(self) -> None:
+        left = Container()
+        right = Container()
+
+        left.register(_FakeService, factory=lambda: _FakeService(1), lifetime=Lifetime.SCOPED)
+        right.register(_FakeService, factory=lambda: _FakeService(2), lifetime=Lifetime.SCOPED)
+
+        with left.scope("left"):
+            left_instance = left.resolve(_FakeService)
+
+            with right.scope("right"):
+                right_instance = right.resolve(_FakeService)
+                overlapping_left_instance = left.resolve(_FakeService)
+
+        assert left_instance.value == 1
+        assert right_instance.value == 2
+        assert overlapping_left_instance is left_instance
+        assert overlapping_left_instance is not right_instance
+
     def test_default_scope_name(self) -> None:
         c = Container()
         c.register(_FakeService, factory=lambda: _FakeService(), lifetime=Lifetime.SCOPED)
