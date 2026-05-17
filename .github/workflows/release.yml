@@ -35,7 +35,7 @@ jobs:
           fi
 
       - name: Build package
-        run: uv build --package bedrock
+        run: uv build --package bedrock-core
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v7
