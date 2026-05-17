@@ -36,7 +36,7 @@ from bedrock.contrib.cache import cache
 # In-memory backend (default, auto-configured on first use)
 cache.configure("memory")
 
-# Redis backend (requires: uv add bedrock[cache-redis])
+# Redis backend (requires: uv add bedrock-core[cache-redis])
 cache.configure("redis")
 ```
 
@@ -335,7 +335,7 @@ cache.configure("memory")
 
 ### RedisBackend
 
-基于 Redis 的分布式缓存。需要 `uv add bedrock[cache-redis]`。
+基于 Redis 的分布式缓存。需要 `uv add bedrock-core[cache-redis]`。
 
 ```python
 cache.configure("redis")

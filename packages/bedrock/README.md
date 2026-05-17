@@ -23,13 +23,13 @@ This package contains production-ready subsystems:
 
 ```bash
 # With uv (recommended)
-uv add bedrock
+uv add bedrock-core
 
 # With poetry
-poetry add bedrock
+poetry add bedrock-core
 
 # With pip
-pip install bedrock
+pip install bedrock-core
 ```
 
 ## Quick Start
