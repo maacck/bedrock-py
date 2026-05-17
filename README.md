@@ -184,22 +184,23 @@ class Product(BedrockModel):
     id = Column(Integer, primary_key=True)
     name = Column(String(100), nullable=False)
 
-# Context-local session management
-with db.session() as session:
+# Transactional session management
+with db.session_scope() as session:
     product = Product(name="Widget")
     session.add(product)
-    session.commit()
 
 # Query builder with filters, sorting, pagination
 from bedrock.database.service import search_filter_sort_paginate
 
-results = search_filter_sort_paginate(
-    model=Product,
-    filters={"name": {"operator": "ilike", "value": "%widget%"}},
-    sort_by="name",
-    page=1,
-    per_page=20
-)
+with db.session_scope() as session:
+    results = search_filter_sort_paginate(
+        db_session=session,
+        model=Product,
+        filter_specs=[{"field": "name", "op": "ilike", "value": "%widget%"}],
+        sort_key="name",
+        page=1,
+        limit=20,
+    )
 ```
 
 **CLI for migrations:**

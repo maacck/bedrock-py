@@ -1,10 +1,12 @@
+"""Filter specification parsing and SQLAlchemy clause translation."""
+
 import types
 from collections import namedtuple
 from collections.abc import Iterable
 from datetime import datetime
 from inspect import signature
 from itertools import chain
-from typing import Union
+from typing import Any
 
 from sqlalchemy import (
     DateTime,
@@ -27,7 +29,19 @@ BOOLEAN_FUNCTIONS = [
 ]
 
 
-def get_model_relationship(model, field) -> RelationshipProperty:
+def get_model_relationship(model: type[Any], field: str) -> RelationshipProperty:
+    """Look up a named relationship on a SQLAlchemy model class.
+
+    Args:
+        model: The SQLAlchemy model class to inspect.
+        field: The relationship attribute name.
+
+    Returns:
+        The :class:`RelationshipProperty` for the requested field.
+
+    Raises:
+        BadFilterFormatError: If the model has no such relationship.
+    """
     model_state = inspect(model)
     try:
         return model_state.relationships[field]
@@ -36,11 +50,18 @@ def get_model_relationship(model, field) -> RelationshipProperty:
 
 
 class Field:
-    def __init__(self, model, field_name):
+    """Resolve a (possibly dotted) field name to a SQLAlchemy column expression.
+
+    Supports nested relationships via dot notation (e.g. ``"address.city"``).
+    When a dotted path is given, join arguments are accumulated so that the
+    caller can apply the necessary ``.join()`` calls.
+    """
+
+    def __init__(self, model: type[Any], field_name: str) -> None:
         self.model = model
         self.field_name = field_name
         self.model_state = inspect(model)
-        self.join_args = []
+        self.join_args: list[tuple[Any, ...]] = []
         self.field: Field | None = None
         if "." in self.field_name:
             field_parts = self.field_name.split(".")
@@ -59,7 +80,18 @@ class Field:
             else:
                 raise BadFilterFormatError(f"Invalid filter key: {self.field_name}")
 
-    def get_sqlalchemy_field(self):
+    def get_sqlalchemy_field(self) -> Any:
+        """Return the SQLAlchemy column or hybrid expression for this field.
+
+        If the field resolves to a hybrid method, the method is called and
+        its result is returned.
+
+        Returns:
+            An SQLAlchemy expression suitable for use in ``WHERE`` clauses.
+
+        Raises:
+            BadFilterFormatError: If the field name is not recognised.
+        """
         if self.field:
             return self.field.get_sqlalchemy_field()
         if self.field_name not in self._get_valid_field_names():
@@ -73,7 +105,12 @@ class Field:
 
         return sqlalchemy_field
 
-    def _get_valid_field_names(self):
+    def _get_valid_field_names(self) -> set[str]:
+        """Collect all valid filterable field names on the model.
+
+        Includes regular columns, hybrid properties/methods, association
+        proxies, and relationship names.
+        """
         columns = self.model_state.columns
         orm_descriptors = self.model_state.all_orm_descriptors
         relationship_names = self.model_state.relationships.keys()
@@ -88,23 +125,32 @@ class Field:
         ]
         return set(column_names) | set(hybrid_names)
 
-    def get_join_args(self) -> list:
+    def get_join_args(self) -> list[tuple[Any, ...]]:
+        """Return join arguments accumulated by dotted field resolution.
+
+        Returns:
+            A list of ``(model_class, join_expression)`` tuples suitable
+            for ``Query.join()``.
+        """
         if self.join_args and isinstance(self.field, Field):
             return [*self.join_args, *self.field.get_join_args()]
         elif self.join_args:
             return self.join_args
         return []
 
-    def get_sql_type(self, dialect=None):
-        """
-        Get the SQL type of the field at runtime.
+    def get_sql_type(self, dialect: Any | None = None) -> TypeEngine | str:
+        """Return the SQL type of the field at runtime.
 
         Args:
-            dialect: Optional SQLAlchemy dialect. If provided, returns compiled SQL string.
-                    If None, returns the TypeEngine object.
+            dialect: Optional SQLAlchemy dialect. If provided, returns compiled
+                SQL string. If ``None``, returns the :class:`TypeEngine` object.
 
         Returns:
-            TypeEngine object or SQL string representation if dialect is provided.
+            A :class:`TypeEngine` instance or a compiled SQL string when
+            *dialect* is provided.
+
+        Raises:
+            BadFilterFormatError: If the SQL type cannot be determined.
         """
         sqlalchemy_field = self.get_sqlalchemy_field()
 
@@ -132,20 +178,30 @@ class Field:
         raise BadFilterFormatError(f"Cannot determine SQL type for field `{self.field_name}`.")
 
 
-def _is_hybrid_property(orm_descriptor):
+def _is_hybrid_property(orm_descriptor: Any) -> bool:
+    """Return ``True`` if *orm_descriptor* is a hybrid property."""
     return orm_descriptor.extension_type == HybridExtensionType.HYBRID_PROPERTY
 
 
-def _is_association_column(orm_descriptor):
+def _is_association_column(orm_descriptor: Any) -> bool:
+    """Return ``True`` if *orm_descriptor* is an association proxy."""
     return orm_descriptor.extension_type == AssociationProxyExtensionType.ASSOCIATION_PROXY
 
 
-def _is_hybrid_method(orm_descriptor):
+def _is_hybrid_method(orm_descriptor: Any) -> bool:
+    """Return ``True`` if *orm_descriptor* is a hybrid method."""
     return orm_descriptor.extension_type == HybridExtensionType.HYBRID_METHOD
 
 
 class Operator:
-    OPERATORS = {
+    """Map a filter operator string to its SQLAlchemy clause function.
+
+    Supported operators include equality, comparison, pattern matching,
+    containment, and relationship tests.  Negation is handled by wrapping
+    the underlying function with ``~``.
+    """
+
+    OPERATORS: dict[str, Any] = {
         "is_null": lambda f: f.is_(None),
         "is_not_null": lambda f: f.is_not(None),
         "==": lambda f, a: f == a,
@@ -173,7 +229,17 @@ class Operator:
         "fuzzy_search": lambda f, a: f.ilike("%" + a + "%"),
     }
 
-    def __init__(self, operator=None, negate=False):
+    def __init__(self, operator: str | None = None, negate: bool = False) -> None:
+        """Initialise the operator.
+
+        Args:
+            operator: Operator string (e.g. ``"eq"``, ``"like"``).
+                Defaults to ``"=="``.
+            negate: When ``True``, the resulting clause is wrapped with ``~``.
+
+        Raises:
+            BadFilterFormatError: If *operator* is not a recognised key.
+        """
         if not operator:
             operator = "=="
 
@@ -189,14 +255,39 @@ class Operator:
             else:
                 self.function = lambda f, a: ~self.OPERATORS[operator](f, a)
 
-    def __str__(self):
+    def __str__(self) -> str:
         if self.negate:
             return f"~{self.operator}"
         return self.operator
 
 
 class Filter:
-    def __init__(self, filter_spec, strategy="auto"):
+    """Represent a single filter clause derived from a declarative spec dict.
+
+    A filter spec is a dictionary with at least a ``"field"`` key.  The
+    optional ``"op"`` key selects an :class:`Operator` (default ``"eq"``),
+    and ``"value"`` supplies the comparison operand.
+
+    Supports:
+        - Dot-notation for joined relationships (``"rel.field"``).
+        - Colon-notation for ``any()``/``has()`` wrapping (``"rel:field"``).
+        - Nested filter specs as dict values.
+        - Negation via a leading ``"!"`` on the field name.
+    """
+
+    def __init__(self, filter_spec: dict[str, Any], strategy: str = "auto") -> None:
+        """Parse a filter specification dictionary.
+
+        Args:
+            filter_spec: Must contain ``"field"``; may contain ``"op"`` and
+                ``"value"``.
+            strategy: Relationship resolution strategy — ``"auto"``,
+                ``"join"``, or ``"colon"``.
+
+        Raises:
+            BadFilterFormatError: If required keys are missing or the spec
+                is not a dictionary.
+        """
         self.filter_spec = filter_spec
         # when nested_strategy is auto, it will automatically decide to use any() or has()
         self.strategy = strategy
@@ -214,8 +305,8 @@ class Filter:
 
         self.field = field_name
         self.operator = Operator(filter_spec.get("op", "eq"), negate=self.negate)
-        self.value = filter_spec.get("value")
-        self.join_path = []
+        self.value: Any = filter_spec.get("value")
+        self.join_path: list[str] = []
         value_present = "value" in filter_spec
         if not value_present and self.operator.arity == 2:
             raise BadFilterFormatError("`value` must be provided.")
@@ -231,7 +322,7 @@ class Filter:
             field_parts = field_name.split(":")
             self.join_path = field_parts
             self.field = field_parts[0]
-            self.operator = None
+            self.operator = None  # type: ignore[assignment]
             self.value = Filter(
                 {
                     "op": filter_spec.get("op", "eq"),
@@ -240,17 +331,37 @@ class Filter:
                 }
             )
 
-    def get_named_models(self):
+    def get_named_models(self) -> set[Any]:
+        """Return the set of explicitly named models in the filter spec.
+
+        Returns:
+            A set containing the ``"model"`` value if present, otherwise
+            an empty set.
+        """
         if "model" in self.filter_spec:
             return {self.filter_spec["model"]}
         return set()
 
-    def get_join_args(self, model):
+    def get_join_args(self, model: type[Any]) -> list[tuple[Any, ...]]:
+        """Return join arguments needed to resolve dotted field paths.
+
+        Args:
+            model: The SQLAlchemy model class used to resolve relationships.
+
+        Returns:
+            A list of ``(model_class, join_expression)`` tuples, or an
+            empty list when no joins are required.
+        """
         if "." in self.field:
             return Field(model, self.filter_spec["field"]).get_join_args()
         return []
 
-    def _format_value(self, sql_type: TypeEngine, value):
+    def _format_value(self, sql_type: TypeEngine, value: Any) -> Any:
+        """Coerce *value* to match *sql_type* when necessary.
+
+        Handles ``DateTime`` columns by parsing ISO strings or Unix
+        timestamps.
+        """
         # if sqlalchemy_field is a field
         # and if sqlalchemy_field type is Datetime
         # convert value to datetime
@@ -265,7 +376,7 @@ class Filter:
                 raise BadFilterFormatError(f"Value `{value}` is not a valid datetime format.")
         return value
 
-    def _format_text_search(self, default_model):
+    def _format_text_search(self, default_model: type[Any]) -> Any:
         """Handle text_search operator by wrapping in any()/has() based on relationship type."""
         field = Field(default_model, self.field)
         relationship = get_model_relationship(default_model, self.field)
@@ -278,7 +389,22 @@ class Filter:
             self.operator.function(relationship.mapper.class_, self.value),
         )
 
-    def format_for_sqlalchemy(self, default_model):
+    def format_for_sqlalchemy(self, default_model: type[Any]) -> Any:
+        """Translate this filter into a SQLAlchemy clause element.
+
+        Resolves the field, applies the operator, and returns a clause
+        suitable for ``.where()``.
+
+        Args:
+            default_model: The SQLAlchemy model class used to resolve
+                field names and relationships.
+
+        Returns:
+            A SQLAlchemy clause expression.
+
+        Raises:
+            BadFilterFormatError: If the operator arity is unexpected.
+        """
         operator = self.operator
         value = self.value
 
@@ -312,25 +438,42 @@ class Filter:
         raise BadFilterFormatError(f"Operator `{operator}` has unexpected arity {arity}.")
 
 
-FilterableValueBase = Union[str, int, float, bool, datetime]  # noqa: UP007
-FilterableValue = Union[FilterableValueBase, list[FilterableValueBase]]  # noqa: UP007
+FilterableValueBase = str | int | float | bool | datetime
+FilterableValue = FilterableValueBase | list[FilterableValueBase]
 
 
 class BooleanFilter:
-    def __init__(self, function, *filters):
+    """Combine multiple filters using a boolean function (``and_``/``or_``)."""
+
+    def __init__(self, function: Any, *filters: Filter) -> None:
+        """Initialise the boolean filter.
+
+        Args:
+            function: A SQLAlchemy boolean combinatory (e.g. ``and_``, ``or_``).
+            *filters: One or more :class:`Filter` instances to combine.
+        """
         self.function = function
         self.filters = filters
 
-    def get_named_models(self):
-        models = set()
+    def get_named_models(self) -> set[Any]:
+        """Return the union of named models from all child filters."""
+        models: set[Any] = set()
         for filter_ in self.filters:
             named_models = filter_.get_named_models()
             if named_models:
                 models.update(named_models)
         return models
 
-    def get_join_args(self, model):
-        join_args = []
+    def get_join_args(self, model: type[Any]) -> list[tuple[Any, ...]]:
+        """Collect unique join arguments from all child filters.
+
+        Args:
+            model: The SQLAlchemy model class used to resolve relationships.
+
+        Returns:
+            A deduplicated list of join argument tuples.
+        """
+        join_args: list[tuple[Any, ...]] = []
         for filter_ in self.filters:
             field_join_args = filter_.get_join_args(model=model)
             for join_arg in field_join_args:
@@ -338,16 +481,40 @@ class BooleanFilter:
                     join_args.append(join_arg)
         return join_args
 
-    def format_for_sqlalchemy(self, default_model):
+    def format_for_sqlalchemy(self, default_model: type[Any]) -> Any:
+        """Combine all child filters into a single clause via the boolean function.
+
+        Args:
+            default_model: The SQLAlchemy model class used to resolve
+                field names and relationships.
+
+        Returns:
+            A SQLAlchemy clause expression.
+        """
         return self.function(*[filter_.format_for_sqlalchemy(default_model) for filter_ in self.filters])
 
 
-def _is_iterable_filter(filter_spec):
-    """`filter_spec` may be a list of nested filter specs, or a dict."""
+def _is_iterable_filter(filter_spec: Any) -> bool:
+    """Return ``True`` if *filter_spec* is a list of nested filter specs."""
     return isinstance(filter_spec, Iterable) and not isinstance(filter_spec, str | dict)
 
 
-def init_filters(model, filter_spec):
+def init_filters(model: type[Any], filter_spec: Any) -> list[Filter | BooleanFilter]:
+    """Parse one or more filter specs into :class:`Filter` / :class:`BooleanFilter` objects.
+
+    Handles nested boolean functions (``"or"`` / ``"and"``), lists of
+    specs, and individual filter dicts.
+
+    Args:
+        model: The SQLAlchemy model class used to resolve fields.
+        filter_spec: A single filter-spec dict or a list thereof.
+
+    Returns:
+        A list of parsed filter objects ready for SQL translation.
+
+    Raises:
+        BadFilterFormatError: If a boolean function's arguments are invalid.
+    """
     if _is_iterable_filter(filter_spec):
         return list(chain.from_iterable(init_filters(model, item) for item in filter_spec))
 
