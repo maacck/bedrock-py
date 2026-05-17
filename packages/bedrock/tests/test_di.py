@@ -325,7 +325,7 @@ class TestProviderDecorator:
         assert a is not b
 
     def test_provider_with_key_and_lifetime(self) -> None:
-        from bedrock.di.decorators import provider
+        from bedrock.di import provider
 
         class ILogger:
             pass
@@ -339,6 +339,33 @@ class TestProviderDecorator:
         b = container.resolve(ILogger)
         assert a is not b
         assert isinstance(a, FileLogger)
+
+    def test_container_provider_registers_into_custom_container_only(self) -> None:
+        custom = Container()
+        container.reset()
+
+        @custom.provider
+        class MyService:
+            pass
+
+        assert custom.is_registered(MyService) is True
+        assert container.is_registered(MyService) is False
+        assert isinstance(custom.resolve(MyService), MyService)
+
+    def test_container_provider_with_explicit_key_uses_custom_container(self) -> None:
+        custom = Container()
+        container.reset()
+
+        class IService:
+            pass
+
+        @custom.provider(IService, lifetime=Lifetime.SINGLETON)
+        class MyService(IService):
+            pass
+
+        assert custom.is_registered(IService) is True
+        assert container.is_registered(IService) is False
+        assert isinstance(custom.resolve(IService), MyService)
 
 
 class TestInjectDecorator:
@@ -383,7 +410,7 @@ class TestInjectDecorator:
         assert my_func() == 77
 
     def test_inject_preserves_function_metadata(self) -> None:
-        from bedrock.di.decorators import inject
+        from bedrock.di import inject
 
         @inject(dep=_FakeService)
         def my_func():
@@ -392,3 +419,45 @@ class TestInjectDecorator:
 
         assert my_func.__name__ == "my_func"
         assert my_func.__doc__ == "My docstring."
+
+    def test_container_inject_resolves_from_custom_container_only(self) -> None:
+        custom = Container()
+        container.reset()
+        custom.register_instance(_FakeService, _FakeService(55))
+
+        @custom.inject(dep=_FakeService)
+        def my_func(*, dep: _FakeService) -> int:
+            return dep.value
+
+        assert my_func() == 55
+
+    def test_container_inject_does_not_resolve_from_default_container(self) -> None:
+        custom = Container()
+        container.reset()
+        container.register_instance(_FakeService, _FakeService(1))
+        custom.register_instance(_FakeService, _FakeService(2))
+
+        @custom.inject(dep=_FakeService)
+        def my_func(*, dep: _FakeService) -> int:
+            return dep.value
+
+        assert my_func() == 2
+
+    def test_top_level_aliases_remain_bound_to_default_container(self) -> None:
+        from bedrock.di import inject, provider
+
+        custom = Container()
+        custom.register_instance(_FakeService, _FakeService(9))
+        container.register_instance(_FakeService, _FakeService(4))
+
+        @provider
+        class MyService:
+            pass
+
+        @inject(dep=_FakeService)
+        def my_func(*, dep: _FakeService) -> int:
+            return dep.value
+
+        assert container.is_registered(MyService) is True
+        assert custom.is_registered(MyService) is False
+        assert my_func() == 4

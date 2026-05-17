@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any, TypeVar, overload
 
 from ._scope import ScopeManager
+from .decorators import build_inject, build_provider
 from .exc import DuplicateServiceError, ScopeError, ServiceNotFoundError
 from .lifetime import Lifetime
 
@@ -33,6 +34,8 @@ class Container:
         self._singletons: dict[type | str, Any] = {}
         self._scope_manager = ScopeManager()
         self._lock = threading.RLock()
+        self.provider = build_provider(self)
+        self.inject = build_inject(self)
 
     def register(
         self,

@@ -1,11 +1,12 @@
 """Bedrock dependency injection container."""
 
 from .container import Container
-from .decorators import inject, provider
 from .exc import DIError, DuplicateServiceError, ScopeError, ServiceNotFoundError
 from .lifetime import Lifetime
 
 container = Container()
+provider = container.provider
+inject = container.inject
 
 __all__ = [
     "Container",
