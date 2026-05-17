@@ -13,9 +13,6 @@ from functools import cached_property
 from asgiref.sync import (
     async_to_sync as asgiref_async_to_sync,
 )
-from asgiref.sync import (
-    sync_to_async as asgiref_sync_to_async,
-)
 
 from ._utilities import Symbol, make_id, make_ref
 
@@ -146,7 +143,7 @@ class Signal:
         if "receiver_connected" in self.__dict__ and self.receiver_connected.receivers:
             try:
                 self.receiver_connected.send(self, receiver=receiver, sender=sender, weak=weak)
-            except TypeError:
+            except Exception:
                 self.disconnect(receiver, sender)
                 raise
 
@@ -456,7 +453,10 @@ class Signal:
 
     @staticmethod
     def _default_sync_wrapper(receiver: Receiver) -> AsyncReceiver:
-        return t.cast(AsyncReceiver, asgiref_sync_to_async(receiver))
+        async def wrapped(*args: t.Any, **kwargs: t.Any) -> t.Any:
+            return await asyncio.to_thread(receiver, *args, **kwargs)
+
+        return wrapped
 
     @staticmethod
     def _default_async_wrapper(receiver: AsyncReceiver) -> Receiver:

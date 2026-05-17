@@ -232,6 +232,21 @@ class TestSignalDispatch:
         assert isinstance(values["bad_async"], RuntimeError)
 
     @pytest.mark.asyncio
+    async def test_send_robust_collects_runtime_error_for_async_receiver_in_running_loop(self) -> None:
+        sig = Signal()
+
+        async def async_receiver(sender, **kwargs):
+            return "ok"
+
+        sig.connect(async_receiver, weak=False)
+
+        result = sig.send_robust("worker")
+
+        assert len(result) == 1
+        assert isinstance(result[0][1], RuntimeError)
+        assert "running event loop thread" in str(result[0][1])
+
+    @pytest.mark.asyncio
     async def test_asend_robust_collects_sync_and_async_failures(self) -> None:
         sig = Signal()
 
@@ -448,6 +463,23 @@ class TestSignalConnect:
             return "ok"
 
         with pytest.raises(TypeError, match="meta error"):
+            sig.connect(my_receiver, weak=False)
+
+        assert list(sig.receivers_for("any_sender")) == []
+
+    @pytest.mark.asyncio
+    async def test_receiver_connected_async_error_rolls_back_connection(self) -> None:
+        sig = Signal()
+
+        async def bad_async_meta_receiver(*args, **kwargs):
+            raise RuntimeError("async meta error")
+
+        sig.receiver_connected.connect(bad_async_meta_receiver, weak=False)
+
+        def my_receiver(sender, **kwargs):
+            return "ok"
+
+        with pytest.raises(RuntimeError, match="running event loop thread"):
             sig.connect(my_receiver, weak=False)
 
         assert list(sig.receivers_for("any_sender")) == []
