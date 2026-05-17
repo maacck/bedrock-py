@@ -30,10 +30,8 @@ We recommend uv for its speed and built-in virtual environment management. Insta
 
 Bedrock provides optional dependency groups for additional backends:
 
-<Tabs items={['Redis Cache', 'Memcached Cache']}>
+<Tabs items={['Redis Cache']}>
   <Tab value="Redis Cache"><CodeBlock code={'uv add bedrock-core[cache-redis]'} lang={'bash'} /></Tab>
-
-
 </Tabs>
 
 | Extra | Packages | Description |
@@ -111,6 +109,5 @@ Run a quick Python verification:
 ```python
 import bedrock
 
-bedrock -v
-# Output: Hello from bedrock!
+print(bedrock)
 ```
