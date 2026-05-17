@@ -28,7 +28,7 @@ jobs:
       - name: Validate version tag
         run: |
           TAG_VERSION="${GITHUB_REF_NAME#v}"
-          PKG_VERSION=$(uv run python -c "import importlib.metadata; print(importlib.metadata.version('bedrock'))")
+          PKG_VERSION=$(uv run python -c "import importlib.metadata; print(importlib.metadata.version('bedrock-core'))")
           if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
             echo "::error::Tag version ($TAG_VERSION) does not match package version ($PKG_VERSION)"
             exit 1
@@ -49,7 +49,7 @@ jobs:
     needs: build
     environment:
       name: pypi
-      url: https://pypi.org/p/bedrock-py
+      url: https://pypi.org/project/bedrock-core/
     permissions:
       id-token: write  # Required for trusted publishing
     steps:
