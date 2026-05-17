@@ -71,7 +71,7 @@ class AppSettings(BaseSettings):
 app_settings: AppSettings = SettingsProxy(AppSettings)  # type: ignore[assignment]
 ```
 
-First module (`modules/users/manifest.yaml`):
+First module (`my_app/users/manifest.yaml`):
 
 ```yaml
 title: User Management
