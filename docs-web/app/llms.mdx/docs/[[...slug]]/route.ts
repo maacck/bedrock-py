@@ -5,7 +5,6 @@ export const revalidate = false;
 
 export async function GET(_req: Request, { params }: RouteContext<'/llms.mdx/docs/[[...slug]]'>) {
   const { slug } = await params;
-  console.log(slug)
   const page = source.getPage(slug, 'en');
   if (!page) notFound();
 
