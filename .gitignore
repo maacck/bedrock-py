@@ -218,3 +218,6 @@ packages/bedrock-example/
 
 # Cloudflare
 .wrangler/
+
+# Git worktrees
+.worktrees/

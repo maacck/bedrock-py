@@ -287,12 +287,14 @@ from bedrock.signal import Signal
 # Define a custom signal
 user_created = Signal("user_created")
 
-# Send (sync)
+# Send (sync) — in pure sync context, adapts async receivers
 user_created.send(sender, user=new_user)
 
-# Send (async)
+# Send (async) — canonical for mixed sync/async receivers
 await user_created.asend(sender, user=new_user)
 ```
+
+> **Sync/async contract:** `send()` is sync-facing. In a pure sync context it can adapt async receivers. Inside a running event loop, it raises `RuntimeError` if an async receiver is reached. Use `await asend()` for async or mixed contexts. See `references/signals-guide.md` for details.
 
 ---
 

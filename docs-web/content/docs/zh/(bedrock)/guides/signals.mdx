@@ -316,10 +316,95 @@ def on_all_ready(sender, **kwargs):
 4. 按**逆序**调用每个模块的 `on_shutdown` 钩子 → 每个模块触发一次 `module_shutdown`
 5. 注册表发出完成信号 → 触发一次 `registry_shutdown`
 
-## 关键陷阱：异步接收器配合同步发送
+## 同步/异步互操作
+
+`send()` 是面向同步的 API。其行为取决于当前是否有事件 loop 在运行：
+
+- **纯同步上下文（无运行中的事件 loop）：** `send()` 可以自动适配异步接收器（使用默认的 `asgiref` 桥接）。
+- **在运行中的事件 loop 内：** 如果 `send()` 遇到异步接收器，它会抛出 `RuntimeError`，提示你使用 `await signal.asend(...)` 或提供 `_async_wrapper`。
+
+`asend()` 是异步和混合上下文的规范 API。它原生等待异步接收器，并通过 `asyncio.to_thread` 包装同步接收器。
+
+```python
+from bedrock.signal import Signal
+
+order_placed = Signal()
+
+def sync_handler(sender, **kwargs):
+    print(f"Sync: {kwargs['order_id']}")
+
+async def async_handler(sender, **kwargs):
+    await notify_external_service(kwargs["order_id"])
+
+order_placed.connect(sync_handler, weak=False)
+order_placed.connect(async_handler, weak=False)
+
+# 纯同步上下文 — send() 会适配异步接收器
+results = order_placed.send(app, order_id="ORD-001")
+
+# 异步上下文 — 使用 asend()（混合接收器的规范方式）
+results = await order_placed.asend(app, order_id="ORD-001")
+```
+
+### 异步可调用对象
+
+异步可调用对象（具有 `async __call__` 的类）被视为异步接收器。在纯同步上下文中，`send()` 会自动适配它们。在运行中的事件 loop 内，请使用 `asend()` 或提供 `_async_wrapper`：
+
+```python
+class NotificationService:
+    async def __call__(self, sender, **kwargs):
+        await self.send_notification(kwargs["order_id"])
+
+service = NotificationService()
+order_placed.connect(service, weak=False)
+
+# 纯同步上下文 — send() 自动适配
+results = order_placed.send(app, order_id="ORD-001")
+
+# 异步上下文 — 使用 asend()
+results = await order_placed.asend(app, order_id="ORD-001")
+```
+
+### 自定义包装器
+
+你可以通过传入 `_async_wrapper` 来覆盖 `send()` 适配异步接收器的方式：
+
+```python
+def my_async_wrapper(receiver):
+    def wrapped(*args, **kwargs):
+        import asyncio
+        import threading
+
+        result = None
+        exc = None
+
+        def run():
+            nonlocal result, exc
+            try:
+                result = asyncio.run(receiver(*args, **kwargs))
+            except Exception as e:
+                exc = e
+
+        thread = threading.Thread(target=run)
+        thread.start()
+        thread.join()
+
+        if exc:
+            raise exc
+        return result
+
+    return wrapped
+
+results = order_placed.send(app, _async_wrapper=my_async_wrapper, order_id="ORD-001")
+```
+
+类似地，`asend()` 接受 `_sync_wrapper` 参数，用于覆盖同步接收器的适配方式（默认：`asyncio.to_thread`）。
+
+### 在事件 loop 中使用 `send()` 时的限制
 
 <Callout type="error">
-当连接了异步接收器时调用 `signal.send()` 会抛出 `RuntimeError`。如果任一接收器可能是异步的，你**必须**使用 `await signal.asend()`。
+`send()` 在普通同步上下文下会自动适配异步接收器。  
+但如果当前线程已有运行中的事件 loop，且命中了异步接收器，`send()` 会抛出 `RuntimeError`。此时请使用 `await signal.asend()` 或提供 `_async_wrapper`。
 </Callout>
 
 ```python
@@ -327,18 +412,17 @@ from bedrock.signal import Signal
 
 order_placed = Signal()
 
-# This async receiver looks innocent...
 async def async_handler(sender, **kwargs):
     await notify_external_service(kwargs["order_id"])
 
 order_placed.connect(async_handler, weak=False)
 
-# THIS RAISES RuntimeError!
+# 在事件 loop 中调用会抛出 RuntimeError!
 order_placed.send(app, order_id="ORD-001")
 # RuntimeError: Cannot send to an async receiver with send().
 # Use await signal.asend(...) or provide _async_wrapper.
 
-# CORRECT: use asend() in async context
+# 正确做法：在异步上下文中使用 asend()
 await order_placed.asend(app, order_id="ORD-001")
 ```
 
@@ -400,7 +484,7 @@ Bedrock 有两种扩展机制：**信号**和 **hooks**。它们服务于不同�
 
 ## 反模式
 
-**不要将 `send()` 与异步接收器混用。** 这会抛出 `RuntimeError`。如果代码库中存在异步接收器，应始终使用 `asend()`，或者结合 `has_receivers_for()` 与类型检查进行保护。
+**不要在异步代码中调用 `send()` 并连接了异步接收器。** 这会抛出 `RuntimeError`。请改用 `await signal.asend()`，或传入 `_async_wrapper` 提供自定义适配逻辑。
 
 **不要依赖接收器的执行顺序。** 默认的 `set_class` 是 Python 无序的 `set`。如果你需要有序分发，请通过 `Signal.set_class` 提供一个有序集合实现。
 

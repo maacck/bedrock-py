@@ -316,33 +316,90 @@ During `registry.shutdown()`:
 4. Each module's `on_shutdown` hook is called in **reverse** order → `module_shutdown` per module
 5. Registry signals completion → `registry_shutdown` once
 
-## Critical Pitfall: Async Receivers with Sync Send
+## Sync/Async Interop
 
-<Callout type="error">
-Calling `signal.send()` when an async receiver is connected raises `RuntimeError`. You **must** use `await signal.asend()` when any receiver might be async.
-</Callout>
+`send()` is a sync-facing API. Its behavior depends on whether an event loop is running:
+
+- **Pure sync context (no running event loop):** `send()` can adapt async receivers automatically (using the default `asgiref` bridge).
+- **Inside a running event loop:** If `send()` encounters an async receiver, it raises `RuntimeError` instructing you to use `await signal.asend(...)` or provide `_async_wrapper`.
+
+`asend()` is the canonical API for async and mixed-context code. It natively awaits async receivers and wraps sync receivers via `asyncio.to_thread`.
 
 ```python
 from bedrock.signal import Signal
 
 order_placed = Signal()
 
-# This async receiver looks innocent...
+def sync_handler(sender, **kwargs):
+    print(f"Sync: {kwargs['order_id']}")
+
 async def async_handler(sender, **kwargs):
     await notify_external_service(kwargs["order_id"])
 
+order_placed.connect(sync_handler, weak=False)
 order_placed.connect(async_handler, weak=False)
 
-# THIS RAISES RuntimeError!
-order_placed.send(app, order_id="ORD-001")
-# RuntimeError: Cannot send to an async receiver with send().
-# Use await signal.asend(...) or provide _async_wrapper.
+# Pure sync context — send() adapts async receivers
+results = order_placed.send(app, order_id="ORD-001")
 
-# CORRECT: use asend() in async context
-await order_placed.asend(app, order_id="ORD-001")
+# Async context — use asend() (canonical for mixed receivers)
+results = await order_placed.asend(app, order_id="ORD-001")
 ```
 
-If you're in a mixed sync/async codebase, prefer `asend()` as the default dispatch method. It handles both sync and async receivers seamlessly — sync receivers are automatically wrapped via `asyncio.to_thread`.
+### Async Callable Objects
+
+Async callable objects (classes with `async __call__`) are treated as async receivers. In a pure sync context, `send()` adapts them automatically. Inside a running event loop, use `asend()` or provide `_async_wrapper`:
+
+```python
+class NotificationService:
+    async def __call__(self, sender, **kwargs):
+        await self.send_notification(kwargs["order_id"])
+
+service = NotificationService()
+order_placed.connect(service, weak=False)
+
+# Pure sync context — send() adapts automatically
+results = order_placed.send(app, order_id="ORD-001")
+
+# Async context — use asend()
+results = await order_placed.asend(app, order_id="ORD-001")
+```
+
+### Custom Wrappers
+
+You can override how `send()` adapts async receivers by passing `_async_wrapper`:
+
+```python
+# Custom async-to-sync wrapper with different threading strategy
+def my_async_wrapper(receiver):
+    def wrapped(*args, **kwargs):
+        import asyncio
+        import threading
+
+        result = None
+        exc = None
+
+        def run():
+            nonlocal result, exc
+            try:
+                result = asyncio.run(receiver(*args, **kwargs))
+            except Exception as e:
+                exc = e
+
+        thread = threading.Thread(target=run)
+        thread.start()
+        thread.join()
+
+        if exc:
+            raise exc
+        return result
+
+    return wrapped
+
+results = order_placed.send(app, _async_wrapper=my_async_wrapper, order_id="ORD-001")
+```
+
+Similarly, `asend()` accepts `_sync_wrapper` to override how sync receivers are adapted (default: `asyncio.to_thread`).
 
 ## Weak References
 
@@ -400,7 +457,7 @@ For more on the hook system, see the [Hooks guide](/docs/guides/hooks).
 
 ## Anti-Patterns
 
-**Don't mix `send()` and async receivers.** This raises `RuntimeError`. Always use `asend()` in codebases with async receivers, or guard with `has_receivers_for()` + type checks.
+**Don't call `send()` from async code when async receivers are connected.** It raises `RuntimeError`. Use `await signal.asend()` instead, or pass `_async_wrapper` to provide custom adaptation logic.
 
 **Don't rely on receiver execution order.** The default `set_class` is Python's unordered `set`. If you need ordered dispatch, provide an ordered set implementation via `Signal.set_class`.
 
