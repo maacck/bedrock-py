@@ -1,3 +1,6 @@
+from collections.abc import Generator
+from contextlib import contextmanager
+
 from sqlalchemy import Engine
 from sqlalchemy.orm import Session
 
@@ -77,6 +80,28 @@ class DatabaseManager:
         if self._session_factory is None:
             raise DatabaseNotConfiguredError("Database is not initialized. Call db.init(...) before clearing sessions.")
         self._session_factory.clear_session()
+
+    @contextmanager
+    def session_scope(self) -> Generator[Session, None, None]:
+        """Proxy to SessionFactory.session_scope."""
+
+        if self._session_factory is None:
+            raise DatabaseNotConfiguredError(
+                "Database is not initialized. Call db.init(...) before using session_scope."
+            )
+        with self._session_factory.session_scope() as session:
+            yield session
+
+    @contextmanager
+    def independent_session(self) -> Generator[Session, None, None]:
+        """Proxy to SessionFactory.independent_session."""
+
+        if self._session_factory is None:
+            raise DatabaseNotConfiguredError(
+                "Database is not initialized. Call db.init(...) before using independent_session."
+            )
+        with self._session_factory.independent_session() as session:
+            yield session
 
 
 # Public singleton mirroring Flask-SQLAlchemy style usage.

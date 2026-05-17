@@ -1,0 +1,205 @@
+---
+title: Playbook
+description: 面向 AI 可读的可复用 Bedrock 模块文档
+---
+
+## 问题
+
+你构建了可复用的 Bedrock 模块——auth、S3 storage、payment processing、team scaffolding。这些模块封装了复杂的业务逻辑和 API。
+
+当 AI agents 在使用这些模块的项目上工作时，会遇到一个问题：**它们不知道模块是如何工作的**。
+
+agent 必须：
+
+1. 每次都扫描模块源码
+2. 猜测 API 契约和使用模式
+3. 在每个项目中重复这项工作
+
+**如果你的模块位于独立 package 中（不在项目代码库里），agent 扫描它会更困难。**
+
+### 真实场景
+
+你的团队构建了一个可复用的 `storage` 模块，支持多种 backends——S3、本地文件系统、Azure Blob 等。该模块作为独立 package 发布，并通过 `uv add mycompany-bedrock-storage` 安装。
+
+当 AI agent 在使用这个模块的项目中工作时：
+
+```python
+# The agent sees this in the codebase
+from mycompany.storage import storage_service
+
+# But it has NO idea:
+# - What methods are available? upload()? download()? get_url()?
+# - What parameters does upload() accept? file_path? content? metadata?
+# - How to configure the backend? env vars? settings class?
+# - What exceptions does it raise? StorageError? FileNotFoundError?
+```
+
+agent 无法扫描源码，因为它位于已安装 package 中，而不在项目仓库里。没有 playbook，agent 只能**猜**——而且往往会猜错。
+
+**有了 playbook**，agent 运行 `bedrock app playbook mycompany.storage` 后就能立刻知道：
+
+```markdown
+# Storage Module
+
+## Quick Start
+
+from mycompany.storage import storage_service, StorageSettings
+
+# Upload a file
+
+url = storage_service.upload(
+path="avatars/user-123.jpg",
+content=file_bytes,
+content_type="image/jpeg",
+)
+
+## Backends
+
+- S3: Set STORAGE_BACKEND=s3, STORAGE_S3_BUCKET=my-bucket
+- Local: Set STORAGE_BACKEND=local, STORAGE_LOCAL_PATH=./uploads
+```
+
+## 解决方案：Playbook
+
+**playbook** 是模块内部的一个目录，用来教 AI agents 如何使用它：
+
+```
+team_storage/
+├── __init__.py
+├── manifest.yaml
+├── service.py
+├── ...
+└── playbook/                  # AI-readable documentation
+    ├── PLAYBOOK.md            # Main playbook (Similar to SKILL.md or README.md)
+    └── references/
+        ├── auth-flows.md
+        └── examples/
+            └── login-flow.py
+```
+
+AI agents 通过 CLI 读取 playbook：
+
+```bash
+bedrock app playbook myapp.auth           # Read the main playbook
+bedrock app playbook-ref myapp.auth references/api-reference.md  # Read references
+```
+
+## 何时编写 Playbook
+
+当你或你的团队构建了一个可复用的 Bedrock 模块，并计划在多个项目中使用它时，就应该编写 playbook。
+如果该模块会作为独立 package 发布，并通过 `pypi`/或私有 repo 安装，这一点尤其重要，因为 agents 很难找到文档并扫描源码。
+
+**经验法则**：如果另一个项目会导入这个模块，但不会在仓库中包含它的源码，就写一个 playbook。
+
+## Playbook 中应包含什么
+
+### `PLAYBOOK.md`（必需）
+
+主 playbook 应回答以下问题：
+
+1. **这个模块做什么？** — 一段摘要说明
+2. **如何导入与初始化** — 精确的导入路径
+3. **核心 API** — 开发者会使用的主要类/函数
+4. **常见模式** — 可直接复制粘贴的代码示例
+5. **反模式** — 哪些事情**不要**做
+
+```markdown
+# Auth Module
+
+Authentication and authorization for Bedrock applications.
+
+## Quick Start
+
+\`\`\`python
+from myapp.auth import auth_service
+from myapp.auth.entities import UserEntity
+
+# Login
+
+user = auth_service.authenticate(email="alice@example.com", password="secret")
+
+# Check permissions
+
+if auth_service.has_permission(user, "users:write"):
+...
+\`\`\`
+
+## Key APIs
+
+### `auth_service.authenticate(email, password) -> User`
+
+Raises `AuthenticationError` if credentials are invalid.
+
+### `auth_service.has_permission(user, permission) -> bool`
+
+Check if user has a specific permission.
+
+## Anti-Patterns
+
+- Don't import `auth_service` at module level in bootstrap.py (circular import)
+- Don't catch `AuthenticationError` and return None — let it propagate
+```
+
+### 其他参考资料
+
+对于主 playbook 来说过于详细的附加文档：
+
+- `references/` — 更详细的参考文档
+- `examples/` — 完整代码示例
+- `templates/` — 可复制的样板代码
+
+## Playbook 与文档站点
+
+| 维度     | Playbook               | 文档站点           |
+| -------- | ---------------------- | ------------------ |
+| 受众     | AI agents              | 人类               |
+| 格式     | Markdown 文件          | HTML/MDX           |
+| 位置     | 模块 package 内部      | 独立 repo/构建产物 |
+| 访问方式 | `bedrock app playbook` | 浏览器             |
+| 搭建成本 | 无（约定即可）         | 构建流水线         |
+
+**两者都要用**：playbook 面向 AI agents，文档站点面向人类开发者。它们服务的是不同受众。
+另外，为每个模块都编写文档站点的工作量很大。应优先为可复用模块编写 playbook，而将文档站点留给公开/开源项目，或那些需要详细人工文档的复杂模块。
+
+## CLI 参考
+
+```bash
+# Read main playbook
+bedrock app playbook <module_import_path>
+
+# Read reference files
+bedrock app playbook-ref <module_import_path> <filename>
+
+# Examples
+bedrock app playbook myapp.auth
+bedrock app playbook-ref myapp.auth references/api-reference.md
+bedrock app playbook-ref myapp.auth examples/login-flow.py
+```
+
+## Playbook 与 Agent Skills
+
+Playbook 本质上就是**轻量级、模块作用域内的 skills**。
+
+你可能会问：“为什么不直接为每个模块创建一个 agent skill？”
+
+| 方案                  | 优点                 | 缺点                                      |
+| --------------------- | -------------------- | ----------------------------------------- |
+| 每个模块一个 skill    | 完整的 skill 能力    | 上下文污染——10 个模块 = 加载 10 个 skills |
+| 每个模块一个 playbook | 作用域明确、按需发现 | 仅限 markdown 文档                        |
+
+**每模块一个 skill 的问题**：agent skills 会在对话开始时加载进上下文。如果你的项目使用了 10 个 Bedrock 模块，那就意味着有 10 个 skills 在争夺上下文窗口空间。而其中大多数与当前任务并不相关。
+
+**playbook 解决了这个问题**：它们存在于模块 package 内部，只有当 agent 通过 `bedrock app playbook` 显式需要时才会被读取。不会污染上下文，也不会浪费 tokens。
+
+可以这样理解：
+
+- **Skills** = 全局知识（如何使用 Git、如何编写测试）
+- **Playbooks** = 本地知识（如何使用*这个特定模块*）
+
+## 最佳实践
+
+1. **保持简洁** — agents 扫描很快，不需要大段 prose
+2. **展示代码** — 示例胜过解释
+3. **覆盖反模式** — 预防常见错误
+4. **与代码同步更新** — playbook 应与当前 API 保持一致
+5. **使用 references/** — 不要让 README.md 过载

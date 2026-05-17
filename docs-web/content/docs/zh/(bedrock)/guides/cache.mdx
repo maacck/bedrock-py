@@ -1,0 +1,394 @@
+---
+title: 缓存
+description: 提供同步/异步 API、分布式锁和类型化命名空间的内存与 Redis 缓存
+---
+
+Bedrock 内置了一套官方缓存系统，支持可插拔后端、类型化命名空间和分布式锁。整个子系统位于 `bedrock.contrib.cache` 下。
+
+## 快速开始
+
+```python
+from bedrock.contrib.cache import cache
+
+# Store a value (auto-configures with in-memory backend)
+cache.set("user:123", {"name": "Alice"}, ex=300)
+
+# Retrieve it
+user = cache.get("user:123")
+print(user)  # {"name": "Alice"}
+
+# Async variants
+await cache.aset("user:456", {"name": "Bob"}, ex=600)
+user = await cache.aget("user:456")
+```
+
+这就是核心使用循环。本页其余部分会介绍配置、完整 API 和高级模式。
+
+## 配置
+
+缓存服务使用动态后端注册表。内存后端默认可用。Redis 需要额外安装可选的 `redis` 依赖。
+
+### 后端选择
+
+```python
+from bedrock.contrib.cache import cache
+
+# In-memory backend (default, auto-configured on first use)
+cache.configure("memory")
+
+# Redis backend (requires: uv add bedrock[cache-redis])
+cache.configure("redis")
+```
+
+### 自定义设置
+
+传入 settings 实例以覆盖默认值：
+
+```python
+from bedrock.contrib.cache import cache, RedisCacheSettings
+
+settings = RedisCacheSettings(
+    REDIS_URL="redis://localhost:6379/1",
+    REDIS_PREFIX="myapp",
+)
+cache.configure("redis", settings=settings)
+```
+
+### 注册自定义后端
+
+```python
+from bedrock.contrib.cache import register_backend, CacheBackend
+
+class MyCustomBackend(CacheBackend):
+    # Implement required methods...
+    pass
+
+register_backend("custom", MyCustomBackend)
+cache.configure("custom")
+```
+
+## CacheService API 参考
+
+`cache` 单例是一个 `CacheService` 实例。所有访问都通过该对象进行。
+
+### 核心操作
+
+| 方法 | 签名 | 说明 |
+|--------|-----------|-------------|
+| `cache.get()` | `get(key, default=None, type_=None, coder=None) → Any` | 获取缓存值 |
+| `cache.aget()` | `aget(key, default=None, type_=None, coder=None) → Any` | `get` 的异步版本 |
+| `cache.set()` | `set(key, value, ex=None, ea=None, coder=None) → None` | 存储一个值 |
+| `cache.aset()` | `aset(key, value, ex=None, ea=None, coder=None) → None` | `set` 的异步版本 |
+| `cache.delete()` | `delete(key) → bool` | 删除一个键 |
+| `cache.adelete()` | `adelete(key) → bool` | `delete` 的异步版本 |
+| `cache.exists()` | `exists(key) → bool` | 检查键是否存在 |
+| `cache.aexists()` | `aexists(key) → bool` | `exists` 的异步版本 |
+| `cache.clear()` | `clear(prefix=None) → int` | 删除所有条目（可按前缀） |
+| `cache.aclear()` | `aclear(prefix=None) → int` | `clear` 的异步版本 |
+
+### 批量操作
+
+| 方法 | 签名 | 说明 |
+|--------|-----------|-------------|
+| `cache.get_many()` | `get_many(keys) → dict[str, Any]` | 获取多个键 |
+| `cache.aget_many()` | `aget_many(keys) → dict[str, Any]` | 异步版本 |
+| `cache.set_many()` | `set_many(mapping, ex=None, ea=None, coder=None) → None` | 存储多组键值 |
+| `cache.aset_many()` | `aset_many(mapping, ex=None, ea=None, coder=None) → None` | 异步版本 |
+
+### 数值操作
+
+| 方法 | 签名 | 说明 |
+|--------|-----------|-------------|
+| `cache.incr()` | `incr(key, delta=1) → int` | 增加数值 |
+| `cache.aincr()` | `aincr(key, delta=1) → int` | 异步版本 |
+| `cache.decr()` | `decr(key, delta=1) → int` | 减少数值 |
+| `cache.adecr()` | `adecr(key, delta=1) → int` | 异步版本 |
+
+### 键列表
+
+| 方法 | 签名 | 说明 |
+|--------|-----------|-------------|
+| `cache.list()` | `list(prefix, limit=100) → list[str]` | 列出匹配前缀的键 |
+| `cache.alist()` | `alist(prefix, limit=100) → list[str]` | 异步版本 |
+
+### TTL 查看
+
+| 方法 | 签名 | 说明 |
+|--------|-----------|-------------|
+| `cache.get_with_ttl()` | `get_with_ttl(key, type_=None, coder=None) → tuple[Any, int \| None]` | 获取值及剩余 TTL |
+| `cache.aget_with_ttl()` | `aget_with_ttl(key, type_=None, coder=None) → tuple[Any, int \| None]` | 异步版本 |
+
+## TTL 与过期
+
+缓存条目的存活时间（TTL）可以通过两种方式设置：
+
+### 相对过期（`ex`）
+
+设置从当前时刻开始的过期秒数：
+
+```python
+# Expires in 5 minutes
+cache.set("session:abc", data, ex=300)
+```
+
+### 绝对过期（`ea`）
+
+将过期时间设置为 Unix 时间戳：
+
+```python
+import time
+
+# Expires at a specific time
+cache.set("session:abc", data, ea=time.time() + 3600)
+```
+
+<Callout type="warning">
+`ex` 与 `ea` 互斥。如果两者都是 `None`，则条目永不过期。
+</Callout>
+
+## Coder
+
+默认情况下，值使用 `orjson` 进行序列化。你可以通过 `coder` 参数自定义序列化方式，或使用 `type_` 自动解码为特定类型。
+
+### 使用 `type_` 自动解码
+
+```python
+from pydantic import BaseModel
+
+class User(BaseModel):
+    name: str
+    email: str
+
+# Store as usual
+cache.set("user:123", {"name": "Alice", "email": "alice@example.com"})
+
+# Retrieve and auto-decode to User
+user = cache.get("user:123", type_=User)
+print(type(user))  # <class 'User'>
+```
+
+### 自定义 Coder
+
+```python
+from bedrock.contrib.cache import CacheCoder
+
+class MsgPackCoder(CacheCoder[dict]):
+    @staticmethod
+    def encode(value: dict) -> bytes:
+        import msgpack
+        return msgpack.packb(value)
+
+    @staticmethod
+    def decode(data: bytes) -> dict:
+        import msgpack
+        return msgpack.unpackb(data)
+
+# Use the custom coder
+cache.set("data:key", {"foo": "bar"}, coder=MsgPackCoder)
+result = cache.get("data:key", coder=MsgPackCoder)
+```
+
+<Callout type="warning">
+请在 `type_` 和 `coder` 中二选一，不要同时传入。若同时传入，会抛出 `ValueError`。
+</Callout>
+
+## 命名空间
+
+命名空间会将相关缓存键归组到同一个前缀下，并提供作用域限定在该命名空间内的 `clear()` 和 `list()` 操作。
+
+```python
+from bedrock.contrib.cache import cache
+
+# Create a namespace
+users = cache.namespace("users")
+
+# Build keys within the namespace
+key = users.build_key("user", "123")  # "users:user:123"
+
+# List all keys in the namespace
+all_user_keys = users.list(limit=50)
+
+# Clear all keys in the namespace
+count = users.clear()
+```
+
+### Namespace API
+
+| 方法 | 签名 | 说明 |
+|--------|-----------|-------------|
+| `namespace.build_key()` | `build_key(*segments) → str` | 构建完整限定键 |
+| `namespace.clear()` | `clear() → int` | 删除命名空间中的所有键 |
+| `namespace.aclear()` | `aclear() → int` | 异步版本 |
+| `namespace.list()` | `list(limit=100) → list[str]` | 列出命名空间中的键 |
+| `namespace.alist()` | `alist(limit=100) → list[str]` | 异步版本 |
+| `namespace.slot()` | `slot(template, ...) → CacheSlot` | 创建类型化键槽 |
+
+## Slot
+
+Slot 是带有稳定命名空间和默认 TTL 策略的类型化键模板。它提供类型安全的 `get()` / `set()` / `delete()` / `exists()` 操作。
+
+```python
+from bedrock.contrib.cache import cache
+from pydantic import BaseModel
+
+class User(BaseModel):
+    name: str
+    email: str
+
+# Create a typed slot
+users_ns = cache.namespace("users")
+user_slot = users_ns.slot("user:{user_id}", value_type=User, ttl=300)
+
+# Use the slot
+user_slot.set(User(name="Alice", email="alice@example.com"), user_id="123")
+user = user_slot.get(user_id="123")  # Returns User instance
+user_slot.delete(user_id="123")
+exists = user_slot.exists(user_id="123")  # False
+```
+
+### Slot API
+
+| 方法 | 签名 | 说明 |
+|--------|-----------|-------------|
+| `slot.get()` | `get(default=None, **params) → T` | 读取缓存值 |
+| `slot.aget()` | `aget(default=None, **params) → T` | 异步版本 |
+| `slot.set()` | `set(value, ex=None, ea=None, **params) → None` | 写入一个值 |
+| `slot.aset()` | `aset(value, ex=None, ea=None, **params) → None` | 异步版本 |
+| `slot.delete()` | `delete(**params) → bool` | 删除缓存值 |
+| `slot.adelete()` | `adelete(**params) → bool` | 异步版本 |
+| `slot.exists()` | `exists(**params) → bool` | 检查值是否存在 |
+| `slot.aexists()` | `aexists(**params) → bool` | 异步版本 |
+| `slot.get_with_ttl()` | `get_with_ttl(**params) → tuple[T, int \| None]` | 获取值及 TTL |
+| `slot.build_key()` | `build_key(**params) → str` | 渲染完整限定键 |
+
+<Callout type="info">
+Slot 模板使用 Python 字符串格式语法。参数会被自动提取，在调用 `get()`、`set()` 等方法时必须提供。
+</Callout>
+
+## 分布式锁
+
+缓存系统提供基于当前已配置后端的分布式锁。锁同时支持同步和异步上下文管理器，也支持手动获取/释放。
+
+### 上下文管理器（推荐）
+
+```python
+from bedrock.contrib.cache import cache
+
+# Sync context manager
+with cache.lock("jobs:sync", expire=30, blocking_timeout=5):
+    run_job()  # Lock is held here
+
+# Async context manager
+async with cache.lock("jobs:async", expire=30, blocking_timeout=5):
+    await run_job()  # Lock is held here
+```
+
+### 手动获取/释放
+
+```python
+from bedrock.contrib.cache import cache
+
+lock = cache.lock("jobs:manual", expire=30, blocking=False)
+
+if lock.acquire():
+    try:
+        run_job()
+    finally:
+        lock.release()
+```
+
+### 锁参数
+
+| 参数 | 默认值 | 说明 |
+|-----------|---------|-------------|
+| `name` | 必填 | 逻辑锁名称 |
+| `expire` | `30` | 锁 TTL（秒） |
+| `blocking` | `True` | 是否等待获取锁 |
+| `blocking_timeout` | `None` | 最长等待秒数（None = 一直等待） |
+| `sleep` | `0.1` | 两次获取尝试之间的延迟 |
+| `prefix` | `"lock"` | 锁键的命名空间前缀 |
+
+### 锁 API
+
+| 方法 | 签名 | 说明 |
+|--------|-----------|-------------|
+| `lock.acquire()` | `acquire(blocking=None, blocking_timeout=None, sleep=None) → bool` | 获取锁 |
+| `lock.aacquire()` | `aacquire(blocking=None, blocking_timeout=None, sleep=None) → bool` | 异步版本 |
+| `lock.release()` | `release() → None` | 释放锁 |
+| `lock.arelease()` | `arelease() → None` | 异步版本 |
+| `lock.locked()` | `locked() → bool` | 检查锁是否被持有 |
+| `lock.alocked()` | `alocked() → bool` | 异步版本 |
+
+## 后端
+
+### InMemoryBackend（默认）
+
+线程安全的进程内缓存。无外部依赖。
+
+```python
+cache.configure("memory")
+```
+
+| 设置 | 默认值 | 说明 |
+|---------|---------|-------------|
+| `MAX_SIZE` | `1024` | 最大条目数 |
+
+### RedisBackend
+
+基于 Redis 的分布式缓存。需要 `uv add bedrock[cache-redis]`。
+
+```python
+cache.configure("redis")
+```
+
+| 设置 | 默认值 | 说明 |
+|---------|---------|-------------|
+| `REDIS_URL` | `"redis://localhost:6379"` | Redis 连接 URL |
+| `REDIS_PREFIX` | `"bedrock"` | 键前缀 |
+| `REDIS_MAX_CONNECTIONS` | `10` | 连接池大小 |
+
+## 异常层级
+
+所有缓存异常都继承自 `CacheError`：
+
+```
+CacheError
+├── CacheConnectionError      — Backend connection failure
+├── CacheSerializationError   — Serialization/deserialization failure
+├── BackendNotConfiguredError — Backend not available
+└── CacheLockError
+    ├── CacheLockAcquisitionError — Lock acquisition failure
+    └── CacheLockOwnershipError   — Lock ownership violation
+```
+
+```python
+from bedrock.contrib.cache import (
+    CacheError,
+    CacheConnectionError,
+    CacheSerializationError,
+    BackendNotConfiguredError,
+    CacheLockError,
+    CacheLockAcquisitionError,
+    CacheLockOwnershipError,
+)
+```
+
+## 反模式
+
+**不要多次调用 `configure()`。** 后端只会初始化一次。再次调用 `configure()` 会在不清理旧后端的情况下替换之前的后端。
+
+**不要将内存后端用于分布式锁。** `InMemoryBackend` 只在单个进程内有效。锁只能协调同一进程内的操作。跨进程协调请使用 `RedisBackend`。
+
+**不要忘记为临时数据设置 TTL。** 如果没有 `ex` 或 `ea`，条目会一直保留，直到被显式删除或进程重启。对于 session 数据、token 和临时状态，始终应设置 TTL。
+
+**不要使用 `bedrock.cache` 作为导入路径。** 标准导入方式是 `from bedrock.contrib.cache import cache`。`bedrock` 包顶层并没有重新导出它。
+
+**不要混用 `type_` 与 `coder` 参数。** 在 `get()` 或 `set()` 中同时传入两者会抛出 `ValueError`。每次调用只选择一种序列化策略。
+
+**不要硬编码缓存键。** 使用命名空间和 slot 来组织键。直接拼接原始字符串容易导致键冲突，也会让缓存失效处理变得困难。
+
+## 另请参阅
+
+- [数据库](./database) — SQLAlchemy 2.0 数据库层
+- [信号](./signals) — 带生命周期信号的事件系统
+- [CLI 参考](./cli) — 与缓存相关的 CLI 命令

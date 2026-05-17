@@ -1,0 +1,115 @@
+---
+title: 安装
+description: 使用你偏好的包管理器安装 Bedrock
+---
+
+Bedrock 支持多种 Python 包管理器。选择最适合你工作流的那一种。
+
+## 前置要求
+
+在安装 Bedrock 之前，请确保你的环境满足以下要求：
+
+- **Python 3.12 或更高版本** —— Bedrock 使用现代 Python 特性，因此要求 `>=3.12`
+- **包管理器** —— [uv](https://github.com/astral-sh/uv)（推荐）、pip 或 poetry
+
+<Callout type="info">
+我们推荐使用 uv，因为它速度快且内置虚拟环境管理。可通过 `curl -LsSf https://astral.sh/uv/install.sh | sh` 安装。
+</Callout>
+
+## 安装 Bedrock
+
+<Tabs items={['uv', 'pip', 'poetry']}>
+  <Tab value="uv"><CodeBlock code={'uv add bedrock'} lang={'bash'} /></Tab>
+  <Tab value="pip"><CodeBlock code={'pip install bedrock'} lang={'bash'} /></Tab>
+  <Tab value="poetry"><CodeBlock code={'poetry add bedrock'} lang={'bash'} /></Tab>
+
+</Tabs>
+
+## 可选扩展
+
+Bedrock 提供了可选依赖组，以支持更多后端：
+
+<Tabs items={['Redis Cache', 'Memcached Cache']}>
+  <Tab value="Redis Cache"><CodeBlock code={'uv add bedrock[cache-redis]'} lang={'bash'} /></Tab>
+
+
+</Tabs>
+
+| 扩展 | 包 | 说明 |
+|-------|----------|-------------|
+| `cache-redis` | `redis>=4.2.0` | 基于 Redis 的分布式缓存 |
+
+## 项目初始化
+
+使用标准目录结构创建一个新的 Bedrock 项目：
+
+```bash
+mkdir my-project && cd my-project
+uv init
+uv add bedrock
+```
+
+然后搭建模块目录结构：
+
+```
+my-project/
+├── pyproject.toml
+├── modules/
+│   └── my_module/
+│       ├── __init__.py
+│       ├── manifest.yaml
+│       ├── entities.py
+│       ├── service.py
+│       ├── exc.py
+│       └── bootstrap.py
+└── main.py
+```
+
+在 `modules/my_module/manifest.yaml` 创建一个最小可用的模块清单：
+
+```yaml
+title: my_module
+description: My first Bedrock module
+version: 0.1.0
+depends_on: []
+```
+
+再编写一个基础的 `main.py` 来启动运行时：
+
+```python
+import bedrock
+
+bedrock.setup()
+
+apps = bedrock.apps
+print(f"Registry ready with {len(apps.modules)} module(s) loaded")
+```
+
+## 验证安装
+
+安装完成后，验证 Bedrock 是否正常工作：
+
+```bash
+bedrock -v
+```
+
+查看可用的 CLI 命令：
+
+```bash
+bedrock --help
+```
+
+使用 `app` 命令检查某个模块：
+
+```bash
+bedrock app info <module_name>
+```
+
+再做一个简单的 Python 验证：
+
+```python
+import bedrock
+
+bedrock -v
+# Output: Hello from bedrock!
+```

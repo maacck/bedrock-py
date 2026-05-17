@@ -1,0 +1,354 @@
+---
+title: Tutorial
+description: Build your first Bedrock module from scratch
+---
+
+This tutorial walks you through creating a complete Bedrock module — from an empty directory to a working CLI command. By the end, you'll have a fully functional `inventory` module with Pydantic entities, SQLAlchemy models, a service layer, lifecycle hooks, and a custom command.
+
+## Prerequisites
+
+Before starting, make sure you have:
+
+- Python 3.11+ installed
+- `bedrock` installed (`uv add bedrock` or `pip install bedrock`)
+- A basic understanding of Python and Pydantic
+
+Verify your installation:
+
+```bash
+bedrock -v
+```
+
+## Step 1: Create the Module Directory
+
+Every Bedrock module lives in its own Python package. Create the directory structure:
+
+```bash
+mkdir -p inventory
+touch inventory/__init__.py
+```
+
+Add a docstring to `inventory/__init__.py`:
+
+```python
+"""Inventory — product inventory management module."""
+```
+
+## Step 2: Write the Manifest
+
+The `manifest.yaml` file declares the module's identity. It's the only required file beyond `__init__.py`.
+
+Create `inventory/manifest.yaml`:
+
+```yaml
+title: inventory
+description: Product inventory management
+version: 0.1.0
+commands: "commands:app"
+```
+
+| Field         | Purpose                                                       |
+| ------------- | ------------------------------------------------------------- |
+| `title`       | Human-friendly name used in logs and error messages           |
+| `description` | Short description of the module                               |
+| `version`     | Semantic version string                                       |
+| `commands`    | Relative import path to a Typer app (we'll create this later) |
+
+## Step 3: Define Entities
+
+Entities are Pydantic models for business data. They carry no persistence logic — just validation and structure.
+
+Create `inventory/entities.py`:
+
+```python
+"""Inventory entities."""
+
+from pydantic import Field
+
+from bedrock.entities import BedrockEntity
+
+
+class Product(BedrockEntity):
+    """A product in the inventory."""
+
+    name: str = Field(..., min_length=1, max_length=100)
+    sku: str = Field(..., pattern=r"^[A-Z0-9\-]+$")
+    quantity: int = Field(0, ge=0)
+    price_cents: int = Field(..., ge=0, description="Price in cents")
+
+
+class ProductSummary(BedrockEntity):
+    """Summary output for inventory listing."""
+
+    name: str
+    sku: str
+    quantity: int
+```
+
+## Step 4: Define Models
+
+Models are SQLAlchemy ORM classes that map to database tables. They extend `BedrockModel` and are auto-discovered by Alembic migrations.
+
+Create `inventory/models.py`:
+
+```python
+"""Inventory database models."""
+
+from sqlalchemy import Integer, String
+from sqlalchemy.orm import Mapped, mapped_column
+
+from bedrock.database import BedrockModel
+
+
+class ProductModel(BedrockModel):
+    """SQLAlchemy model for products table."""
+
+    __tablename__ = "products"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    sku: Mapped[str] = mapped_column(String(50), unique=True, nullable=False, index=True)
+    quantity: Mapped[int] = mapped_column(Integer, default=0)
+    price_cents: Mapped[int] = mapped_column(Integer, nullable=False)
+```
+
+<Callout type="info">
+`models.py` is optional — only needed when your module uses the database. Bedrock's migration system auto-discovers `BedrockModel` subclasses from this file.
+</Callout>
+
+## Step 5: Write the Service
+
+The service layer contains business logic. Services interact with **models** (database) and **entities** (validation) — never with HTTP objects or lifecycle hooks directly.
+
+Create `inventory/service.py`:
+
+```python
+"""Inventory business logic."""
+
+from .entities import Product, ProductSummary
+from .models import ProductModel
+
+
+class InventoryService:
+    """Manages product inventory operations."""
+
+    def __init__(self) -> None:
+        self._products: dict[str, Product] = {}
+
+    def add_product(self, product: Product) -> Product:
+        """Add a product. Raises ValueError if SKU already exists."""
+        if product.sku in self._products:
+            raise ValueError(f"Product with SKU '{product.sku}' already exists")
+        self._products[product.sku] = product
+        return product
+
+    def get_product(self, sku: str) -> Product | None:
+        """Retrieve a product by SKU."""
+        return self._products.get(sku)
+
+    def list_products(self) -> list[ProductSummary]:
+        """List all products as summaries."""
+        return [
+            ProductSummary(name=p.name, sku=p.sku, quantity=p.quantity)
+            for p in self._products.values()
+        ]
+
+    def adjust_quantity(self, sku: str, delta: int) -> Product:
+        """Adjust a product's quantity. Raises ValueError on not found or negative stock."""
+        product = self._products.get(sku)
+        if product is None:
+            raise ValueError(f"Product with SKU '{sku}' not found")
+        new_qty = product.quantity + delta
+        if new_qty < 0:
+            raise ValueError(f"Insufficient stock for SKU '{sku}'")
+        updated = product.model_copy(update={"quantity": new_qty})
+        self._products[sku] = updated
+        return updated
+
+
+# Module-level singleton
+inventory_service = InventoryService()
+```
+
+Key points:
+- The service imports from `entities` and `models` — these are its data dependencies.
+- The singleton instance is created **here** in `service.py`, not in `bootstrap.py`.
+- Other modules import the singleton directly: `from .service import inventory_service`.
+
+## Step 6: Add Bootstrap Hooks
+
+Bootstrap hooks run code at specific lifecycle stages. The registry calls them automatically. Hooks should only **configure** or **cleanup** — not define business logic.
+
+Hooks declare keyword parameters by name. The registry inspects each hook's signature and injects `registry`, `app`, `container`, and `hooks` automatically. Only declare what you need.
+
+Create `inventory/bootstrap.py`:
+
+```python
+"""Inventory lifecycle hooks."""
+
+from bedrock.module import AppConfig, ModuleRegistry
+
+
+def on_load(*, registry: ModuleRegistry, app: AppConfig) -> None:
+    """Called when the module is first loaded."""
+    print(f"[inventory] Module loaded (v{app.manifest.version})")
+
+
+def ready(*, registry: ModuleRegistry, app: AppConfig) -> None:
+    """Called after all modules have been loaded."""
+    print("[inventory] Module ready")
+
+
+def on_shutdown(*, registry: ModuleRegistry, app: AppConfig) -> None:
+    """Called during graceful shutdown."""
+    from .service import inventory_service
+
+    inventory_service._products.clear()
+    print("[inventory] Module shutting down")
+```
+
+Note the pattern: `bootstrap.py` uses **lazy imports** (inside the function body) when referencing the service. This avoids circular imports and ensures services are only imported when hooks actually fire.
+
+## Step 7: Register and Verify
+
+Verify the module loads correctly using the Bedrock CLI:
+
+```bash
+bedrock app inspect inventory
+```
+
+Expected output:
+
+```
+✓ Manifest for 'inventory' is valid.
+✓ Module 'inventory' loads successfully.
+✓ Bootstrap submodule is available.
+✓ Models submodule is available.
+```
+
+Check module details:
+
+```bash
+bedrock app info inventory
+```
+
+```
+Title        inventory
+Description  Product inventory management
+Version      0.1.0
+Import Path  inventory
+Dependencies None
+Bootstrap    Yes
+Models       Yes
+Commands     commands:app
+```
+
+## Step 8: Add a CLI Command
+
+Create `inventory/commands.py` with a Typer app. Commands import the service singleton from `service.py`:
+
+```python
+"""Inventory CLI commands."""
+
+import typer
+
+from .entities import Product
+from .service import inventory_service
+
+app = typer.Typer(help="Inventory management commands")
+
+
+@app.command()
+def add(
+    name: str = typer.Argument(..., help="Product name"),
+    sku: str = typer.Argument(..., help="Product SKU (e.g., WIDGET-001)"),
+    price: int = typer.Argument(..., help="Price in cents"),
+    quantity: int = typer.Option(0, "--qty", "-q", help="Initial quantity"),
+) -> None:
+    """Add a new product to the inventory."""
+    product = Product(name=name, sku=sku, price_cents=price, quantity=quantity)
+    inventory_service.add_product(product)
+    typer.echo(f"Added '{name}' (SKU: {sku}, qty: {quantity})")
+
+
+@app.command(name="list")
+def list_products() -> None:
+    """List all products in the inventory."""
+    products = inventory_service.list_products()
+    if not products:
+        typer.echo("No products in inventory.")
+        return
+    for p in products:
+        typer.echo(f"  {p.sku:15s} {p.name:30s} qty={p.quantity}")
+
+
+@app.command()
+def adjust(
+    sku: str = typer.Argument(..., help="Product SKU"),
+    delta: int = typer.Argument(..., help="Quantity change (positive or negative)"),
+) -> None:
+    """Adjust a product's quantity."""
+    product = inventory_service.adjust_quantity(sku, delta)
+    typer.echo(f"{sku} quantity now: {product.quantity}")
+```
+
+## Step 9: Run the Command
+
+Use `bedrock run` to execute your module's commands:
+
+```bash
+# Add a product
+bedrock run --app inventory add "Widget" WIDGET-001 1999 --qty 50
+
+# Add another product
+bedrock run --app inventory add "Gadget" GADGET-002 4999 --qty 25
+
+# List all products
+bedrock run --app inventory list
+
+# Adjust quantity
+bedrock run --app inventory adjust WIDGET-001 -10
+```
+
+Expected output:
+
+```
+Added 'Widget' (SKU: WIDGET-001, qty: 50)
+Added 'Gadget' (SKU: GADGET-002, qty: 25)
+  WIDGET-001      Widget                         qty=50
+  GADGET-002      Gadget                         qty=25
+WIDGET-001 quantity now: 40
+```
+
+## Final Module Structure
+
+```
+inventory/
+├── __init__.py        # Package docstring
+├── manifest.yaml      # Module identity and metadata
+├── entities.py        # Pydantic models (Product, ProductSummary)
+├── models.py          # SQLAlchemy models (ProductModel)
+├── service.py         # Business logic + singleton instance
+├── bootstrap.py       # Lifecycle hooks (on_load, ready, on_shutdown)
+└── commands.py        # CLI commands (add, list, adjust)
+```
+
+### Layer Dependencies
+
+```
+commands.py  →  service.py  →  entities.py
+                    ↓
+                models.py   →  bedrock.database.BedrockModel
+
+bootstrap.py  →  service.py (lazy import, configure/cleanup only)
+```
+
+## Next Steps
+
+Now that you've built your first module, explore these topics:
+
+- **[Module Anatomy](/docs/guides/module-anatomy)** — Deep dive into every module file and its purpose
+- **[Cache Guide](/docs/guides/cache)** — Add caching to your module with Bedrock's cache system
+- **[Signals Guide](/docs/guides/signals)** — Emit and listen for events across modules
+- **[CLI Reference](/docs/guides/cli)** — Full reference for all Bedrock CLI commands
+- **[Database Guide](/docs/guides/database)** — Add persistent storage with SQLAlchemy and Alembic

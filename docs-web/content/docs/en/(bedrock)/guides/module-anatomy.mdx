@@ -1,0 +1,426 @@
+---
+title: Module Anatomy
+description: Standard Bedrock module structure
+---
+
+## Standard Module Structure
+
+Phase 1 is built around an application-level `modules/` directory.
+A module is loadable when it contains a `manifest.yaml` file.
+
+```files
+bedrock_app/
+├── playbook/
+│   └──PLAYBOOK.md
+├── __init__.py
+├── manifest.yaml
+├── models.py
+├── entities.py
+├── schemas.py
+├── service.py
+├── exc.py
+└── bootstrap.py
+```
+
+## File Descriptions
+
+| File | Required | Description |
+|------|----------|-------------|
+| `__init__.py` | Yes | Standard Python Module File |
+| `manifest.yaml` | Yes | Module declaration and metadata |
+| `models.py` | No | Data models and persistence |
+| `entities.py` | No | Business entities for internal data flow |
+| `schemas.py` | No | API input/output schemas (request/response DTOs) |
+| `service.py` | No | Business logic layer |
+| `exc.py` | No | Module-specific exceptions |
+| `bootstrap.py` | No | Lifecycle hooks |
+| `commands.py` | No | Module Typer app |
+
+
+## Module Manifest
+
+Bedrock is standardizing on `manifest.yaml`.
+
+```yaml
+title: My Bedrock App
+description: An app building on Bedrock
+version: 0.1.0
+depends_on:
+  - users
+commands: "commands:app"
+```
+
+### Key Fields
+
+- `title`: (required) Human-friendly display name used in logging and error messages
+- `description`: (optional) Short description of the module
+- `version`: (optional, default `"unknown"`) Module version string
+- `depends_on`: (optional, default `[]`) Ordered list of import paths this module depends on
+- `commands`: (optional) Relative import path to a Typer app, e.g. `"commands:app"`
+
+## File Descriptions with Examples
+
+### `manifest.yaml`
+
+The manifest declares the module's identity, version, dependencies, and optional CLI entry point. This is the only **required** file beyond `__init__.py`.
+
+```yaml
+title: inventory
+description: Product inventory management
+version: 0.1.0
+depends_on:
+  - products
+  - warehouse
+commands: "commands:app"
+```
+
+### `entities.py`
+
+Pydantic models for business domain entities. These represent data that flows within the service layer — not tied to any specific API contract. Entities can also be used as output when a dedicated response schema is not needed.
+
+```python
+from pydantic import BaseModel
+
+
+class Product(BaseModel):
+    """Business entity representing a product."""
+
+    id: int
+    name: str
+    sku: str
+    price: int
+```
+
+### `schemas.py`
+
+Pydantic models for API input/output contracts. Use schemas when you need dedicated request validation or response serialization that differs from your business entities. This file is optional — simple modules can use entities directly.
+
+```python
+from pydantic import BaseModel, Field
+
+
+class ProductCreateRequest(BaseModel):
+    """Input schema for creating a product."""
+
+    name: str = Field(..., min_length=1, max_length=100)
+    sku: str = Field(..., pattern=r"^[A-Z0-9\-]+$")
+    price: int = Field(..., ge=0, description="Price in cents")
+
+
+class ProductResponse(BaseModel):
+    """Output schema for product queries."""
+
+    id: int
+    name: str
+    sku: str
+    price: int
+```
+
+### `service.py`
+
+Business logic layer. Services receive data as Pydantic entities or primitives — never HTTP request objects or ORM instances directly.
+
+```python
+from bedrock.database import db
+
+from .entities import ProductCreate, ProductResponse
+from .models import Product
+
+
+class InventoryService:
+    """Inventory business operations."""
+
+    def create_product(self, data: ProductCreate) -> ProductResponse:
+        """Create a new product in the inventory."""
+        product = Product(name=data.name, sku=data.sku, price=data.price)
+        db.session.add(product)
+        db.session.commit()
+        return ProductResponse(
+            id=product.id, name=product.name, sku=product.sku, price=product.price
+        )
+
+    def get_product(self, product_id: int) -> ProductResponse | None:
+        """Retrieve a product by ID."""
+        product = db.session.query(Product).get(product_id)
+        if product is None:
+            return None
+        return ProductResponse(
+            id=product.id, name=product.name, sku=product.sku, price=product.price
+        )
+```
+
+### `exc.py`
+
+Module-specific exceptions. All exceptions extend `BedrockExc` and declare a `detail` class attribute for consistent error reporting.
+
+```python
+from bedrock.exc import BedrockExc
+
+
+class ProductNotFoundError(BedrockExc):
+    """Raised when a requested product does not exist."""
+
+    detail = "Product not found"
+
+
+class DuplicateSkuError(BedrockExc):
+    """Raised when a product SKU already exists."""
+
+    detail = "A product with this SKU already exists"
+```
+
+### `bootstrap.py`
+
+Lifecycle hooks called by the registry at specific stages. Hooks use keyword-only signatures — the registry inspects each hook's parameters and injects them by name automatically.
+
+```python
+from bedrock.module.registry import ModuleRegistry
+from bedrock.module.entities import AppConfig
+
+
+def on_load(*, registry: ModuleRegistry, app: AppConfig, container, hooks) -> None:
+    """Called when this module is first loaded.
+
+    Parameters are injected by name:
+    - registry: the ModuleRegistry instance
+    - app: this module's AppConfig
+    - container: the global DI container (bedrock.di.container)
+    - hooks: the global HookRegistry (bedrock.hooks.hooks)
+    """
+    print(f"Module '{app.name}' loaded (v{app.manifest.version})")
+
+
+def ready(*, registry: ModuleRegistry, app: AppConfig) -> None:
+    """Called after ALL modules have been loaded.
+
+    Use for cross-module setup that depends on other modules being available.
+    """
+    print(f"Module '{app.name}' ready")
+
+
+def on_shutdown(*, registry: ModuleRegistry, app: AppConfig) -> None:
+    """Called during graceful shutdown (reverse dependency order).
+
+    Use for cleanup: closing connections, flushing buffers, releasing resources.
+    """
+    print(f"Module '{app.name}' shutting down")
+```
+
+### `commands.py`
+
+Optional Typer app that provides module-specific CLI commands. Referenced in the manifest as `commands: "commands:app"`.
+
+```python
+import typer
+
+app = typer.Typer(help="Inventory management commands")
+
+
+@app.command()
+def sync(source: str = typer.Argument(..., help="External source to sync from")):
+    """Sync inventory from an external source."""
+    typer.echo(f"Syncing inventory from {source}...")
+
+
+@app.command()
+def audit():
+    """Run an inventory audit check."""
+    typer.echo("Running audit...")
+```
+
+## Manifest Field Reference
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `title` | `str` | Yes | — | Human-friendly display name for logging and errors |
+| `description` | `str \| None` | No | `None` | Short description of the module |
+| `version` | `str` | No | `"unknown"` | Module version string (semver recommended) |
+| `depends_on` | `list[str]` | No | `[]` | Ordered list of module import paths this module depends on |
+| `commands` | `str \| None` | No | `None` | Relative import path to a Typer app, e.g. `"commands:app"` |
+
+The manifest is validated by the `ModuleManifest` Pydantic model at load time. Invalid or missing required fields raise an `InvalidManifestError`.
+
+## Lifecycle Hooks
+
+Bedrock modules participate in a three-phase lifecycle managed by the `ModuleRegistry`. Hooks are optional functions defined in `bootstrap.py`.
+
+### Hook Signatures
+
+Hooks may declare keyword parameters by name. The registry inspects the signature and injects matching arguments automatically:
+
+```python
+def hook_name(*, registry, app, container, hooks) -> None: ...
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `registry` | `ModuleRegistry` | The registry managing all modules |
+| `app` | `AppConfig` | The current module's config (manifest, package info, state) |
+| `container` | `Container` | The global DI container (`bedrock.di.container`) |
+| `hooks` | `HookRegistry` | The global hook registry (`bedrock.hooks.hooks`) |
+
+For dedicated API details, see [Dependency Injection](/docs/guides/di) and
+[Hook System](/docs/guides/hooks).
+
+Only declare the parameters you need — the registry injects only what it finds in the signature.
+
+### Call Order
+
+```
+install("module_a")
+  ├── Install dependencies (recursive)
+  ├── on_load(*, registry, app)     ← per-module, in dependency order
+  └── Signal: module_loaded
+
+mark_ready()
+  ├── ready(*, registry, app)       ← per-module, in install order
+  ├── Signal: module_ready          ← per-module
+  └── Signal: registry_ready        ← once, after all modules
+
+shutdown()
+  ├── on_shutdown(*, registry, app) ← per-module, REVERSE install order
+  ├── Signal: module_shutdown       ← per-module
+  └── Signal: registry_shutdown     ← once, after all modules
+```
+
+### Hook Descriptions
+
+| Hook | Phase | Description |
+|------|-------|-------------|
+| `on_load` | Install | Module just loaded. Register signal receivers, validate config, set up module state. |
+| `ready` | Ready | All modules loaded. Safe to access other modules, run cross-module setup. |
+| `on_shutdown` | Shutdown | Graceful teardown. Close connections, flush buffers, release resources. |
+
+### Signals
+
+Each lifecycle transition emits a signal that external code can observe:
+
+| Signal | Emitted After | Payload |
+|--------|---------------|---------|
+| `module_loaded` | `on_load` hook | `registry`, `module`, `config` |
+| `module_ready` | `ready` hook | `registry`, `module`, `config` |
+| `module_shutdown` | `on_shutdown` hook | `registry`, `module`, `config` |
+| `registry_ready` | All modules ready | `registry`, `config` |
+| `registry_shutdown` | All modules shut down | `registry`, `config` |
+
+## Minimal Module Example
+
+A complete, copy-pasteable module with all required files. This example uses `entities.py` only — add `schemas.py` when you need dedicated API input/output contracts.
+
+```files
+my_module/
+├── __init__.py
+├── manifest.yaml
+├── entities.py
+├── service.py
+├── exc.py
+└── bootstrap.py
+```
+
+**`my_module/__init__.py`**
+
+```python
+"""My Module — a minimal Bedrock module."""
+```
+
+**`my_module/manifest.yaml`**
+
+```yaml
+title: My Module
+description: A minimal example module
+version: 0.1.0
+```
+
+**`my_module/entities.py`**
+
+```python
+from pydantic import BaseModel
+
+
+class Greeting(BaseModel):
+    """A simple greeting entity."""
+
+    message: str
+    recipient: str
+```
+
+**`my_module/service.py`**
+
+```python
+from .entities import Greeting
+
+
+class GreetingService:
+    """Service that produces greetings."""
+
+    def greet(self, name: str) -> Greeting:
+        """Create a greeting for the given name."""
+        return Greeting(message=f"Hello, {name}!", recipient=name)
+```
+
+**`my_module/exc.py`**
+
+```python
+from bedrock.exc import BedrockExc
+
+
+class GreetingError(BedrockExc):
+    """Raised when a greeting cannot be produced."""
+
+    detail = "Failed to produce greeting"
+```
+
+**`my_module/bootstrap.py`**
+
+```python
+from bedrock.module.registry import ModuleRegistry
+from bedrock.module.entities import AppConfig
+
+
+def on_load(*, registry: ModuleRegistry, app: AppConfig) -> None:
+    """Module loaded — initialize state."""
+    pass
+
+
+def ready(*, registry: ModuleRegistry, app: AppConfig) -> None:
+    """All modules ready — safe for cross-module work."""
+    pass
+
+
+def on_shutdown(*, registry: ModuleRegistry, app: AppConfig) -> None:
+    """Shutdown — clean up resources."""
+    pass
+```
+
+**Usage:**
+
+```python
+from bedrock.module.registry import apps
+
+# Install and ready the module
+apps.populate(["my_module"])
+
+# Access the module
+module = apps.get("my_module")
+print(module.manifest.title)  # "My Module"
+```
+
+## Loader Flow
+
+The runtime loader is planned around these phases:
+
+1. **discover** — scan the module root and collect manifests
+2. **validate** — check schema, duplicates, missing dependencies, and cycles
+3. **order** — compute a deterministic dependency-respecting load order
+4. **import** — import modules lazily through declared package paths
+5. **initialize** — run lightweight lifecycle hooks
+
+## Where Does My Code Belong?
+
+Use these rules to decide which file a piece of code belongs in:
+
+- If it touches `Request`, `Response`, or HTTP status codes → **API layer** (routes/controllers)
+- If it imports `sqlalchemy` → **Data layer** (`models.py`)
+- If it imports `pydantic` for input/output shapes → **Schemas** (`schemas.py`) or **Entities** (`entities.py`)
+- If it contains conditional logic, calculations, or orchestration → **Logic layer** (`service.py`)
+- If it runs once at startup → **Lifecycle hooks** (`bootstrap.py`)

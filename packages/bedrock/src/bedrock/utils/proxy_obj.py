@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TypeVar
 
 from bedrock.utils.lazyload import load_callable
@@ -20,10 +21,9 @@ class Proxy[T]:
     attribute hints propagate correctly.
     """
 
-    _factory: type[T] | callable[[], T]
-    _wrapped: T | None
+    _factory: type[T] | Callable[[], T]
 
-    def __init__(self, factory: type[T]) -> None:
+    def __init__(self, factory: type[T] | Callable[[], T]) -> None:
         self._factory = factory
         self._wrapped = None
 

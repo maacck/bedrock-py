@@ -1,0 +1,115 @@
+---
+title: Installation
+description: Install Bedrock using your preferred package manager
+---
+
+Bedrock supports multiple Python package managers. Choose the one that fits your workflow.
+
+## Prerequisites
+
+Before installing Bedrock, ensure your environment meets these requirements:
+
+- **Python 3.12 or higher** — Bedrock uses modern Python features and requires `>=3.12`
+- **A package manager** — [uv](https://github.com/astral-sh/uv) (recommended), pip, or poetry
+
+<Callout type="info">
+We recommend uv for its speed and built-in virtual environment management. Install it with `curl -LsSf https://astral.sh/uv/install.sh | sh`.
+</Callout>
+
+## Install Bedrock
+
+<Tabs items={['uv', 'pip', 'poetry']}>
+  <Tab value="uv"><CodeBlock code={'uv add bedrock'} lang={'bash'} /></Tab>
+  <Tab value="pip"><CodeBlock code={'pip install bedrock'} lang={'bash'} /></Tab>
+  <Tab value="poetry"><CodeBlock code={'poetry add bedrock'} lang={'bash'} /></Tab>
+
+</Tabs>
+
+## Optional Extras
+
+Bedrock provides optional dependency groups for additional backends:
+
+<Tabs items={['Redis Cache', 'Memcached Cache']}>
+  <Tab value="Redis Cache"><CodeBlock code={'uv add bedrock[cache-redis]'} lang={'bash'} /></Tab>
+
+
+</Tabs>
+
+| Extra | Packages | Description |
+|-------|----------|-------------|
+| `cache-redis` | `redis>=4.2.0` | Redis-backed distributed cache |
+
+## Project Initialization
+
+Create a new Bedrock project with the standard directory structure:
+
+```bash
+mkdir my-project && cd my-project
+uv init
+uv add bedrock
+```
+
+Set up the module directory layout:
+
+```
+my-project/
+├── pyproject.toml
+├── modules/
+│   └── my_module/
+│       ├── __init__.py
+│       ├── manifest.yaml
+│       ├── entities.py
+│       ├── service.py
+│       ├── exc.py
+│       └── bootstrap.py
+└── main.py
+```
+
+Create a minimal module manifest at `modules/my_module/manifest.yaml`:
+
+```yaml
+title: my_module
+description: My first Bedrock module
+version: 0.1.0
+depends_on: []
+```
+
+And a basic `main.py` to bootstrap the runtime:
+
+```python
+import bedrock
+
+bedrock.setup()
+
+apps = bedrock.apps
+print(f"Registry ready with {len(apps.modules)} module(s) loaded")
+```
+
+## Verify Installation
+
+After installing, verify that Bedrock is working correctly:
+
+```bash
+bedrock -v
+```
+
+Check available CLI commands:
+
+```bash
+bedrock --help
+```
+
+Inspect a module with the `app` command:
+
+```bash
+bedrock app info <module_name>
+```
+
+Run a quick Python verification:
+
+```python
+import bedrock
+
+bedrock -v
+# Output: Hello from bedrock!
+```

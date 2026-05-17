@@ -1,0 +1,8 @@
+{
+  "pages": ["index", "getting-started", "guides"],
+  "title": "Bedrock",
+  "description": "Main Package",
+  "root": true,
+  "icon": "Mountain",
+  "color": "blue"
+}

@@ -67,7 +67,7 @@ class CacheService:
         """Configure the cache service with a specific backend.
 
         Args:
-            backend_name: Backend identifier (``"memory"``, ``"redis"``, ``"memcached"``).
+            backend_name: Backend identifier (``"memory"``, ``"redis"``).
             settings: Optional settings instance. If ``None``, default settings are used.
 
         Returns:

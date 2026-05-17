@@ -18,11 +18,15 @@ Bedrock is a modular Python framework for building applications with manifest-dr
 |---------|-----------|--------|
 | Module Registry | `apps` | `from bedrock.module import apps` |
 | Database | `db` | `from bedrock.database import db` |
+| DI Container | `container` | `from bedrock.di import container` |
+| Hook Registry | `hooks` | `from bedrock.hooks import hooks` |
 | Settings | `settings` | `from bedrock.settings import settings` |
 
 ## When to Read References
 
 - **Creating or modifying a module** → Read `references/module-guide.md`
+- **Using dependency injection** → Read `references/di-guide.md`
+- **Using the hook system** → Read `references/hooks-guide.md`
 - **Using database features** → Read `references/database-guide.md`
 - **Using CLI commands** → Read `references/cli-guide.md`
 - **Using signals / events** → Read `references/signals-guide.md`
@@ -54,17 +58,17 @@ bedrock.setup("myproject.modules.users")
 Settings (`settings.py`):
 
 ```python
-from bedrock.conf import LazySettings
-from pydantic_settings import SettingsConfigDict
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from bedrock.conf import SettingsProxy
 
 
-class AppSettings(LazySettings):
+class AppSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="MYAPP_")
     DEBUG: bool = False
     DATABASE_URL: str = "sqlite:///app.db"
 
 
-app_settings = AppSettings()
+app_settings: AppSettings = SettingsProxy(AppSettings)  # type: ignore[assignment]
 ```
 
 First module (`modules/users/manifest.yaml`):
@@ -173,25 +177,25 @@ Every exception MUST set a `detail` class attribute with a default message. Cons
 
 ### 7. Bootstrap Hooks
 
-Lifecycle hooks execute at specific points during module loading:
+Lifecycle hooks execute at specific points during module loading. Bedrock always calls hooks with keyword arguments — use keyword-only signatures:
 
 ```python
 # bootstrap.py
 from bedrock.module import ModuleRegistry, AppConfig
 
 
-def on_load(registry: ModuleRegistry, app: AppConfig) -> None:
+def on_load(*, registry: ModuleRegistry, app: AppConfig) -> None:
     """Called during install(), after module is added."""
     pass
 
 
-def ready(registry: ModuleRegistry, app: AppConfig) -> None:
+def ready(*, registry: ModuleRegistry, app: AppConfig) -> None:
     """Called after ALL modules are installed."""
     from .service import user_service
     user_service.initialize()
 
 
-def on_shutdown(registry: ModuleRegistry, app: AppConfig) -> None:
+def on_shutdown(*, registry: ModuleRegistry, app: AppConfig) -> None:
     """Called during shutdown, in REVERSE install order."""
     pass
 ```
@@ -202,7 +206,7 @@ def on_shutdown(registry: ModuleRegistry, app: AppConfig) -> None:
 | `ready` | After ALL modules are installed | Configure services, initialization      |
 | `on_shutdown` | During `shutdown()`, in REVERSE order | Cleanup, close connections              |
 
-Hook signature is always `(registry: ModuleRegistry, app: AppConfig) -> None`.
+Hooks use keyword-only signatures. The registry inspects each hook's parameters and injects only what it declares: `registry` (ModuleRegistry), `app` (AppConfig), `container` (DI container), `hooks` (HookRegistry).
 
 ### 8. Database Models
 
@@ -261,24 +265,24 @@ result = search_filter_sort_paginate(
 
 ### 10. Settings
 
-Create module-level settings by extending `LazySettings` for app-level configuration:
+Create module-level settings using `BaseSettings`. Wrap with `SettingsProxy` when you need deferred initialization (module-level singletons where env vars may not be ready at import time):
 
 ```python
-from bedrock.conf import LazySettings
-from pydantic_settings import SettingsConfigDict
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from bedrock.conf import SettingsProxy
 
 
-class MyModuleSettings(LazySettings):
+class MyModuleSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="MYMODULE_")
     API_KEY: str = ""
     DEBUG: bool = False
     MAX_RETRIES: int = 3
 
 
-my_settings = MyModuleSettings()  # Instantiate — env vars read on first access
+my_settings: MyModuleSettings = SettingsProxy(MyModuleSettings)  # type: ignore[assignment]
 ```
 
-**For database/backend settings**, use `BaseSettings` directly:
+When environment variables are guaranteed to be ready at construction time (e.g. inside a `ready()` hook), use `BaseSettings` directly:
 
 ```python
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -291,13 +295,13 @@ class DbSettings(BaseSettings):
 ```
 
 **Rules**:
-- Use `LazySettings` for app-level settings (lazy initialization)
-- Use `BaseSettings` for database/backend settings (eager initialization)
+- Use `SettingsProxy` for module-level singletons that may be imported before env vars are ready
+- Use `BaseSettings` directly when env vars are guaranteed ready at construction time
 - Always use `env_prefix` in `model_config` to namespace environment variables
 
 ### 11. Signal System
 
-Bedrock provides lifecycle signals for cross-module communication:
+Bedrock provides lifecycle signals for cross-module notification (fire-and-forget):
 
 ```python
 from bedrock.signal import Signal
@@ -316,12 +320,14 @@ def on_user_created(sender, user):
 
 user_created.connect(on_user_created)
 
-# Send signal (sync)
+# Send signal (sync) — in pure sync context, adapts async receivers
 user_created.send(sender, user=new_user)
 
-# Send signal (async)
+# Send signal (async) — canonical for mixed sync/async receivers
 await user_created.asend(sender, user=new_user)
 ```
+
+> **Sync/async contract:** `send()` is sync-facing. In a pure sync context it can adapt async receivers. Inside a running event loop, it raises `RuntimeError` if an async receiver is reached. Use `await asend()` for async or mixed contexts. See `references/signals-guide.md` for details.
 
 **Built-in lifecycle signals**:
 
@@ -342,6 +348,30 @@ from bedrock.module.signals import (
 | `module_loaded` | React to a specific module being loaded |
 | `registry_ready` | Run setup that needs ALL modules available |
 | `module_shutdown` | Coordinate cleanup across modules |
+
+### 12. Hook System (Call/Response)
+
+For structured, multi-implementation extension points that return values, use the hook system instead of signals:
+
+```python
+from bedrock.hooks import HookNamespace
+
+auth = HookNamespace("auth")
+
+@auth.spec(firstresult=True)
+def authenticate(request):
+    """Hook spec: first non-None result wins."""
+
+@auth.impl(priority=10)
+def default_auth(request):
+    return verify_token(request.token)
+
+# Dispatch
+request = {"token": "..."}
+results = auth.call("authenticate", request=request)
+```
+
+**Signals vs Hooks**: Signals are notification-only (no return value). Hooks are call/response (implementations return values, ordered by priority, with optional `firstresult` short-circuit).
 
 ## Anti-Patterns (Avoid These)
 

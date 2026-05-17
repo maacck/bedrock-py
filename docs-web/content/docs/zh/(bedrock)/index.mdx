@@ -1,0 +1,67 @@
+---
+title: Bedrock 文档
+description: 面向团队的模块化 Python 应用框架
+---
+
+# Bedrock
+
+一个面向团队的模块化 Python 应用框架，适合希望获得可预测架构、强约定开发规范，以及同时良好支持人类与 AI 编码助手工具链的团队。
+
+## 快速开始
+
+<Cards>
+  <Card title="概览" href="/docs/getting-started/overview" />
+  <Card title="安装" href="/docs/getting-started/installation" />
+  <Card title="教程" href="/docs/getting-started/tutorial" />
+  <Card title="模块解剖" href="/docs/guides/module-anatomy" />
+  <Card title="依赖注入" href="/docs/guides/di" />
+  <Card title="Hook 系统" href="/docs/guides/hooks" />
+</Cards>
+
+## 指南
+
+<Card title="模块解剖" href="/docs/guides/module-anatomy" />
+
+<Cards>
+  <Card title="依赖注入" href="/docs/guides/di" />
+  <Card title="Hook 系统" href="/docs/guides/hooks" />
+  <Card title="数据库" href="/docs/guides/database" />
+  <Card title="缓存" href="/docs/guides/cache" />
+  <Card title="信号" href="/docs/guides/signals" />
+  <Card title="CLI 参考" href="/docs/guides/cli" />
+  <Card title="实践手册" href="/docs/guides/playbooks" />
+</Cards>
+
+## 社区
+
+<Cards>
+  <Card title="参与贡献" href="/docs/getting-started/contributing" />
+  <Card title="设计理念" href="/docs/getting-started/philosophy" />
+  <Card title="Agent Skills" href="/docs/getting-started/agent-skills" />
+</Cards>
+
+## 特性
+
+- **框架无关** — 可与 FastAPI、Flask、Django、CLI 工具等配合使用
+- **基于清单的模块** — 显式依赖关系与生命周期管理
+- **依赖注入** — 支持 singleton、transient 和 scoped 服务生命周期
+- **Hook 系统** — 带优先级排序的结构化调用/响应扩展点
+- **数据库层** — SQLAlchemy 2.0 与 Alembic migrations
+- **缓存系统** — 提供内存与 Redis 后端，支持同步/异步 API
+- **信号系统** — 基于 Blinker 派生的事件系统
+- **CLI 工具** — 模块管理、数据库迁移、脚手架生成
+
+## 快速上手
+
+```bash
+# Install
+uv add bedrock
+
+# Verify
+bedrock -v
+```
+
+## 资源
+
+- [GitHub 仓库](https://github.com/maacck/bedrock)
+- [PyPI 包](https://pypi.org/project/bedrock-py/)

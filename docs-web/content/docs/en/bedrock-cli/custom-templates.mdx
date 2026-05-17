@@ -1,0 +1,192 @@
+---
+title: Custom Gen Templates
+description: Extend and override bedrock-cli gen with project-local Jinja2 templates
+---
+
+`bedrock-cli gen` is fully extensible. You can override the built-in templates or add entirely new ones by placing Jinja2 files in a `_bedrock_gen/` directory at your project root.
+
+<Callout type="warning">
+  You must run `bedrock-cli gen` from the project root directory for `_bedrock_gen/` to be detected. The CLI resolves this path relative to the current working directory (`cwd`).
+</Callout>
+
+## How It Works
+
+When you run `bedrock-cli gen <template> ...`, template resolution follows this order:
+
+1. `_bedrock_gen/<template>.py.j2` — project-local override or custom template
+2. Built-in mapping (e.g. `entity` → `crud/entities.py.j2`)
+
+If a matching file exists in `_bedrock_gen/`, it takes priority. Otherwise the built-in is used. This means you can:
+
+- **Override** built-in templates (e.g. replace the default `entity` output)
+- **Add new** templates (e.g. `router`, `repository`, `api`) — they become usable immediately
+
+## Setup
+
+```
+my-project/
+├── _bedrock_gen/
+│   ├── entity.py.j2        # overrides built-in entity template
+│   ├── service.py.j2       # overrides built-in service template
+│   ├── router.py.j2        # custom template — new!
+│   └── repository.py.j2    # custom template — new!
+├── src/
+│   └── ...
+└── pyproject.toml
+```
+
+After adding a template, use it immediately:
+
+```bash
+bedrock-cli gen router myapp.models:User src/myapp/users
+# → src/myapp/users/router.py
+
+bedrock-cli gen repository myapp.models:User src/myapp/users
+# → src/myapp/users/repository.py
+```
+
+## Available Context Variables
+
+All templates receive the same context from SQLAlchemy model introspection:
+
+| Variable          | Type              | Description                                      |
+| ----------------- | ----------------- | ------------------------------------------------ |
+| `model_name`      | `str`             | Class name of the model (e.g. `User`)            |
+| `model_slug`      | `str`             | snake_case slug (e.g. `user`)                    |
+| `module_name`     | `str`             | Same as `model_slug`                             |
+| `columns`         | `list[dict]`      | All columns (see column dict below)              |
+| `data_columns`    | `list[dict]`      | Non-primary-key columns                          |
+| `pk_columns`      | `list[dict]`      | Primary key columns only                         |
+| `needs_datetime`  | `bool`            | Whether any column maps to `datetime`            |
+| `needs_decimal`   | `bool`            | Whether any column maps to `Decimal`             |
+| `needs_any`       | `bool`            | Whether any column maps to `Any`                 |
+
+### Column Dict
+
+Each item in `columns`, `data_columns`, and `pk_columns`:
+
+| Key                      | Type   | Description                          |
+| ------------------------ | ------ | ------------------------------------ |
+| `name`                   | `str`  | Column name                          |
+| `python_type`            | `str`  | Mapped Python type (`int`, `str`, etc.) |
+| `nullable`               | `bool` | Whether the column is nullable       |
+| `primary_key`            | `bool` | Whether it's a primary key           |
+| `needs_datetime_import`  | `bool` | Whether this column needs `datetime` |
+| `needs_decimal_import`   | `bool` | Whether this column needs `Decimal`  |
+
+## Custom Jinja2 Filters
+
+These filters are available in all templates:
+
+| Filter   | Description                        | Example                        |
+| -------- | ---------------------------------- | ------------------------------ |
+| `snake`  | Convert to snake_case              | `{{ "UserProfile" \| snake }}` → `user_profile` |
+| `camel`  | Convert to PascalCase              | `{{ "user_profile" \| camel }}` → `UserProfile` |
+
+## Example: Override Entity Template
+
+```jinja
+{# _bedrock_gen/entity.py.j2 #}
+from __future__ import annotations
+
+{% if needs_datetime %}from datetime import datetime{% endif %}
+{% if needs_decimal %}from decimal import Decimal{% endif %}
+from typing import Optional
+
+from pydantic import BaseModel
+
+
+class {{ model_name }}Base(BaseModel):
+{% for col in data_columns %}
+    {{ col.name }}: {% if col.nullable %}Optional[{{ col.python_type }}]{% else %}{{ col.python_type }}{% endif %}{% if col.nullable %} = None{% endif %}
+
+{% endfor %}
+
+class {{ model_name }}Create({{ model_name }}Base):
+    pass
+
+
+class {{ model_name }}Read({{ model_name }}Base):
+{% for col in pk_columns %}
+    {{ col.name }}: {{ col.python_type }}
+{% endfor %}
+
+
+class {{ model_name }}Update(BaseModel):
+{% for col in data_columns %}
+    {{ col.name }}: Optional[{{ col.python_type }}] = None
+{% endfor %}
+```
+
+## Example: Override Service Template
+
+```jinja
+{# _bedrock_gen/service.py.j2 #}
+from __future__ import annotations
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from ..models import {{ model_name }}
+
+
+async def aget(session: AsyncSession, pk: int) -> {{ model_name }} | None:
+    return await session.get({{ model_name }}, pk)
+
+
+async def acreate(session: AsyncSession, **kwargs) -> {{ model_name }}:
+    instance = {{ model_name }}(**kwargs)
+    session.add(instance)
+    await session.flush()
+    return instance
+
+
+async def adelete(session: AsyncSession, instance: {{ model_name }}) -> None:
+    await session.delete(instance)
+    await session.flush()
+```
+
+## Example: Add a Custom Router Template
+
+```jinja
+{# _bedrock_gen/router.py.j2 #}
+from __future__ import annotations
+
+from fastapi import APIRouter, Depends
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from ..models import {{ model_name }}
+from . import service
+from .entity import {{ model_name }}Create, {{ model_name }}Read
+
+router = APIRouter(prefix="/{{ model_slug }}s", tags=["{{ model_slug }}"])
+
+
+@router.get("/{pk}", response_model={{ model_name }}Read)
+async def get_{{ model_slug }}(pk: int, session: AsyncSession = Depends(get_session)):
+    return await service.aget(session, pk)
+
+
+@router.post("/", response_model={{ model_name }}Read)
+async def create_{{ model_slug }}(payload: {{ model_name }}Create, session: AsyncSession = Depends(get_session)):
+    return await service.acreate(session, **payload.model_dump())
+```
+
+Then use it:
+
+```bash
+$ bedrock-cli gen router myapp.models:User src/myapp/users
+
+ℹ Generating router for User in src/myapp/users
+✓ src/myapp/users/router.py
+```
+
+## Partial Overrides
+
+You only need to place the templates you want to customize or add. Built-in templates are always available as fallback:
+
+```
+_bedrock_gen/
+├── service.py.j2       # overrides built-in service; entity still uses built-in
+└── router.py.j2        # brand new template
+```

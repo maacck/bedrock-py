@@ -12,4 +12,11 @@
   "ai": {
     "binding": "AI",
   },
+  "kv_namespaces": [
+    {
+      "binding": "RATE_LIMIT_KV",
+      "id": "ebf3c555a4b344a0aa8d9b43628dfe43",
+      "remote": true,
+    },
+  ],
 }

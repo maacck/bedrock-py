@@ -4,22 +4,21 @@ from __future__ import annotations
 
 import typer
 
-from bedrock_cli.commands import inspect_app, make_app, new_app, validate_app
+from bedrock_cli.commands import add_app, gen_command, init_command
 
 app = typer.Typer(
-    name="bedrock",
+    name="bedrock-cli",
     help="Bedrock CLI — scaffold and manage Bedrock modular applications.",
     no_args_is_help=True,
 )
 
-app.add_typer(new_app, name="new")
-app.add_typer(make_app, name="make")
-app.add_typer(inspect_app, name="inspect")
-app.add_typer(validate_app, name="validate")
+app.command("init")(init_command)
+app.command("gen")(gen_command)
+app.add_typer(add_app, name="add")
 
 
 def main() -> None:
-    """CLI entry point invoked by the ``bedrock`` console script."""
+    """CLI entry point invoked by the ``bedrock-cli`` console script."""
     app()
 
 

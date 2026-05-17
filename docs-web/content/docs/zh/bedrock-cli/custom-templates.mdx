@@ -1,0 +1,192 @@
+---
+title: 自定义生成模板
+description: 使用项目本地 Jinja2 模板扩展并覆盖 bedrock-cli gen
+---
+
+`bedrock-cli gen` 是完全可扩展的。你可以通过在项目根目录下的 `_bedrock_gen/` 目录中放置 Jinja2 文件来覆盖内置模板，或添加全新的模板。
+
+<Callout type="warning">
+  你必须从项目根目录运行 `bedrock-cli gen`，这样才能检测到 `_bedrock_gen/`。CLI 会相对于当前工作目录（`cwd`）解析这个路径。
+</Callout>
+
+## 工作原理
+
+当你运行 `bedrock-cli gen <template> ...` 时，模板解析遵循以下顺序：
+
+1. `_bedrock_gen/<template>.py.j2` —— 项目本地覆盖或自定义模板
+2. 内置映射（例如 `entity` → `crud/entities.py.j2`）
+
+如果 `_bedrock_gen/` 中存在匹配文件，它会优先生效。否则将使用内置模板。这意味着你可以：
+
+- **覆盖** 内置模板（例如替换默认的 `entity` 输出）
+- **新增** 模板（例如 `router`、`repository`、`api`）——添加后即可立即使用
+
+## 设置
+
+```
+my-project/
+├── _bedrock_gen/
+│   ├── entity.py.j2        # overrides built-in entity template
+│   ├── service.py.j2       # overrides built-in service template
+│   ├── router.py.j2        # custom template — new!
+│   └── repository.py.j2    # custom template — new!
+├── src/
+│   └── ...
+└── pyproject.toml
+```
+
+添加模板后，可以立即使用：
+
+```bash
+bedrock-cli gen router myapp.models:User src/myapp/users
+# → src/myapp/users/router.py
+
+bedrock-cli gen repository myapp.models:User src/myapp/users
+# → src/myapp/users/repository.py
+```
+
+## 可用的上下文变量
+
+所有模板都会接收来自 SQLAlchemy 模型分析的相同上下文：
+
+| 变量             | 类型           | 说明                                           |
+| ---------------- | -------------- | ---------------------------------------------- |
+| `model_name`     | `str`          | 模型的类名（例如 `User`）                      |
+| `model_slug`     | `str`          | snake_case 形式的 slug（例如 `user`）          |
+| `module_name`    | `str`          | 与 `model_slug` 相同                           |
+| `columns`        | `list[dict]`   | 所有列（见下方列字典）                         |
+| `data_columns`   | `list[dict]`   | 非主键列                                       |
+| `pk_columns`     | `list[dict]`   | 仅主键列                                       |
+| `needs_datetime` | `bool`         | 是否有任意列映射到 `datetime`                  |
+| `needs_decimal`  | `bool`         | 是否有任意列映射到 `Decimal`                   |
+| `needs_any`      | `bool`         | 是否有任意列映射到 `Any`                       |
+
+### 列字典
+
+`columns`、`data_columns` 和 `pk_columns` 中的每一项都包含：
+
+| 键                       | 类型   | 说明                                  |
+| ------------------------ | ------ | ------------------------------------- |
+| `name`                   | `str`  | 列名                                  |
+| `python_type`            | `str`  | 映射后的 Python 类型（`int`、`str` 等） |
+| `nullable`               | `bool` | 该列是否可为空                        |
+| `primary_key`            | `bool` | 是否为主键                            |
+| `needs_datetime_import`  | `bool` | 该列是否需要导入 `datetime`           |
+| `needs_decimal_import`   | `bool` | 该列是否需要导入 `Decimal`            |
+
+## 自定义 Jinja2 过滤器
+
+这些过滤器在所有模板中都可用：
+
+| 过滤器  | 说明                         | 示例                           |
+| ------- | ---------------------------- | ------------------------------ |
+| `snake` | 转换为 snake_case            | `{{ "UserProfile" \| snake }}` → `user_profile` |
+| `camel` | 转换为 PascalCase            | `{{ "user_profile" \| camel }}` → `UserProfile` |
+
+## 示例：覆盖 Entity 模板
+
+```jinja
+{# _bedrock_gen/entity.py.j2 #}
+from __future__ import annotations
+
+{% if needs_datetime %}from datetime import datetime{% endif %}
+{% if needs_decimal %}from decimal import Decimal{% endif %}
+from typing import Optional
+
+from pydantic import BaseModel
+
+
+class {{ model_name }}Base(BaseModel):
+{% for col in data_columns %}
+    {{ col.name }}: {% if col.nullable %}Optional[{{ col.python_type }}]{% else %}{{ col.python_type }}{% endif %}{% if col.nullable %} = None{% endif %}
+
+{% endfor %}
+
+class {{ model_name }}Create({{ model_name }}Base):
+    pass
+
+
+class {{ model_name }}Read({{ model_name }}Base):
+{% for col in pk_columns %}
+    {{ col.name }}: {{ col.python_type }}
+{% endfor %}
+
+
+class {{ model_name }}Update(BaseModel):
+{% for col in data_columns %}
+    {{ col.name }}: Optional[{{ col.python_type }}] = None
+{% endfor %}
+```
+
+## 示例：覆盖 Service 模板
+
+```jinja
+{# _bedrock_gen/service.py.j2 #}
+from __future__ import annotations
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from ..models import {{ model_name }}
+
+
+async def aget(session: AsyncSession, pk: int) -> {{ model_name }} | None:
+    return await session.get({{ model_name }}, pk)
+
+
+async def acreate(session: AsyncSession, **kwargs) -> {{ model_name }}:
+    instance = {{ model_name }}(**kwargs)
+    session.add(instance)
+    await session.flush()
+    return instance
+
+
+async def adelete(session: AsyncSession, instance: {{ model_name }}) -> None:
+    await session.delete(instance)
+    await session.flush()
+```
+
+## 示例：添加自定义 Router 模板
+
+```jinja
+{# _bedrock_gen/router.py.j2 #}
+from __future__ import annotations
+
+from fastapi import APIRouter, Depends
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from ..models import {{ model_name }}
+from . import service
+from .entity import {{ model_name }}Create, {{ model_name }}Read
+
+router = APIRouter(prefix="/{{ model_slug }}s", tags=["{{ model_slug }}"])
+
+
+@router.get("/{pk}", response_model={{ model_name }}Read)
+async def get_{{ model_slug }}(pk: int, session: AsyncSession = Depends(get_session)):
+    return await service.aget(session, pk)
+
+
+@router.post("/", response_model={{ model_name }}Read)
+async def create_{{ model_slug }}(payload: {{ model_name }}Create, session: AsyncSession = Depends(get_session)):
+    return await service.acreate(session, **payload.model_dump())
+```
+
+然后像这样使用：
+
+```bash
+$ bedrock-cli gen router myapp.models:User src/myapp/users
+
+ℹ Generating router for User in src/myapp/users
+✓ src/myapp/users/router.py
+```
+
+## 部分覆盖
+
+你只需要放置想要自定义或新增的模板。内置模板始终可作为回退：
+
+```
+_bedrock_gen/
+├── service.py.j2       # overrides built-in service; entity still uses built-in
+└── router.py.j2        # brand new template
+```

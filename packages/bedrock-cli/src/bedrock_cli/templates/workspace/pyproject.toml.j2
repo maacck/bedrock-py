@@ -5,9 +5,11 @@ description = ""
 requires-python = ">=3.12"
 dependencies = [
     "bedrock>=0.1.0",
-    "fastapi>=0.115.0",
-    "sqlalchemy>=2.0.0",
-    "uvicorn>=0.34.0",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.10",
 ]
 
 [build-system]

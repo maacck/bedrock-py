@@ -4,33 +4,29 @@ Register any startup and teardown logic here.
 This file is optional — delete it if the module has no lifecycle needs.
 """
 
-from __future__ import annotations
-
 from bedrock.module import AppConfig, ModuleRegistry
 
 
-def on_load(registry: ModuleRegistry, app: AppConfig) -> None:
+def on_load(*, registry: ModuleRegistry, app: AppConfig) -> None:
     """Called when the module is installed into the registry.
 
-    Args:
-        registry: The active ModuleRegistry instance.
-        app: The AppConfig for this module.
+    Parameters are injected by name:
+    - registry: the ModuleRegistry instance
+    - app: this module's AppConfig
+    - container: the global DI container (bedrock.di.container)
+    - hooks: the global HookRegistry (bedrock.hooks.hooks)
     """
 
 
-def ready(registry: ModuleRegistry, app: AppConfig) -> None:
+def ready(*, registry: ModuleRegistry, app: AppConfig) -> None:
     """Called after all modules have been loaded and the application is ready.
 
-    Args:
-        registry: The active ModuleRegistry instance.
-        app: The AppConfig for this module.
+    Use for cross-module setup that depends on other modules being available.
     """
 
 
-def on_shutdown(registry: ModuleRegistry, app: AppConfig) -> None:
-    """Called during application shutdown.
+def on_shutdown(*, registry: ModuleRegistry, app: AppConfig) -> None:
+    """Called during application shutdown (reverse dependency order).
 
-    Args:
-        registry: The active ModuleRegistry instance.
-        app: The AppConfig for this module.
+    Use for cleanup: closing connections, flushing buffers, releasing resources.
     """

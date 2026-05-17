@@ -211,7 +211,8 @@ opencode.jsonc
 .opencode/
 .claude/
 skills-lock.json
-
+.sisyphus/
+.worktrees/
 
 packages/bedrock-example/
 

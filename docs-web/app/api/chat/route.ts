@@ -1,4 +1,3 @@
-import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import {
   convertToModelMessages,
   stepCountIs,
@@ -11,6 +10,8 @@ import { source } from "@/lib/source";
 import { Document, type DocumentData } from "flexsearch";
 import { createWorkersAI } from "workers-ai-provider";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
+import { checkRateLimit, trackTokenUsage, getClientIp } from "@/lib/rate-limit";
+
 interface CustomDocument extends DocumentData {
   url: string;
   title: string;
@@ -67,24 +68,52 @@ async function chunkedAll<O>(promises: Promise<O>[]): Promise<O[]> {
   return out;
 }
 
-const openrouter = createOpenRouter({
-  apiKey: process.env.OPENROUTER_API_KEY,
-});
-
-/** System prompt, you can update it to provide more specific information */
 const systemPrompt = [
-  "You are an AI assistant for a documentation site.",
-  "Use the `search` tool to retrieve relevant docs context before answering when needed.",
-  "The `search` tool returns raw JSON results from documentation. Use those results to ground your answer and cite sources as markdown links using the document `url` field when available.",
-  "If you cannot find the answer in search results, say you do not know and suggest a better search query.",
+  "You are the Bedrock AI assistant — a specialized helper for the Bedrock Python framework documentation.",
+  "You ONLY answer questions related to the Bedrock framework, its modules, database layer, CLI, configuration, API, and usage patterns.",
+  "",
+  "SCOPE RULES:",
+  "- If the user asks about Bedrock (modules, database, CLI, signals, cache, settings, migrations, etc.) → answer thoroughly using the `search` tool to find relevant docs.",
+  "- If the user asks about general Python, unrelated libraries, or off-topic subjects → politely decline and redirect them back to Bedrock topics.",
+  "- If the user's question is ambiguous but could be related to Bedrock → assume Bedrock context and answer.",
+  "",
+  "When answering:",
+  "- Use the `search` tool to retrieve relevant docs context before answering when needed.",
+  "- The `search` tool returns raw JSON results from documentation. Use those results to ground your answer and cite sources as markdown links using the document `url` field when available.",
+  "- If you cannot find the answer in search results, say you do not know and suggest a better search query.",
+  "- Keep answers concise and practical. Show code examples when relevant.",
 ].join("\n");
 
 export async function POST(req: Request, ctx: RouteContext<"/api/chat">) {
-  const reqJson = await req.json();
+  const ip = getClientIp(req);
   const { env } = getCloudflareContext();
+  const rateLimit = await checkRateLimit(env.RATE_LIMIT_KV, ip);
+  if (!rateLimit.allowed) {
+    return Response.json(
+      {
+        error: "Rate limit exceeded",
+        message: `You have used ${rateLimit.current} tokens this hour. Limit is 50,000 tokens/hour. Resets at ${new Date(rateLimit.resetAt * 1000).toISOString()}.`,
+        resetAt: rateLimit.resetAt,
+      },
+      {
+        status: 429,
+        headers: {
+          "X-RateLimit-Limit": "50000",
+          "X-RateLimit-Remaining": "0",
+          "X-RateLimit-Reset": String(rateLimit.resetAt),
+          "Retry-After": String(
+            rateLimit.resetAt - Math.floor(Date.now() / 1000),
+          ),
+        },
+      },
+    );
+  }
+
+  const reqJson = await req.json();
   const workersai = createWorkersAI({ binding: env.AI });
+
   const result = streamText({
-    model: workersai(process.env.WORKER_AI_MODEL ?? "@cf/moonshotai/kimi-k2.6"),
+    model: workersai(process.env.WORKER_AI_MODEL ?? "@cf/moonshotai/kimi-k2.5"),
     stopWhen: stepCountIs(5),
     tools: {
       search: searchTool,
@@ -103,9 +132,26 @@ export async function POST(req: Request, ctx: RouteContext<"/api/chat">) {
       })),
     ],
     toolChoice: "auto",
+    onFinish: async ({ usage }) => {
+      await trackTokenUsage(
+        env.RATE_LIMIT_KV,
+        ip,
+        usage.inputTokens ?? 0,
+        usage.outputTokens ?? 0,
+      );
+    },
+    onError: (error) => {
+      console.error(error);
+    },
   });
 
-  return result.toUIMessageStreamResponse();
+  return result.toUIMessageStreamResponse({
+    headers: {
+      "X-RateLimit-Limit": "50000",
+      "X-RateLimit-Remaining": String(rateLimit.remaining),
+      "X-RateLimit-Reset": String(rateLimit.resetAt),
+    },
+  });
 }
 
 export type SearchTool = typeof searchTool;

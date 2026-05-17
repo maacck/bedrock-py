@@ -1,0 +1,298 @@
+---
+title: 教程
+description: 从零开始构建你的第一个 Bedrock 模块
+---
+
+本教程将带你创建一个完整的 Bedrock 模块——从空目录开始，到一个可运行的 CLI 命令结束。完成后，你将得到一个功能完整的 `inventory` 模块，其中包含 Pydantic 实体、服务层、生命周期钩子和自定义命令。
+
+## 前置要求
+
+开始前，请确保你已经具备：
+
+- 已安装 Python 3.11+
+- 已安装 `bedrock`（`uv add bedrock` 或 `pip install bedrock`）
+- 对 Python 和 Pydantic 有基本了解
+
+验证安装：
+
+```bash
+bedrock -v
+```
+
+## 步骤 1：创建模块目录
+
+每个 Bedrock 模块都位于自己的 Python 包中。先创建目录结构：
+
+```bash
+mkdir -p inventory
+touch inventory/__init__.py
+```
+
+为 `inventory/__init__.py` 添加 docstring：
+
+```python
+"""Inventory — product inventory management module."""
+```
+
+## 步骤 2：编写 Manifest
+
+`manifest.yaml` 文件用于声明模块身份。除 `__init__.py` 之外，它是唯一必需的文件。
+
+创建 `inventory/manifest.yaml`：
+
+```yaml
+title: inventory
+description: Product inventory management
+version: 0.1.0
+commands: "commands:app"
+```
+
+| 字段 | 用途 |
+|-------|---------|
+| `title` | 用于日志和错误消息的人类可读名称 |
+| `description` | 模块的简短描述 |
+| `version` | 语义化版本字符串 |
+| `commands` | 指向 Typer app 的相对导入路径（稍后会创建） |
+
+## 步骤 3：定义实体
+
+实体是用于承载业务数据的 Pydantic 模型。它们不包含持久化逻辑，只负责校验和结构定义。
+
+创建 `inventory/entities.py`：
+
+```python
+"""Inventory entities."""
+
+from pydantic import BaseModel, Field
+
+
+class Product(BaseModel):
+    """A product in the inventory."""
+
+    name: str = Field(..., min_length=1, max_length=100)
+    sku: str = Field(..., pattern=r"^[A-Z0-9\-]+$")
+    quantity: int = Field(0, ge=0)
+    price_cents: int = Field(..., ge=0, description="Price in cents")
+
+
+class ProductSummary(BaseModel):
+    """Summary output for inventory listing."""
+
+    name: str
+    sku: str
+    quantity: int
+```
+
+## 步骤 4：编写 Service
+
+服务层承载业务逻辑。Service 接收的数据应是实体或基础类型，而不是 HTTP 对象或 ORM 实例。
+
+创建 `inventory/service.py`：
+
+```python
+"""Inventory business logic."""
+
+from .entities import Product, ProductSummary
+
+
+class InventoryService:
+    """Manages product inventory."""
+
+    def __init__(self) -> None:
+        self._products: dict[str, Product] = {}
+
+    def add_product(self, product: Product) -> Product:
+        """Add a product. Raises ValueError if SKU already exists."""
+        if product.sku in self._products:
+            raise ValueError(f"Product with SKU '{product.sku}' already exists")
+        self._products[product.sku] = product
+        return product
+
+    def get_product(self, sku: str) -> Product | None:
+        """Retrieve a product by SKU."""
+        return self._products.get(sku)
+
+    def list_products(self) -> list[ProductSummary]:
+        """List all products as summaries."""
+        return [
+            ProductSummary(name=p.name, sku=p.sku, quantity=p.quantity)
+            for p in self._products.values()
+        ]
+
+    def adjust_quantity(self, sku: str, delta: int) -> Product:
+        """Adjust a product's quantity. Raises ValueError on not found or negative stock."""
+        product = self._products.get(sku)
+        if product is None:
+            raise ValueError(f"Product with SKU '{sku}' not found")
+        new_qty = product.quantity + delta
+        if new_qty < 0:
+            raise ValueError(f"Insufficient stock for SKU '{sku}'")
+        product.quantity = new_qty
+        return product
+```
+
+## 步骤 5：添加 Bootstrap Hooks
+
+Bootstrap hooks 允许你在特定生命周期阶段运行代码，注册表会自动调用它们。Hooks 按名称声明关键字参数，registry 会自动注入 `registry`、`app`、`container` 和 `hooks`。只需声明你需要的参数。
+
+创建 `inventory/bootstrap.py`：
+
+```python
+"""Inventory lifecycle hooks."""
+
+from bedrock.module.entities import AppConfig
+from bedrock.module.registry import ModuleRegistry
+
+from .service import InventoryService
+
+# Module-level service instance
+inventory_service = InventoryService()
+
+
+def on_load(*, registry: ModuleRegistry, app: AppConfig) -> None:
+    """Called when the module is first loaded."""
+    print(f"[inventory] Module loaded (v{app.manifest.version})")
+
+
+def ready(*, registry: ModuleRegistry, app: AppConfig) -> None:
+    """Called after all modules have been loaded."""
+    print("[inventory] Module ready")
+
+
+def on_shutdown(*, registry: ModuleRegistry, app: AppConfig) -> None:
+    """Called during graceful shutdown."""
+    print("[inventory] Module shutting down")
+```
+
+## 步骤 6：注册并验证
+
+使用 Bedrock CLI 验证模块是否能正确加载：
+
+```bash
+bedrock app inspect inventory
+```
+
+预期输出：
+
+```
+✓ Manifest for 'inventory' is valid.
+✓ Module 'inventory' loads successfully.
+✓ Bootstrap submodule is available.
+! No models submodule found.
+```
+
+查看模块详情：
+
+```bash
+bedrock app info inventory
+```
+
+```
+Title        inventory
+Description  Product inventory management
+Version      0.1.0
+Import Path  inventory
+Dependencies None
+Bootstrap    Yes
+Models       No
+Commands     commands:app
+```
+
+## 步骤 7：添加 CLI 命令
+
+创建 `inventory/commands.py` 并定义一个 Typer app：
+
+```python
+"""Inventory CLI commands."""
+
+import typer
+
+from .bootstrap import inventory_service
+from .entities import Product
+
+app = typer.Typer(help="Inventory management commands")
+
+
+@app.command()
+def add(
+    name: str = typer.Argument(..., help="Product name"),
+    sku: str = typer.Argument(..., help="Product SKU (e.g., WIDGET-001)"),
+    price: int = typer.Argument(..., help="Price in cents"),
+    quantity: int = typer.Option(0, "--qty", "-q", help="Initial quantity"),
+) -> None:
+    """Add a new product to the inventory."""
+    product = Product(name=name, sku=sku, price_cents=price, quantity=quantity)
+    inventory_service.add_product(product)
+    typer.echo(f"✓ Added '{name}' (SKU: {sku}, qty: {quantity})")
+
+
+@app.command()
+def list() -> None:
+    """List all products in the inventory."""
+    products = inventory_service.list_products()
+    if not products:
+        typer.echo("No products in inventory.")
+        return
+    for p in products:
+        typer.echo(f"  {p.sku:15s} {p.name:30s} qty={p.quantity}")
+
+
+@app.command()
+def adjust(
+    sku: str = typer.Argument(..., help="Product SKU"),
+    delta: int = typer.Argument(..., help="Quantity change (positive or negative)"),
+) -> None:
+    """Adjust a product's quantity."""
+    product = inventory_service.adjust_quantity(sku, delta)
+    typer.echo(f"✓ {sku} quantity now: {product.quantity}")
+```
+
+## 步骤 8：运行命令
+
+使用 `bedrock run` 执行模块命令：
+
+```bash
+# Add a product
+bedrock run --app inventory add "Widget" WIDGET-001 1999 --qty 50
+
+# Add another product
+bedrock run --app inventory add "Gadget" GADGET-002 4999 --qty 25
+
+# List all products
+bedrock run --app inventory list
+
+# Adjust quantity
+bedrock run --app inventory adjust WIDGET-001 -10
+```
+
+预期输出：
+
+```
+✓ Added 'Widget' (SKU: WIDGET-001, qty: 50)
+✓ Added 'Gadget' (SKU: GADGET-002, qty: 25)
+  WIDGET-001      Widget                         qty=50
+  GADGET-002      Gadget                         qty=25
+✓ WIDGET-001 quantity now: 40
+```
+
+## 最终模块结构
+
+```
+inventory/
+├── __init__.py        # Package docstring
+├── manifest.yaml      # Module identity and metadata
+├── entities.py        # Pydantic models (Product, ProductSummary)
+├── service.py         # Business logic (InventoryService)
+├── bootstrap.py       # Lifecycle hooks (on_load, ready, on_shutdown)
+└── commands.py        # CLI commands (add, list, adjust)
+```
+
+## 下一步
+
+现在你已经构建好了第一个模块，可以继续了解以下主题：
+
+- **[Module Anatomy](/docs/guides/module-anatomy)** —— 深入了解每个模块文件及其用途
+- **[Cache Guide](/docs/guides/cache)** —— 使用 Bedrock 的 cache system 为模块添加缓存
+- **[Signals Guide](/docs/guides/signals)** —— 在模块之间发送和监听事件
+- **[CLI Reference](/docs/guides/cli)** —— 所有 Bedrock CLI 命令的完整参考
+- **[Database Guide](/docs/guides/database)** —— 使用 SQLAlchemy 和 Alembic 添加持久化存储

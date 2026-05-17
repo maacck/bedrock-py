@@ -51,7 +51,8 @@ cd starlight-docs && npm run build  # Production build
 <name>/
 ├── __init__.py
 ├── manifest.yaml    # name, package, version, depends_on
-├── entities.py      # Pydantic models
+├── entities.py      # Business domain entities (internal data flow)
+├── schemas.py       # Optional: API input/output contracts (request/response DTOs)
 ├── service.py       # Business logic (no HTTP)
 ├── exc.py           # Module exceptions
 └── bootstrap.py     # Optional: lifecycle hooks
@@ -71,7 +72,7 @@ cd starlight-docs && npm run build  # Production build
 - **Type hints**: Strict, always include
 - **Async prefix**: `a` (e.g., `aget()`, `aset()`, `adelete()`)
 - **Exceptions**: `BedrockExc` hierarchy with `detail` attribute
-- **Settings**: `Pydantic BaseSettings` with lazy proxy
+- **Settings**: `Pydantic BaseSettings` with optional `SettingsProxy` for lazy singletons
 - **Imports**: Relative within-package, absolute cross-package
 
 ## Exceptions

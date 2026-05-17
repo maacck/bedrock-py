@@ -12,6 +12,7 @@ import {
   useState,
 } from "react";
 import {
+  AlertTriangle,
   Loader2,
   MessageCircleIcon,
   RefreshCw,
@@ -26,18 +27,21 @@ import { DefaultChatTransport, type Tool, type UIToolInvocation } from "ai";
 import { Markdown } from "../markdown";
 import { Presence } from "@radix-ui/react-presence";
 import type { ChatUIMessage, SearchTool } from "../../app/api/chat/route";
+import { Suggestion, Suggestions } from "./suggestion";
+import type { SearchTexts } from "../../i18n/search";
 
 const Context = createContext<{
   open: boolean;
   setOpen: (open: boolean) => void;
   chat: UseChatHelpers<ChatUIMessage>;
+  texts: SearchTexts;
 } | null>(null);
 
 export function AISearchPanelHeader({
   className,
   ...props
 }: ComponentProps<"div">) {
-  const { setOpen } = useAISearchContext();
+  const { setOpen, texts } = useAISearchContext();
 
   return (
     <div
@@ -48,9 +52,9 @@ export function AISearchPanelHeader({
       {...props}
     >
       <div className="px-3 py-2 flex-1">
-        <p className="text-sm font-medium mb-2">AI Chat</p>
+        <p className="text-sm font-medium mb-2">{texts.aiChat}</p>
         <p className="text-xs text-fd-muted-foreground">
-          AI can be inaccurate, please verify the answers.
+          {texts.aiDisclaimer}
         </p>
       </div>
 
@@ -74,6 +78,7 @@ export function AISearchPanelHeader({
 
 export function AISearchInputActions() {
   const { messages, status, setMessages, regenerate } = useChatContext();
+  const { texts } = useAISearchContext();
   const isLoading = status === "streaming";
 
   if (messages.length === 0) return null;
@@ -93,7 +98,7 @@ export function AISearchInputActions() {
           onClick={() => regenerate()}
         >
           <RefreshCw className="size-4" />
-          Retry
+          {texts.retry}
         </button>
       )}
       <button
@@ -107,7 +112,7 @@ export function AISearchInputActions() {
         )}
         onClick={() => setMessages([])}
       >
-        Clear Chat
+        {texts.clearChat}
       </button>
     </>
   );
@@ -116,6 +121,7 @@ export function AISearchInputActions() {
 const StorageKeyInput = "__ai_search_input";
 export function AISearchInput(props: ComponentProps<"form">) {
   const { status, sendMessage, stop } = useChatContext();
+  const { texts } = useAISearchContext();
   const [input, setInput] = useState(
     () => localStorage.getItem(StorageKeyInput) ?? "",
   );
@@ -156,7 +162,7 @@ export function AISearchInput(props: ComponentProps<"form">) {
     >
       <Input
         value={input}
-        placeholder={isLoading ? "AI is answering..." : "Ask a question"}
+        placeholder={isLoading ? texts.answeringPlaceholder : texts.askPlaceholder}
         autoFocus
         className="p-3"
         disabled={status === "streaming" || status === "submitted"}
@@ -183,7 +189,7 @@ export function AISearchInput(props: ComponentProps<"form">) {
           onClick={stop}
         >
           <Loader2 className="size-4 animate-spin text-fd-muted-foreground" />
-          Abort Answer
+          {texts.abortAnswer}
         </button>
       ) : (
         <button
@@ -277,6 +283,7 @@ function Message({
   message,
   ...props
 }: { message: ChatUIMessage } & ComponentProps<"div">) {
+  const { texts } = useAISearchContext();
   let markdown = "";
   const searchCalls: UIToolInvocation<SearchTool>[] = [];
 
@@ -318,13 +325,13 @@ function Message({
             <SearchIcon className="size-4" />
             {call.state === "output-error" || call.state === "output-denied" ? (
               <p className="text-fd-error">
-                {call.errorText ?? "Failed to search"}
+                {call.errorText ?? texts.failedToSearch}
               </p>
             ) : (
               <p>
                 {!call.output
-                  ? "Searching…"
-                  : `${call.output.length} search results`}
+                  ? texts.searching
+                  : texts.searchResults.replace('{{count}}', String(call.output.length))}
               </p>
             )}
           </div>
@@ -334,7 +341,7 @@ function Message({
   );
 }
 
-export function AISearch({ children }: { children: ReactNode }) {
+export function AISearch({ children, texts }: { children: ReactNode; texts: SearchTexts }) {
   const [open, setOpen] = useState(false);
   const chat = useChat<ChatUIMessage>({
     id: "search",
@@ -344,7 +351,7 @@ export function AISearch({ children }: { children: ReactNode }) {
   });
 
   return (
-    <Context value={useMemo(() => ({ chat, open, setOpen }), [chat, open])}>
+    <Context value={useMemo(() => ({ chat, open, setOpen, texts }), [chat, open, texts])}>
       {children}
     </Context>
   );
@@ -376,7 +383,7 @@ export function AISearchTrigger({
 }
 
 export function AISearchPanel() {
-  const { open, setOpen } = useAISearchContext();
+  const { open, setOpen, chat, texts } = useAISearchContext();
   useHotKey();
 
   return (
@@ -423,6 +430,33 @@ export function AISearchPanel() {
           <div className="flex flex-col size-full p-2 lg:p-3 lg:w-(--ai-chat-width)">
             <AISearchPanelHeader />
             <AISearchPanelList className="flex-1" />
+            {chat.messages.length === 0 && (
+              <Suggestions className="my-2">
+                {texts.suggestions.map((suggestion) => (
+                  <Suggestion
+                    key={suggestion}
+                    onClick={() =>
+                      chat.sendMessage({
+                        role: "user",
+                        parts: [
+                          {
+                            type: "data-client",
+                            data: {
+                              location: location.href,
+                            },
+                          },
+                          {
+                            type: "text",
+                            text: suggestion,
+                          },
+                        ],
+                      })
+                    }
+                    suggestion={suggestion}
+                  />
+                ))}
+              </Suggestions>
+            )}
             <div className="rounded-xl border bg-fd-secondary text-fd-secondary-foreground shadow-sm has-focus-visible:shadow-md">
               <AISearchInput />
               <div className="flex items-center gap-1.5 p-1 empty:hidden">
@@ -442,6 +476,7 @@ export function AISearchPanelList({
   ...props
 }: ComponentProps<"div">) {
   const chat = useChatContext();
+  const { texts } = useAISearchContext();
   const messages = chat.messages.filter((msg) => msg.role !== "system");
 
   return (
@@ -457,24 +492,47 @@ export function AISearchPanelList({
       {messages.length === 0 ? (
         <div className="text-sm text-fd-muted-foreground/80 size-full flex flex-col items-center justify-center text-center gap-2">
           <MessageCircleIcon fill="currentColor" stroke="none" />
-          <p onClick={(e) => e.stopPropagation()}>Start a new chat below.</p>
+          <p onClick={(e) => e.stopPropagation()}>{texts.startChat}</p>
         </div>
       ) : (
         <div className="flex flex-col px-3 gap-4">
-          {chat.error && (
-            <div className="p-2 bg-fd-secondary text-fd-secondary-foreground border rounded-lg">
-              <p className="text-xs text-fd-muted-foreground mb-1">
-                Request Failed: {chat.error.name}
-              </p>
-              <p className="text-sm">{chat.error.message}</p>
-            </div>
-          )}
+          {chat.error && <RateLimitError error={chat.error} texts={texts} />}
           {messages.map((item) => (
             <Message key={item.id} message={item} />
           ))}
         </div>
       )}
     </List>
+  );
+}
+
+function RateLimitError({ error, texts }: { error: Error; texts: SearchTexts }) {
+  const isRateLimit =
+    error.message?.includes("Rate limit") || error.message?.includes("429");
+
+  if (isRateLimit) {
+    return (
+      <div className="p-3 bg-amber-500/10 border border-amber-500/30 rounded-lg">
+        <div className="flex items-center gap-2 mb-1">
+          <AlertTriangle className="size-4 text-amber-500" />
+          <p className="text-sm font-medium text-amber-600 dark:text-amber-400">
+            {texts.quotaExceeded}
+          </p>
+        </div>
+        <p className="text-xs text-fd-muted-foreground">
+          {texts.quotaMessage}
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="p-2 bg-fd-secondary text-fd-secondary-foreground border rounded-lg">
+      <p className="text-xs text-fd-muted-foreground mb-1">
+        {texts.requestFailed}: {error.name}
+      </p>
+      <p className="text-sm">{error.message}</p>
+    </div>
   );
 }
 
