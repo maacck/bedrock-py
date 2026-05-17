@@ -129,7 +129,7 @@ with container.override(Mailer, FakeMailer()):
 
 ### `@provider`
 
-`@provider` 会把类注册到全局容器中。
+`@provider` 会把类注册到默认全局容器中。
 
 ```python
 from bedrock.di import Lifetime, provider
@@ -141,9 +141,53 @@ class AuditService:
         print(message)
 ```
 
+### 自定义容器
+
+只有在你确实需要隔离的 DI 图时，才建议创建自定义 `Container()`，例如：
+
+- 测试中不希望污染默认运行时容器
+- 插件沙箱或实验性扩展加载
+- 需要独立注册表的短生命周期后台任务
+
+普通 Bedrock 应用代码里，优先使用默认的 `bedrock.di.container`。
+这样可以保持模块装配方式一致，也和 `bootstrap.py` 中自动注入的
+`container` 运行时对象保持一致。
+
+```python
+from bedrock.di import Container, Lifetime
+
+custom = Container()
+
+
+class AuditService:
+    def write(self, message: str) -> None:
+        print(message)
+
+
+@custom.provider(lifetime=Lifetime.SINGLETON)
+class CustomAuditService(AuditService):
+    pass
+
+
+@custom.provider("audit.name")
+class AuditName:
+    def __str__(self) -> str:
+        return "sandbox"
+```
+
+自定义容器也可以使用显式注册方法：
+
+```python
+from bedrock.di import Container, Lifetime
+
+custom = Container()
+custom.register(AuditService, factory=AuditService, lifetime=Lifetime.SINGLETON)
+custom.register_instance("audit.name", "sandbox")
+```
+
 ### `@inject`
 
-`@inject` 会从全局容器中解析命名参数。
+`@inject` 会从默认全局容器中解析命名参数。
 
 ```python
 from bedrock.di import inject
@@ -160,6 +204,22 @@ def send_welcome(user_email: str, *, mailer: Mailer) -> None:
 ```
 
 显式传入的关键字参数优先级高于自动注入的值。
+
+如果要从隔离容器中注入依赖，请使用绑定在容器实例上的装饰器：
+
+```python
+from bedrock.di import Container
+
+custom = Container()
+custom.register_instance(Mailer, Mailer())
+
+
+@custom.inject(mailer=Mailer)
+def send_preview(user_email: str, *, mailer: Mailer) -> None:
+    mailer.send(user_email, "Preview", "Hello")
+```
+
+这个装饰器只会从 `custom` 中解析，不会读取默认全局容器。
 
 ## 在模块中使用 DI
 
@@ -221,6 +281,7 @@ container.register(Mailer, factory=SmtpMailer)
 - 不要把容器当成一切依赖的隐藏全局变量；依赖装配仍应尽量显式
 - 不要在错误的 import 边界过早注册服务
 - 如果直接依赖已经足够清晰，就不要为了 DI 而 DI
+- 除非你真的需要隔离容器，否则不要随意引入自定义 `Container()`；应用模块默认应优先使用默认容器
 
 ## 另见
 

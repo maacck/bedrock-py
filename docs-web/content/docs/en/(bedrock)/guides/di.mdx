@@ -138,7 +138,7 @@ with container.override(Mailer, FakeMailer()):
 
 ### `@provider`
 
-`@provider` registers a class in the global container.
+`@provider` registers a class in the default global container.
 
 ```python
 from bedrock.di import Lifetime, provider
@@ -150,9 +150,53 @@ class AuditService:
         print(message)
 ```
 
+### Custom containers
+
+Use a custom `Container()` only when you need an isolated DI graph, such as:
+
+- tests that must not mutate the default runtime container
+- plugin sandboxes or experimental extension loading
+- short-lived background workflows that need their own registrations
+
+In normal Bedrock application code, prefer the default `bedrock.di.container`.
+That keeps module wiring predictable and matches the runtime objects injected into
+`bootstrap.py` hooks.
+
+```python
+from bedrock.di import Container, Lifetime
+
+custom = Container()
+
+
+class AuditService:
+    def write(self, message: str) -> None:
+        print(message)
+
+
+@custom.provider(lifetime=Lifetime.SINGLETON)
+class CustomAuditService(AuditService):
+    pass
+
+
+@custom.provider("audit.name")
+class AuditName:
+    def __str__(self) -> str:
+        return "sandbox"
+```
+
+Custom containers can also use the explicit registration methods:
+
+```python
+from bedrock.di import Container, Lifetime
+
+custom = Container()
+custom.register(AuditService, factory=AuditService, lifetime=Lifetime.SINGLETON)
+custom.register_instance("audit.name", "sandbox")
+```
+
 ### `@inject`
 
-`@inject` resolves named parameters from the global container.
+`@inject` resolves named parameters from the default global container.
 
 ```python
 from bedrock.di import inject
@@ -169,6 +213,23 @@ def send_welcome(user_email: str, *, mailer: Mailer) -> None:
 ```
 
 Explicit keyword arguments always win over injected values.
+
+To inject from an isolated container, use the container-bound decorator:
+
+```python
+from bedrock.di import Container
+
+custom = Container()
+custom.register_instance(Mailer, Mailer())
+
+
+@custom.inject(mailer=Mailer)
+def send_preview(user_email: str, *, mailer: Mailer) -> None:
+    mailer.send(user_email, "Preview", "Hello")
+```
+
+This decorator resolves only from `custom`, not from the default global
+container.
 
 ## Using DI in Modules
 
@@ -231,6 +292,7 @@ not shared globally.
 - Do not use the container as a hidden global for everything; keep wiring explicit
 - Do not register services eagerly at import time unless that module is the intended registration boundary
 - Do not use DI where a direct local dependency is simpler and clearer
+- Do not introduce a custom `Container()` unless you actually need isolation; the default container should be the standard choice for application modules
 
 ## See Also
 
