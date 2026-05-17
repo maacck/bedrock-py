@@ -322,4 +322,3 @@ class TestBackwardCompatibility:
         finally:
             mock_session.close()
             _current_db_session.set(None)
-

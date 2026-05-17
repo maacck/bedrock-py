@@ -290,7 +290,11 @@ class ModuleRegistry:
                 missing_required.append(parameter.name)
 
         if missing_required:
-            raise TypeError(self._format_invalid_hook_signature_error(app=app, hook_name=hook_name, missing_required=missing_required, positional_only=positional_only))
+            raise TypeError(
+                self._format_invalid_hook_signature_error(
+                    app=app, hook_name=hook_name, missing_required=missing_required, positional_only=positional_only
+                )
+            )
 
         if accepts_var_keyword:
             return provided_kwargs
@@ -298,7 +302,11 @@ class ModuleRegistry:
         if kwargs:
             return kwargs
 
-        raise TypeError(self._format_invalid_hook_signature_error(app=app, hook_name=hook_name, missing_required=[], positional_only=positional_only))
+        raise TypeError(
+            self._format_invalid_hook_signature_error(
+                app=app, hook_name=hook_name, missing_required=[], positional_only=positional_only
+            )
+        )
 
     @staticmethod
     def _format_invalid_hook_signature_error(

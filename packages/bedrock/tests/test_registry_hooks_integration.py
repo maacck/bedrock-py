@@ -168,7 +168,9 @@ class TestCallHookUnsupportedSignatures:
 
         registry = ModuleRegistry()
 
-        with pytest.raises(ModuleLifecycleError, match="Positional-only parameters cannot be injected by keyword") as exc_info:
+        with pytest.raises(
+            ModuleLifecycleError, match="Positional-only parameters cannot be injected by keyword"
+        ) as exc_info:
             registry.install("pos_only")
 
         assert "Unsupported required parameters: registry" in str(exc_info.value)
@@ -306,9 +308,7 @@ class TestCallHookLifecycleIntegration:
             "base_mod",
             manifest={"title": "Base", "version": "1"},
             bootstrap=(
-                "def on_load(*, app):\n"
-                "    import builtins\n"
-                "    builtins._hook_log.append(('load', app.name))\n"
+                "def on_load(*, app):\n    import builtins\n    builtins._hook_log.append(('load', app.name))\n"
             ),
         )
         make_fake_module(
@@ -316,9 +316,7 @@ class TestCallHookLifecycleIntegration:
             "dep_mod",
             manifest={"title": "Dep", "version": "1", "depends_on": ["base_mod"]},
             bootstrap=(
-                "def on_load(*, app):\n"
-                "    import builtins\n"
-                "    builtins._hook_log.append(('load', app.name))\n"
+                "def on_load(*, app):\n    import builtins\n    builtins._hook_log.append(('load', app.name))\n"
             ),
         )
 
@@ -338,9 +336,7 @@ class TestCallHookLifecycleIntegration:
             "mod_keyword_only",
             manifest={"title": "KeywordOnly", "version": "1"},
             bootstrap=(
-                "def on_load(*, app):\n"
-                "    import builtins\n"
-                "    builtins._hook_log.append(('keyword_only', app.name))\n"
+                "def on_load(*, app):\n    import builtins\n    builtins._hook_log.append(('keyword_only', app.name))\n"
             ),
         )
         make_fake_module(

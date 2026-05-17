@@ -24,7 +24,6 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 class TestLazyInstantiation:
-
     def test_proxy_does_not_trigger_validation_on_creation(self) -> None:
         proxy: DummyAppConfig = SettingsProxy(DummyAppConfig)  # type: ignore[assignment]
         assert proxy._wrapped is None
@@ -63,7 +62,6 @@ class TestLazyInstantiation:
 
 
 class TestProxyDelegation:
-
     def test_setattr_delegates_to_wrapped(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("DUMMY_APP_ENV", "test")
         proxy: DummyAppConfig = SettingsProxy(DummyAppConfig)  # type: ignore[assignment]
@@ -134,7 +132,6 @@ class TestProxyDelegation:
 
 
 class TestThreadSafety:
-
     def test_concurrent_first_access_single_instantiation(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("DUMMY_APP_ENV", "concurrent")
         barrier = threading.Barrier(4)
@@ -157,7 +154,6 @@ class TestThreadSafety:
 
 
 class TestCallableFactory:
-
     def test_accepts_callable_factory(self) -> None:
         mock_settings = MagicMock()
         mock_settings.VALUE = 42

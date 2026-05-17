@@ -24,6 +24,7 @@ class SettingsProxy:
             model_config = SettingsConfigDict(env_prefix="APP_")
             DEBUG: bool = False
 
+
         settings: AppSettings = SettingsProxy(AppSettings)  # type: ignore[assignment]
 
     Args:
