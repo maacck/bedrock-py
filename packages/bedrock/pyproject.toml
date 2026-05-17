@@ -32,7 +32,7 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/maacck/bedrock-py"
+Homepage = "https://bedrock-py.com"
 Repository = "https://github.com/maacck/bedrock-py"
 Documentation = "https://bedrock-py.com"
 "Bug Tracker" = "https://github.com/maacck/bedrock-py/issues"
