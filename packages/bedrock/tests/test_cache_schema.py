@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from bedrock.contrib.cache.coder import Coder, BytesCoder
+from bedrock.contrib.cache.coder import BytesCoder, Coder
 from bedrock.contrib.cache.service import CacheService
 from pydantic import BaseModel
 

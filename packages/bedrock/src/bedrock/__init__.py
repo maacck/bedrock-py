@@ -1,7 +1,7 @@
+from .conf import SettingsProxy
 from .entities import BedrockEntity
 from .logging import get_logger
 from .module import ModuleRegistry, apps
-from .conf import SettingsProxy
 
 __all__ = [
     "ModuleRegistry",
