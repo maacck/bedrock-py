@@ -17,13 +17,21 @@ jobs:
         with:
           enable-cache: true
 
+      - name: Extract release notes
+        id: notes
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          sed -n "/^## \[$VERSION\]/,/^## \[/p" CHANGELOG.md \
+            | sed '1d;$d' \
+            > release_notes.md
+
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: uv sync
+        run: uv sync --package bedrock-core --locked
 
       - name: Validate version tag
         run: |
@@ -81,6 +89,6 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           files: dist/*
-          generate_release_notes: true
+          body_path: release_notes.md
           draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
