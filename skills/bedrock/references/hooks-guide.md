@@ -203,7 +203,7 @@ class ApiKeyHooks:
         return None
 
 
-def on_load(*, app, **kwargs) -> None:
+def on_load(*, app) -> None:
     auth_hooks.add_impls_from(ApiKeyHooks(), module=app.name)
 ```
 
@@ -216,7 +216,7 @@ Bootstrap hooks may request:
 - `container`
 - `hooks`
 
-Legacy positional `(registry, app)` hooks still work.
+Declare only the parameters you need — the registry injects only what it finds in the signature.
 
 ---
 

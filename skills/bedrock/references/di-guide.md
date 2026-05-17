@@ -285,7 +285,7 @@ class InventoryService:
         return 10
 
 
-def on_load(*, container, **kwargs) -> None:
+def on_load(*, container) -> None:
     container.register(
         InventoryService,
         factory=InventoryService,
@@ -302,7 +302,7 @@ Bootstrap hooks may request `container` by name:
 - `container`
 - `hooks`
 
-Legacy positional `(registry, app)` hooks still work.
+Declare only the parameters you need — the registry injects only what it finds in the signature.
 
 ---
 
