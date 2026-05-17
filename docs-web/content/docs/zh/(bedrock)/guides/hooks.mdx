@@ -174,7 +174,7 @@ def on_load(*, app) -> None:
 ## 校验与自省
 
 ```python
-warnings = auth_hooks._registry.validate()
+warnings = auth_hooks.validate()
 impls = auth_hooks.get_impls("authenticate")
 spec_names = auth_hooks.specs()
 ```

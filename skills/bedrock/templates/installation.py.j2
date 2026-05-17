@@ -3,9 +3,6 @@
 This file is optional — delete it if the module is not installable.
 """
 
-from bedrock.module import AppConfig, ModuleRegistry
-
-
 def pre_install() -> None:
     """Run before database migrations."""
     pass
@@ -24,4 +21,3 @@ def post_install() -> None:
 def uninstall() -> None:
     """Run during module uninstall."""
     pass
-
