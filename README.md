@@ -28,9 +28,13 @@ What's still planned:
 
 ```bash
 # Clone and install locally (not yet published to PyPI)
-git clone <repo-url>
-cd bedrock
+git clone https://github.com/maacck/bedrock-py.git
+cd bedrock-py
 uv sync
+
+# You can also install in editable mode for development:
+# uv add "bedrock-core @ git+https://github.com/maacck/bedrock-py#subdirectory=packages/bedrock
+
 
 # Verify
 uv run bedrock -v

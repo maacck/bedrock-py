@@ -18,8 +18,9 @@ Bedrock 支持多种 Python 包管理器。选择最适合你工作流的那一�
 
 ## 安装 Bedrock
 
-<Tabs items={['uv', 'pip', 'poetry']}>
+<Tabs items={['uv', 'uv (GitHub)', 'pip', 'poetry']}>
   <Tab value="uv"><CodeBlock code={'uv add bedrock-core'} lang={'bash'} /></Tab>
+  <Tab value="uv (GitHub)"><CodeBlock code={'uv add "bedrock-core @ git+https://github.com/maacck/bedrock-py#subdirectory=packages/bedrock"'} lang={'bash'} /></Tab>
   <Tab value="pip"><CodeBlock code={'pip install bedrock-core'} lang={'bash'} /></Tab>
   <Tab value="poetry"><CodeBlock code={'poetry add bedrock-core'} lang={'bash'} /></Tab>
 
