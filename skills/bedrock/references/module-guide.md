@@ -340,6 +340,26 @@ class PostgresUserRepo:
     ...
 ```
 
+For normal Bedrock modules, prefer the default global container shown above.
+Reach for a custom `Container()` only when you need an isolated registration
+graph, such as tests or sandboxed plugin execution.
+
+```python
+from bedrock.di import Container, Lifetime
+
+custom = Container()
+
+
+@custom.provider(IUserRepo, lifetime=Lifetime.SINGLETON)
+class SandboxUserRepo:
+    ...
+
+
+@custom.inject(repo=IUserRepo)
+def run_preview(*, repo: IUserRepo) -> None:
+    ...
+```
+
 ### Resolving Services
 
 ```python

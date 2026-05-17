@@ -33,6 +33,13 @@ from bedrock.di import Container, Lifetime, container, provider, inject
 |------|------|--------|
 | `container` | `Container` | `from bedrock.di import container` |
 
+### Default vs custom container
+
+- Prefer the default `container` for normal module/application wiring
+- Create `Container()` manually only when you need an isolated service graph
+- Good custom-container scenarios: tests, sandboxes, plugin isolation, short-lived worker flows
+- If you do not need isolation, stay on the default container for consistency with Bedrock bootstrap injection
+
 ---
 
 ## Lifetimes
@@ -81,6 +88,16 @@ Register a pre-built object as a singleton.
 ```python
 config = {"region": "ap-southeast-1"}
 container.register_instance("app.config", config)
+```
+
+### Registering into a custom container
+
+```python
+from bedrock.di import Container, Lifetime
+
+custom = Container()
+custom.register(InventoryService, factory=InventoryService, lifetime=Lifetime.SINGLETON)
+custom.register_instance("app.config", {"region": "sandbox"})
 ```
 
 ### Duplicate registration
@@ -176,7 +193,7 @@ with container.override(Mailer, FakeMailer()):
 
 ### `@provider`
 
-Register a class in the global container.
+Register a class in the default global container.
 
 ```python
 from bedrock.di import Lifetime, provider
@@ -188,9 +205,35 @@ class AuditService:
         print(message)
 ```
 
+### `custom.provider`
+
+Bind decorator-based registration to a specific custom container.
+
+```python
+from bedrock.di import Container, Lifetime
+
+custom = Container()
+
+
+class AuditService:
+    def write(self, message: str) -> None:
+        print(message)
+
+
+@custom.provider(lifetime=Lifetime.SINGLETON)
+class CustomAuditService(AuditService):
+    pass
+
+
+@custom.provider("audit.name")
+class AuditName:
+    def __str__(self) -> str:
+        return "sandbox"
+```
+
 ### `@inject(**mappings)`
 
-Resolve named keyword-only dependencies from the global container.
+Resolve named keyword-only dependencies from the default global container.
 
 ```python
 from bedrock.di import inject
@@ -207,6 +250,25 @@ def send_welcome(user_email: str, *, mailer: Mailer) -> None:
 ```
 
 Explicit kwargs override injected values.
+
+### `custom.inject(**mappings)`
+
+Resolve dependencies from a specific custom container only.
+
+```python
+from bedrock.di import Container
+
+custom = Container()
+custom.register_instance(Mailer, Mailer())
+
+
+@custom.inject(mailer=Mailer)
+def send_preview(user_email: str, *, mailer: Mailer) -> None:
+    mailer.send(user_email, "Preview", "Hello")
+```
+
+The top-level `provider` and `inject` exports remain aliases for the default
+global container.
 
 ---
 
@@ -262,6 +324,7 @@ Available DI fixtures:
 - Do not register unrelated services eagerly at import time
 - Do not use DI where direct local construction is clearer
 - Do not use `SCOPED` without a real scope boundary
+- Do not introduce a custom `Container()` unless isolation is part of the requirement
 
 ---
 
