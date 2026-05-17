@@ -2,6 +2,8 @@
 
 Blinker-derived event system with sync/async support and lifecycle signals. Implementation: `bedrock.signal`.
 
+> **Need call/response with return values?** Use the hook system (`bedrock.hooks`) instead. Signals are notification-only.
+
 ## Table of Contents
 
 1. [Creating Signals](#creating-signals)
@@ -11,8 +13,9 @@ Blinker-derived event system with sync/async support and lifecycle signals. Impl
 5. [Context Managers](#context-managers)
 6. [Lifecycle Signals](#lifecycle-signals)
 7. [Weak References](#weak-references)
-8. [Critical Pitfall: Async Receivers with Sync Send](#critical-pitfall-async-receivers-with-sync-send)
-9. [Anti-Patterns](#anti-patterns)
+8. [Sync/Async Interop](#syncasync-interop)
+9. [Signals vs Hooks](#signals-vs-hooks)
+10. [Anti-Patterns](#anti-patterns)
 
 ---
 
@@ -130,7 +133,12 @@ user_created.disconnect(log_user, sender=admin_module)
 
 ### `signal.send(sender, **kwargs)`
 
-Synchronous dispatch. Returns `list[tuple[receiver, return_value]]`:
+Sync-facing dispatch. Behavior depends on whether an event loop is running:
+
+- **Pure sync context (no running event loop):** Adapts async receivers automatically (using the default `asgiref` bridge).
+- **Inside a running event loop:** Raises `RuntimeError` if an async receiver is reached. Use `await signal.asend(...)` or provide `_async_wrapper`.
+
+Returns `list[tuple[receiver, return_value]]`:
 
 ```python
 results = order_placed.send(current_app, order_id="ORD-042")
@@ -157,7 +165,7 @@ Note: `BaseException` subclasses (e.g. `KeyboardInterrupt`) still propagate.
 
 ### `await signal.asend(sender, **kwargs)`
 
-Async dispatch. Awaits async receivers natively. Sync receivers are wrapped via `asyncio.to_thread` by default:
+Async dispatch. Canonical API for async and mixed-context code. Awaits async receivers natively. Sync receivers are wrapped via `asyncio.to_thread` by default:
 
 ```python
 results = await order_placed.asend(current_app, order_id="ORD-042")
@@ -173,10 +181,10 @@ results = await order_placed.asend_robust(current_app, order_id="ORD-042")
 
 ### Custom Wrappers
 
-Both sync and async methods accept optional wrapper arguments for adapting receiver execution:
+Override how `send()` adapts async receivers by passing `_async_wrapper`:
 
-- `send()` / `send_robust()`: `_async_wrapper` parameter to adapt async receivers to sync.
-- `asend()` / `asend_robust()`: `_sync_wrapper` parameter to adapt sync receivers to async (defaults to `asyncio.to_thread`).
+- `send()` / `send_robust()`: `_async_wrapper` parameter to customize async-to-sync adaptation.
+- `asend()` / `asend_robust()`: `_sync_wrapper` parameter to customize sync-to-async adaptation (defaults to `asyncio.to_thread`).
 
 ---
 
@@ -377,9 +385,14 @@ if order_placed.receivers:
 
 ---
 
-## Critical Pitfall: Async Receivers with Sync Send
+## Sync/Async Interop
 
-Calling `signal.send()` when an async receiver is connected raises `RuntimeError`:
+`send()` is a sync-facing API. Its behavior depends on whether an event loop is running:
+
+- **Pure sync context (no running event loop):** `send()` can adapt async receivers automatically (using the default `asgiref` bridge).
+- **Inside a running event loop:** If `send()` encounters an async receiver, it raises `RuntimeError` instructing you to use `await signal.asend(...)` or provide `_async_wrapper`.
+
+`asend()` is the canonical API for async and mixed-context code. It natively awaits async receivers and wraps sync receivers via `asyncio.to_thread`.
 
 ```python
 from bedrock.signal import Signal
@@ -391,7 +404,7 @@ async def async_handler(sender, **kwargs):
 
 order_placed.connect(async_handler, weak=False)
 
-# THIS RAISES RuntimeError!
+# In a running event loop — THIS RAISES RuntimeError!
 order_placed.send(app, order_id="ORD-001")
 # RuntimeError: Cannot send to an async receiver with send().
 # Use await signal.asend(...) or provide _async_wrapper.
@@ -404,9 +417,60 @@ await order_placed.asend(app, order_id="ORD-001")
 
 ---
 
+## Signals vs Hooks
+
+Bedrock offers two distinct mechanisms for cross-module communication:
+
+| Aspect | Signals (`bedrock.signal`) | Hooks (`bedrock.hooks`) |
+|--------|---------------------------|------------------------|
+| **Pattern** | Notification (fire-and-forget) | Call/response (returns values) |
+| **Return values** | Ignored by sender | Collected and returned to caller |
+| **Ordering** | Unspecified (set-based) | Priority-sorted (lower runs first) |
+| **Short-circuit** | No | `firstresult=True` stops after first non-None result |
+| **Registration** | `signal.connect(receiver)` | `@hookimpl` decorator or `ns.impl()` |
+| **Dispatch** | `signal.send()` / `signal.asend()` | `hooks.call(fqn)` / `hooks.acall(fqn)` |
+| **Best for** | Lifecycle events, loose coupling | Extension points, middleware chains |
+
+**Use signals when** you want to notify listeners about something that happened, and you don't care about return values. Example: "a user was created, update your cache."
+
+**Use hooks when** you want to define an extension point where implementations contribute behavior or return values. Example: "authenticate this request, first valid result wins."
+
+```python
+# SIGNAL: notification only
+from bedrock.signal import Signal
+user_created = Signal("user_created")
+
+@user_created.connect
+def on_user_created(sender, **kwargs):
+    send_welcome_email(kwargs["user"])  # Fire-and-forget
+
+user_created.send(sender, user=new_user)
+
+
+# HOOK: call/response with return values
+from bedrock.hooks import HookNamespace
+auth = HookNamespace("auth")
+
+@auth.spec(firstresult=True)
+def authenticate(request):
+    """Return user if authenticated, None otherwise."""
+
+@auth.impl(priority=10)
+def check_token(request):
+    if valid_token(request.token):
+        return get_user_from_token(request.token)
+    return None  # Let next impl try
+
+request = Request(token="...")
+results = auth.call("authenticate", request=request)
+user = results[0] if results else None
+```
+
+---
+
 ## Anti-Patterns
 
-**Don't mix `send()` and async receivers.** Raises `RuntimeError`. Use `asend()` in codebases with async receivers, or guard with `has_receivers_for()` plus type checks.
+**Don't call `send()` from async code when async receivers are connected.** Raises `RuntimeError`. Use `await signal.asend()` instead, or pass `_async_wrapper` to provide custom adaptation logic.
 
 **Don't rely on receiver execution order.** The default `set_class` is Python's unordered `set`. If ordered dispatch is needed, provide an ordered set implementation via `Signal.set_class`.
 

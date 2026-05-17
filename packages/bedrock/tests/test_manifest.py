@@ -95,7 +95,7 @@ class TestLoadBootstrap:
             fake_package,
             "boot_mod",
             manifest={"title": "Boot", "version": "1"},
-            bootstrap="def on_load(registry, app): pass\n",
+            bootstrap="def on_load(*, registry, app): pass\n",
         )
 
         result = load_bootstrap("boot_mod")
@@ -142,7 +142,7 @@ class TestBuildAppConfig:
             fake_package,
             "full_mod",
             manifest={"title": "Full", "version": "2.0.0"},
-            bootstrap="def ready(r, a): pass\n",
+            bootstrap="def ready(*, registry, app): pass\n",
             models="y = 2\n",
         )
 

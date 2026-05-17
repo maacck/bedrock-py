@@ -57,11 +57,13 @@ Same business logic works from FastAPI routes, Celery tasks, or CLI commands.
 |-----------|-------|--------|
 | `apps` | `ModuleRegistry` | `from bedrock.module import apps` |
 | `db` | `DatabaseManager` | `from bedrock.database import db` |
+| `container` | `Container` | `from bedrock.di import container` |
+| `hooks` | `HookRegistry` | `from bedrock.hooks import hooks` |
 
 ### Initialization Sequence
 
 ```
-import time → apps exists (empty), db exists (unconfigured)
+import time → apps exists (empty), db exists (unconfigured), container exists, hooks exists
     ↓
 bedrock.setup() → apps.populate(module_list)
     ↓
@@ -69,12 +71,40 @@ on_load hooks → modules call db.init(url) if needed
     ↓
 apps.mark_ready() → ready hooks fire
     ↓
+hooks.validate() → warn about orphaned impls or empty specs
+    ↓
 registry_ready signal emitted
 ```
 
 ### Shutdown
 
 Reverse install order: each module's `on_shutdown` hook runs, then `registry_shutdown` signal fires. Close connections and release resources here.
+
+---
+
+## Runtime Primitives
+
+### DI Container (`bedrock.di`)
+
+A lightweight dependency injection container with three lifetimes: `SINGLETON`, `TRANSIENT`, and `SCOPED`. Thread-safe singleton resolution via double-checked locking.
+
+- **`container.register(key, factory=..., lifetime=...)`** — Register a service factory.
+- **`container.resolve(key)`** — Resolve by type or string key.
+- **`container.scope(name)`** — Context manager for scoped services.
+- **`container.override(key, instance)`** — Context manager for test doubles.
+- **`@provider`** / **`@inject(**mappings)`** — Decorator shortcuts.
+
+The container is injected into bootstrap hooks that declare a `container` parameter.
+
+### Hook System (`bedrock.hooks`)
+
+Structured call/response protocol for multi-implementation extension points. Unlike signals (notification-only), hooks return values and support priority ordering and `firstresult` short-circuit.
+
+- **`@hookspec`** / **`@hookimpl(priority=0)`** — Marker decorators for global registration.
+- **`HookNamespace(name)`** — Module-facing scoped API: `ns.spec()`, `ns.impl()`, `ns.call()`, `ns.acall()`.
+- **`hooks.call(fqn, **kwargs)`** / **`hooks.acall(fqn, **kwargs)`** — Dispatch to all implementations.
+
+The hook registry is injected into bootstrap hooks that declare a `hooks` parameter.
 
 ---
 

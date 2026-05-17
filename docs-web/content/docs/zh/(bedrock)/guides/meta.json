@@ -1,6 +1,16 @@
 {
   "title": "指南",
   "icon": "",
-  "pages": ["module-anatomy", "module-hierarchy", "playbooks", "cli", "database", "cache", "signals"],
+  "pages": [
+    "module-anatomy",
+    "module-hierarchy",
+    "playbooks",
+    "cli",
+    "database",
+    "cache",
+    "signals",
+    "di",
+    "hooks"
+  ],
   "defaultOpen": true
 }

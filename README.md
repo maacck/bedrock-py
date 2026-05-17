@@ -11,6 +11,8 @@ Framework-agnostic core — no HTTP dependency in the runtime.
 What exists today:
 
 - Module registry with dependency resolution and lifecycle hooks
+- Dependency injection container with singleton/transient/scoped lifetimes
+- Hook system for structured call/response extension points (sync, async, robust)
 - SQLAlchemy 2.0 database layer with Alembic migrations
 - Cache system with memory and Redis.
 - Signal/event system (inspired by Blinker)
@@ -101,18 +103,68 @@ commands: "commands:app"  # Optional: Typer app for CLI integration
 
 **Lifecycle hooks** (in `bootstrap.py`):
 
+Bedrock always calls bootstrap hooks with keyword arguments. Hooks should explicitly declare the named parameters they need using keyword-only signatures:
+
 ```python
-def on_load():
-    """Called when module is first loaded."""
+def on_load(*, registry, app):
+    """Called when module is first loaded.
+    registry=ModuleRegistry, app=AppConfig
+    """
     pass
 
-def ready():
+def ready(*, registry, app):
     """Called when all modules are loaded and ready."""
     pass
 
-def on_shutdown():
+def on_shutdown(*, registry, app):
     """Called during graceful shutdown."""
     pass
+```
+
+Available named parameters (`registry`, `app`, `container`, `hooks`) are injected by the registry based on what each hook declares:
+
+```python
+def on_load(*, registry, app, container, hooks):
+    """All four parameters available: registry, app, container, hooks"""
+    pass
+```
+
+### Dependency injection
+
+Lightweight DI container with three service lifetimes:
+
+```python
+from bedrock.di import container, provider, inject, Lifetime
+
+@provider
+class MyService:
+    pass
+
+@inject(svc=MyService)
+def do_work(*, svc):
+    svc.do_something()
+
+# Override for tests
+with container.override(MyService, FakeService()):
+    do_work()
+```
+
+### Hook system
+
+Structured extension points where modules declare specs and register implementations:
+
+```python
+from bedrock.hooks import hooks
+
+ns = hooks.namespace("auth")
+
+@ns.spec
+def authenticate(user, password): ...
+
+@ns.impl(priority=10)
+def check_password(user, password): ...
+
+ns.call("authenticate", user="alice", password="s3cret")
 ```
 
 ### Database layer

@@ -8,7 +8,9 @@
     "cli",
     "database",
     "cache",
-    "signals"
+    "signals",
+    "di",
+    "hooks"
   ],
   "defaultOpen": true
 }

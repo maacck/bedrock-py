@@ -3,24 +3,21 @@
 This file is optional — delete it if the module is not installable.
 """
 
-from __future__ import annotations
-
-from bedrock.module import AppConfig, ModuleRegistry
-
-
-def pre_install(**kwargs):
+def pre_install() -> None:
+    """Run before database migrations."""
     pass
 
 
-def install(**kwargs):
+def install() -> None:
+    """Run after migrations — seed data, etc."""
     pass
 
 
-def post_install(**kwargs):
+def post_install() -> None:
+    """Run after install()."""
     pass
 
 
-
-def uninstall(**kwargs):
+def uninstall() -> None:
+    """Run during module uninstall."""
     pass
-
