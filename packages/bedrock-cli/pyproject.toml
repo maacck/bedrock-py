@@ -21,8 +21,10 @@ dev = [
 
 
 [project.urls]
+Homepage = "https://bedrock-py.com/docs/bedrock-cli"
+Repository = "https://github.com/maacck/bedrock-py"
 Documentation = "https://bedrock-py.com"
-Source = "https://github.com/maacck/bedrock-py/"
+"Bug Tracker" = "https://github.com/maacck/bedrock-py/issues"
 
 
 [project.scripts]
