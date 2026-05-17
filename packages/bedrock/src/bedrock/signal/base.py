@@ -148,7 +148,7 @@ class Signal:
         if "receiver_connected" in self.__dict__ and self.receiver_connected.receivers:
             try:
                 self.receiver_connected.send(self, receiver=receiver, sender=sender, weak=weak)
-            except Exception:
+            except (TypeError, RuntimeError):
                 self.disconnect(receiver, sender)
                 raise
 

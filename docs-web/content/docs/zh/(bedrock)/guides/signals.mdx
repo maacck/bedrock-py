@@ -400,10 +400,11 @@ results = order_placed.send(app, _async_wrapper=my_async_wrapper, order_id="ORD-
 
 类似地，`asend()` 接受 `_sync_wrapper` 参数，用于覆盖同步接收器的适配方式（默认：`asyncio.to_thread`）。
 
-### 关键陷阱：异步接收器配合同步发送
+### 在事件 loop 中使用 `send()` 时的限制
 
 <Callout type="error">
-在运行中的事件 loop 内调用 `signal.send()` 并遇到异步接收器时，会抛出 `RuntimeError`。如果任一接收器可能是异步的，你**必须**使用 `await signal.asend()` 或提供 `_async_wrapper`。
+`send()` 在普通同步上下文下会自动适配异步接收器。  
+但如果当前线程已有运行中的事件 loop，且命中了异步接收器，`send()` 会抛出 `RuntimeError`。此时请使用 `await signal.asend()` 或提供 `_async_wrapper`。
 </Callout>
 
 ```python
