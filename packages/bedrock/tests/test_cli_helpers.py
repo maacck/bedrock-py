@@ -10,7 +10,7 @@ import bedrock.cli.apps as cli_apps
 import bedrock.cli.run as cli_run
 import pytest
 import typer
-from bedrock.module.exc import InvalidModuleCallableError
+from bedrock.module.exc import InvalidManifestError, InvalidModuleCallableError
 
 
 class TestRunHelperParsing:
@@ -279,3 +279,140 @@ class TestInstallCommand:
 
         with pytest.raises(typer.Exit):
             cli_apps.install("demo.app", skip_migrations=False)
+
+
+class TestPlaybookCommand:
+    """Tests for the ``bedrock app playbook`` command."""
+
+    class _ConsoleDouble:
+        """Lightweight console spy for capturing printed output."""
+
+        instances: list[TestPlaybookCommand._ConsoleDouble] = []
+
+        def __init__(self) -> None:
+            self.messages: list[tuple[tuple[object, ...], dict[str, object]]] = []
+            self.__class__.instances.append(self)
+
+        def print(self, *args: object, **kwargs: object) -> None:
+            self.messages.append((args, kwargs))
+
+    @staticmethod
+    def _make_app_config(package_dir: Path) -> SimpleNamespace:
+        return SimpleNamespace(package_dir=package_dir)
+
+    def _patch_console(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._ConsoleDouble.instances.clear()
+        monkeypatch.setattr(cli_apps, "Console", self._ConsoleDouble)
+
+    def _latest_messages(self) -> list[tuple[tuple[object, ...], dict[str, object]]]:
+        return self._ConsoleDouble.instances[-1].messages
+
+    def test_playbook_reads_default_file(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        package_dir = tmp_path / "demo_app"
+        playbook_dir = package_dir / "playbook"
+        playbook_dir.mkdir(parents=True)
+        (playbook_dir / "PLAYBOOK.md").write_text("default playbook\n", encoding="utf-8")
+
+        self._patch_console(monkeypatch)
+        monkeypatch.setattr(cli_apps, "build_app_config", lambda import_path: self._make_app_config(package_dir))
+
+        cli_apps.playbook("demo.app")
+
+        messages = self._latest_messages()
+        assert messages == [(("default playbook\n",), {"markup": False, "highlight": False, "end": ""})]
+
+    def test_playbook_reads_referenced_file(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        package_dir = tmp_path / "demo_app"
+        playbook_dir = package_dir / "playbook" / "references"
+        playbook_dir.mkdir(parents=True)
+        (playbook_dir / "some-file.md").write_text("referenced playbook\n", encoding="utf-8")
+
+        self._patch_console(monkeypatch)
+        monkeypatch.setattr(cli_apps, "build_app_config", lambda import_path: self._make_app_config(package_dir))
+
+        cli_apps.playbook("demo.app", "references/some-file.md")
+
+        messages = self._latest_messages()
+        assert messages == [(("referenced playbook\n",), {"markup": False, "highlight": False, "end": ""})]
+
+    @pytest.mark.parametrize(
+        ("path", "expected_message"),
+        [
+            ("/tmp/PLAYBOOK.md", "Playbook path must be relative to the module's playbook directory."),
+            ("../PLAYBOOK.md", "Playbook path must not contain parent directory traversal."),
+        ],
+    )
+    def test_playbook_rejects_invalid_paths(
+        self,
+        path: str,
+        expected_message: str,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        package_dir = tmp_path / "demo_app"
+        (package_dir / "playbook").mkdir(parents=True)
+
+        self._patch_console(monkeypatch)
+        monkeypatch.setattr(cli_apps, "build_app_config", lambda import_path: self._make_app_config(package_dir))
+
+        with pytest.raises(typer.Exit) as exc_info:
+            cli_apps.playbook("demo.app", path)
+
+        assert exc_info.value.exit_code == 1
+        assert self._latest_messages() == [((f"[bold red]Error:[/bold red] {expected_message}",), {})]
+
+    def test_playbook_raises_for_missing_module(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._patch_console(monkeypatch)
+        monkeypatch.setattr(
+            cli_apps,
+            "build_app_config",
+            lambda import_path: (_ for _ in ()).throw(
+                InvalidManifestError("Cannot locate package for import path 'demo.app'.")
+            ),
+        )
+
+        with pytest.raises(typer.Exit) as exc_info:
+            cli_apps.playbook("demo.app")
+
+        assert exc_info.value.exit_code == 1
+        assert self._latest_messages() == [
+            (("[bold red]Error:[/bold red] Cannot locate package for import path 'demo.app'.",), {})
+        ]
+
+    def test_playbook_raises_when_playbook_dir_is_missing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        package_dir = tmp_path / "demo_app"
+        package_dir.mkdir()
+
+        self._patch_console(monkeypatch)
+        monkeypatch.setattr(cli_apps, "build_app_config", lambda import_path: self._make_app_config(package_dir))
+
+        with pytest.raises(typer.Exit) as exc_info:
+            cli_apps.playbook("demo.app")
+
+        assert exc_info.value.exit_code == 1
+        assert self._latest_messages() == [
+            ((f"[bold red]Error:[/bold red] Missing playbook directory at '{package_dir / 'playbook'}'.",), {})
+        ]
+
+    def test_playbook_raises_when_file_is_missing(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        package_dir = tmp_path / "demo_app"
+        playbook_dir = package_dir / "playbook"
+        playbook_dir.mkdir(parents=True)
+
+        self._patch_console(monkeypatch)
+        monkeypatch.setattr(cli_apps, "build_app_config", lambda import_path: self._make_app_config(package_dir))
+
+        with pytest.raises(typer.Exit) as exc_info:
+            cli_apps.playbook("demo.app", "references/missing.md")
+
+        assert exc_info.value.exit_code == 1
+        assert self._latest_messages() == [
+            (
+                (
+                    f"[bold red]Error:[/bold red] Missing playbook file at '{playbook_dir / 'references' / 'missing.md'}'.",
+                ),
+                {},
+            )
+        ]

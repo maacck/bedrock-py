@@ -106,49 +106,25 @@ This command is currently a placeholder. Use `bedrock manage install` for full i
 
 ### `bedrock app playbook`
 
-Read a module's playbook documentation.
+Read documentation from a module's playbook directory.
 
 ```bash
-bedrock app playbook <import_path>
+bedrock app playbook <module> [path]
 ```
 
-Playbooks are AI-readable documentation stored in `playbook/PLAYBOOK.md` inside the module package. See [Playbooks](./playbooks) for details.
-
-**Example:**
-
-```bash
-$ bedrock app playbook myapp.auth
-
-# Auth Module
-
-Authentication and authorization for Bedrock applications.
-
-## Quick Start
-...
-```
-
----
-
-### `bedrock app playbook-ref`
-
-Read a reference file from a module's playbook.
-
-```bash
-bedrock app playbook-ref <import_path> <filename>
-```
-
-**Arguments:**
-- `import_path` — Module import path
-- `filename` — Path relative to `playbook/` directory
+Without a path, prints `playbook/PLAYBOOK.md`. With a path, prints the specified file from the `playbook/` directory. Playbooks are AI-readable documentation stored inside the module package. See [Playbooks](./playbooks) for details.
 
 **Examples:**
 
 ```bash
-# Read architecture docs
-bedrock app playbook-ref myapp.auth references/architecture.md
+# Read the main playbook
+bedrock app playbook myapp.auth
+
+# Read a reference file
+bedrock app playbook myapp.auth references/architecture.md
 
 # Read code examples
-bedrock app playbook-ref myapp.auth examples/login-flow.py
+bedrock app playbook myapp.auth examples/login-flow.py
 ```
 
 **Security:** Path traversal attempts (e.g., `../`) are blocked.

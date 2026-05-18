@@ -81,7 +81,7 @@ AI agents 通过 CLI 读取 playbook：
 
 ```bash
 bedrock app playbook myapp.auth           # Read the main playbook
-bedrock app playbook-ref myapp.auth references/api-reference.md  # Read references
+bedrock app playbook myapp.auth references/api-reference.md  # Read references
 ```
 
 ## 何时编写 Playbook
@@ -167,13 +167,13 @@ Check if user has a specific permission.
 # Read main playbook
 bedrock app playbook <module_import_path>
 
-# Read reference files
-bedrock app playbook-ref <module_import_path> <filename>
+# Read a reference file
+bedrock app playbook <module_import_path> <filename>
 
 # Examples
 bedrock app playbook myapp.auth
-bedrock app playbook-ref myapp.auth references/api-reference.md
-bedrock app playbook-ref myapp.auth examples/login-flow.py
+bedrock app playbook myapp.auth references/api-reference.md
+bedrock app playbook myapp.auth examples/login-flow.py
 ```
 
 ## Playbook 与 Agent Skills
