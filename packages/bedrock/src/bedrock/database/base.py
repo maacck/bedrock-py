@@ -77,7 +77,8 @@ class BedrockModel(DeclarativeBase, CrudMixin):
     def _pks_columns(self) -> list[str]:
         return [col.name for col in self.__table__.primary_key.columns]
 
-    def get_primary_keys(self) -> list[str]:
+    @classmethod
+    def get_primary_keys(cls) -> list[str]:
         """Return the names of the primary-key columns.
 
         This is the public counterpart of the ``_pks_columns`` property.
@@ -85,7 +86,7 @@ class BedrockModel(DeclarativeBase, CrudMixin):
         Returns:
             A list of column-name strings that form the primary key.
         """
-        return [col.name for col in self.__table__.primary_key.columns]
+        return [col.name for col in cls.__table__.primary_key.columns]
 
     @property
     def _id_str(self) -> str:
