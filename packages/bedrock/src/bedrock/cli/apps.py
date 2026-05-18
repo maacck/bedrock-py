@@ -373,6 +373,7 @@ def install(
     from bedrock.module import apps
 
     console = Console()
+    apps.populate([import_path])
 
     try:
         app_config = apps.get(import_path)
