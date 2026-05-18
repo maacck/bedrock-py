@@ -92,33 +92,22 @@ Checks: manifest.yaml validity, bootstrap.py importability, models.py importabil
 
 ## bedrock app playbook
 
-Print a module's playbook/README.md to stdout.
+Read documentation from a module's playbook/ directory.
 
 ```bash
-bedrock app playbook <import_path>
+bedrock app playbook <module> [path]
 ```
 
-**Example**: `bedrock app playbook myapp.users`
-
-Reads `playbook/README.md` from the module package directory. Useful for AI agents learning how to use a module.
-
----
-
-## bedrock app playbook-ref
-
-Print a file from a module's playbook/ directory to stdout.
-
-```bash
-bedrock app playbook-ref <import_path> <filename>
-```
+Without a path, prints `playbook/PLAYBOOK.md` to stdout. With a path, prints the specified file from the `playbook/` directory. Path traversal is blocked for security.
 
 **Examples**:
 ```bash
-bedrock app playbook-ref myapp.users references/architecture.md
-bedrock app playbook-ref myapp.users references/templates/example.py
+bedrock app playbook myapp.users
+bedrock app playbook myapp.users references/architecture.md
+bedrock app playbook myapp.users references/templates/example.py
 ```
 
-Reads files from the module's `playbook/` directory. Path traversal is blocked for security.
+Useful for AI agents learning how to use a module.
 
 ---
 

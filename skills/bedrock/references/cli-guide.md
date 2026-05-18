@@ -93,32 +93,22 @@ Checks: manifest.yaml validity, bootstrap.py importability, models.py importabil
 
 ## bedrock app playbook
 
-Read documentation for external modules (installed from pip).
+Read documentation from a module's playbook.
 
 ```bash
-bedrock app playbook <module>
+bedrock app playbook <module> [path]
 ```
 
-**Example**: `bedrock app playbook external_bedrock_module`
-
-Use this when your module `depends_on` an external module and you need to understand its API.
-
----
-
-## bedrock app playbook-ref
-
-Read reference files from a module's playbook.
-
-```bash
-bedrock app playbook-ref <module> <reference_path>
-bedrock app playbook-ref <module>  # list all reference files
-```
+Without a path, prints `playbook/PLAYBOOK.md`. With a path, prints the specified file from the `playbook/` directory. Path traversal is blocked for security.
 
 **Examples**:
 ```bash
-bedrock app playbook-ref external_bedrock_module
-bedrock app playbook-ref external_bedrock_module api-reference.md
+bedrock app playbook myapp.auth
+bedrock app playbook myapp.auth references/api-reference.md
+bedrock app playbook myapp.auth examples/login-flow.py
 ```
+
+Use this when your module `depends_on` an external module and you need to understand its API.
 
 ---
 

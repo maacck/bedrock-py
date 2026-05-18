@@ -612,13 +612,13 @@ Keep it concise. Agents scan quickly; they don't need prose. Show code over expl
 # Read the main playbook
 bedrock app playbook <module_import_path>
 
-# Read reference files
-bedrock app playbook-ref <module_import_path> <filename>
+# Read a reference file
+bedrock app playbook <module_import_path> <filename>
 
 # Examples
 bedrock app playbook myapp.auth
-bedrock app playbook-ref myapp.auth references/api-reference.md
-bedrock app playbook-ref myapp.auth examples/usage.py
+bedrock app playbook myapp.auth references/api-reference.md
+bedrock app playbook myapp.auth examples/usage.py
 ```
 
 ### Playbook vs Agent Skills
