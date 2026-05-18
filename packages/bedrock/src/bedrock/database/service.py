@@ -181,7 +181,7 @@ def build_query(
 def search_filter_sort_paginate(
     *,
     db_session: Session,
-    model: Any,
+    model: type[BedrockModel],
     limit: int = 10,
     page: int = 1,
     sort_dir: str | None = None,

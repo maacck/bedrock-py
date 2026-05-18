@@ -33,7 +33,7 @@ uv add bedrock-core
 # Or install from source for local development
 git clone https://github.com/maacck/bedrock-py.git
 cd bedrock-py
-uv sync
+uv sync --all-packages
 
 # Verify
 uv run bedrock -v

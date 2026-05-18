@@ -21,8 +21,6 @@ script falls back to the full shared metadata so that manual inspections still
 work.
 """
 
-from __future__ import annotations
-
 import types
 from logging.config import fileConfig
 from typing import TYPE_CHECKING
