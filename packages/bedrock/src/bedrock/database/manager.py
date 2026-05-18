@@ -4,13 +4,16 @@ from contextlib import contextmanager
 from sqlalchemy import Engine
 from sqlalchemy.orm import Session
 
+from ..exc import ImproperlyConfigured
 from .config import DbSettings
 from .connection import build_session_local_from_settings
 from .session_factory import SessionFactory
 
 
-class DatabaseNotConfiguredError(RuntimeError):
+class DatabaseNotConfiguredError(ImproperlyConfigured):
     """Raised when database access is attempted before initialization."""
+
+    detail: str = "Database is not configured. Call db.init() first."
 
 
 class DatabaseManager:

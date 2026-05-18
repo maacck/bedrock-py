@@ -24,8 +24,14 @@ def _parse_args_for_app(args: list[str]) -> str | None:
 
 
 def _parse_run_args_for_app(argv: list[str]) -> str | None:
-    """Scan *argv* for the first ``--app`` value that appears after ``run``."""
+    """Scan *argv* for the app name that appears after ``run``.
+
+    Supports both positional style (``bedrock run my_app my_command``) and
+    flag style (``bedrock run --app my_app my_command``). Explicit flags
+    take precedence over positional arguments.
+    """
     run_seen = False
+    positional_app: str | None = None
     for i, arg in enumerate(argv):
         if arg == "run":
             run_seen = True
@@ -37,7 +43,9 @@ def _parse_run_args_for_app(argv: list[str]) -> str | None:
                 return arg.split("=", 1)[1]
             if arg.startswith("-a="):
                 return arg.split("=", 1)[1]
-    return None
+            if positional_app is None and not arg.startswith("-"):
+                positional_app = arg
+    return positional_app
 
 
 class _AppCommandGroup(TyperGroup):

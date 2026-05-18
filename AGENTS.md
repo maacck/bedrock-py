@@ -22,7 +22,7 @@ Python monorepo for Bedrock modular framework. `uv` workspaces, `src/` layout.
 
 ```bash
 # Setup
-uv sync
+uv sync --all-packages
 
 # Build
 uv build --all-packages
@@ -98,3 +98,17 @@ cd starlight-docs && npm run build  # Production build
 - Ruff config: `[tool.ruff]` in root `pyproject.toml`
 - Pytest: dev dependency, 4 test files, no conftest.py
 - No CI/CD pipelines, no Docker, no deployment scripts
+
+## Agent skills
+
+### Issue tracker
+
+GitHub Issues. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+5 canonical roles mapped to GitHub labels. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: `CONTEXT.md` + `docs/adr/` at repo root. See `docs/agents/domain.md`.

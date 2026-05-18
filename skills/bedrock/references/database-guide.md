@@ -232,7 +232,7 @@ bedrock db uninstall <app>
 Each app stores migrations alongside its code:
 
 ```
-modules/users/
+my_app/users/
 ├── migrations/
 │   ├── abc123_2025-01-15_add_users_table.py
 │   └── def456_2025-02-01_add_email_column.py

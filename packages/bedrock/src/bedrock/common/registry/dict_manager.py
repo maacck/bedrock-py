@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import importlib
 import logging
-from collections.abc import Iterable
+from collections.abc import ItemsView
 from typing import Any
 
 logger: logging.Logger = logging.getLogger(__name__)
@@ -101,7 +101,7 @@ class DictManager:
         """
         self.instances.update(instances)
 
-    def all(self) -> Iterable[str, str]:
+    def all(self) -> ItemsView[str, str]:
         """Return all registered name-to-path mappings.
 
         Returns:

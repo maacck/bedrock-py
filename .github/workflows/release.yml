@@ -17,14 +17,6 @@ jobs:
         with:
           enable-cache: true
 
-      - name: Extract release notes
-        id: notes
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          sed -n "/^## \[$VERSION\]/,/^## \[/p" CHANGELOG.md \
-            | sed '1d;$d' \
-            > release_notes.md
-
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
@@ -84,6 +76,13 @@ jobs:
         with:
           name: dist
           path: dist/
+
+      - name: Extract release notes
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          sed -n "/^## \[$VERSION\]/,/^## \[/p" CHANGELOG.md \
+            | sed '1d;$d' \
+            > release_notes.md
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3

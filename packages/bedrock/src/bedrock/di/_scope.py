@@ -3,6 +3,8 @@
 import contextvars
 from typing import Any
 
+from .exc import ScopeError
+
 
 class ScopeManager:
     """Manages the ContextVar-backed scope for SCOPED services.
@@ -64,11 +66,11 @@ class ScopeManager:
             value: The value to store.
 
         Raises:
-            RuntimeError: If no scope is currently active.
+            ScopeError: If no scope is currently active.
         """
         frame = self._scope_stack.get()
         if frame is None:
-            raise RuntimeError("No active scope")
+            raise ScopeError("No active scope")
         frame[key] = value
 
     @property

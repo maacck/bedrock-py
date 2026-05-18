@@ -59,15 +59,14 @@ from bedrock.contrib.cache import cache  # CacheService
 ## Module Structure
 
 ```
-modules/
-└── inventory/
-    ├── __init__.py
-    ├── manifest.yaml    # Module identity and dependencies
-    ├── models.py        # SQLAlchemy models (optional)
-    ├── entities.py      # Pydantic models for validation
-    ├── service.py       # Business logic
-    ├── exc.py           # Module exceptions
-    └── bootstrap.py     # Lifecycle hooks
+my_app/
+├── __init__.py
+├── manifest.yaml    # Module identity and dependencies
+├── models.py        # SQLAlchemy models (optional)
+├── entities.py      # Pydantic models for validation
+├── service.py       # Business logic
+├── exc.py           # Module exceptions
+└── bootstrap.py     # Lifecycle hooks
 ```
 
 ## Architecture

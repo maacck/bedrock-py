@@ -152,7 +152,7 @@ class TestPopulate:
         registry = ModuleRegistry()
         registry._loading = True  # simulate in-progress populate
 
-        with pytest.raises(RuntimeError, match="not reentrant"):
+        with pytest.raises(ModuleLifecycleError, match="not reentrant"):
             registry.populate(["reent"])
 
     def test_populate_resets_loading_flag_after_hook_failure(self, fake_package: Path) -> None:

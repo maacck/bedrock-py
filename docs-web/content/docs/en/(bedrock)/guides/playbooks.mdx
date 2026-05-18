@@ -77,7 +77,7 @@ AI agents read playbooks via CLI:
 
 ```bash
 bedrock app playbook myapp.auth           # Read the main playbook
-bedrock app playbook-ref myapp.auth references/api-reference.md  # Read references
+bedrock app playbook myapp.auth references/api-reference.md  # Read references
 ```
 
 ## When to Write a Playbook
@@ -160,13 +160,13 @@ Also, writing documentation for every module is a lot of work. Focus on playbook
 # Read main playbook
 bedrock app playbook <module_import_path>
 
-# Read reference files
-bedrock app playbook-ref <module_import_path> <filename>
+# Read a reference file
+bedrock app playbook <module_import_path> <filename>
 
 # Examples
 bedrock app playbook myapp.auth
-bedrock app playbook-ref myapp.auth references/api-reference.md
-bedrock app playbook-ref myapp.auth examples/login-flow.py
+bedrock app playbook myapp.auth references/api-reference.md
+bedrock app playbook myapp.auth examples/login-flow.py
 ```
 
 ## Playbook vs. Agent Skills
