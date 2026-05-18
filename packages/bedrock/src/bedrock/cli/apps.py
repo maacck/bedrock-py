@@ -6,6 +6,7 @@ import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from importlib.util import find_spec
+from pathlib import Path
 
 import typer
 from rich.console import Console
@@ -280,6 +281,70 @@ def _bootstrap_migrations_manager():
 
     database_url = DbSettings().SQLALCHEMY_DATABASE_URI
     return MigrationsManager(registry=apps, database_url=database_url)
+
+
+def _resolve_playbook_path(package_dir: Path, relative_path: str | None) -> Path:
+    """Resolve a module playbook file path from a package directory.
+
+    Args:
+        package_dir: Root package directory for the module.
+        relative_path: Optional relative path inside ``playbook/``.
+
+    Returns:
+        Absolute path to the requested playbook file.
+
+    Raises:
+        ValueError: If the provided path is absolute or uses parent traversal.
+        FileNotFoundError: If the playbook directory or target file is missing.
+    """
+    playbook_dir = package_dir / "playbook"
+    if not playbook_dir.is_dir():
+        raise FileNotFoundError(f"Missing playbook directory at '{playbook_dir}'.")
+
+    playbook_relative_path = Path(relative_path) if relative_path is not None else Path("PLAYBOOK.md")
+
+    if playbook_relative_path.is_absolute():
+        raise ValueError("Playbook path must be relative to the module's playbook directory.")
+
+    if ".." in playbook_relative_path.parts:
+        raise ValueError("Playbook path must not contain parent directory traversal.")
+
+    playbook_path = playbook_dir / playbook_relative_path
+    if not playbook_path.is_file():
+        raise FileNotFoundError(f"Missing playbook file at '{playbook_path}'.")
+
+    return playbook_path
+
+
+@apps.command()
+def playbook(
+    module: str = typer.Argument(..., help="Python import path of the module, e.g., ''bedrock.contrib.cache''."),
+    path: str | None = typer.Argument(
+        None,
+        help="Relative path inside the module's ''playbook/'' directory, e.g., ''references/some-file.md''.",
+    ),
+) -> None:
+    """Print a module playbook file.
+
+    Args:
+        module: Python import path of the module.
+        path: Optional relative path inside the module's ``playbook/`` directory.
+
+    Raises:
+        typer.Exit: If the module or playbook file cannot be resolved.
+    """
+    console = Console()
+    playbook_relative_path = path if isinstance(path, str) else None
+
+    try:
+        app_config = build_app_config(module)
+        playbook_path = _resolve_playbook_path(app_config.package_dir, playbook_relative_path)
+        playbook_content = playbook_path.read_text(encoding="utf-8")
+    except (InvalidManifestError, ModuleError, OSError, ValueError) as exc:
+        console.print(f"[bold red]Error:[/bold red] {exc}")
+        raise typer.Exit(1) from exc
+
+    console.print(playbook_content, markup=False, highlight=False, end="")
 
 
 @apps.command()
