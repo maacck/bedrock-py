@@ -106,49 +106,25 @@ bedrock app install <import_path>
 
 ### `bedrock app playbook`
 
-读取模块的 playbook 文档。
+读取模块 playbook 目录中的文档。
 
 ```bash
-bedrock app playbook <import_path>
+bedrock app playbook <module> [path]
 ```
 
-Playbook 是面向 AI 的文档，存放在模块包内的 `playbook/PLAYBOOK.md` 中。详见 [Playbooks](./playbooks)。
+不指定路径时，输出 `playbook/PLAYBOOK.md`。指定路径时，输出 `playbook/` 目录下的对应文件。Playbook 是面向 AI 的文档，存放在模块包内。详见 [Playbooks](./playbooks)。
 
 **示例：**
 
 ```bash
-$ bedrock app playbook myapp.auth
+# 读取主 playbook
+bedrock app playbook myapp.auth
 
-# Auth Module
+# 读取参考文件
+bedrock app playbook myapp.auth references/architecture.md
 
-Authentication and authorization for Bedrock applications.
-
-## Quick Start
-...
-```
-
----
-
-### `bedrock app playbook-ref`
-
-读取模块 playbook 中的参考文件。
-
-```bash
-bedrock app playbook-ref <import_path> <filename>
-```
-
-**参数：**
-- `import_path` — 模块导入路径
-- `filename` — 相对于 `playbook/` 目录的路径
-
-**示例：**
-
-```bash
-# Read architecture docs
-bedrock app playbook-ref myapp.auth references/architecture.md
-
-# Read code examples
-bedrock app playbook-ref myapp.auth examples/login-flow.py
+# 读取代码示例
+bedrock app playbook myapp.auth examples/login-flow.py
 ```
 
 **安全性：** 会阻止路径遍历尝试（例如 `../`）。
