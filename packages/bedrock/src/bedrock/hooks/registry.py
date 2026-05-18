@@ -2,10 +2,13 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .caller import dispatch_acall, dispatch_call, dispatch_call_robust
 from .exc import HookSpecNotFoundError
+
+if TYPE_CHECKING:
+    from .namespace import HookNamespace
 
 
 @dataclass
@@ -42,7 +45,7 @@ class HookRegistry:
         self._namespaces: dict[str, Any] = {}
         self._counter: int = 0
 
-    def namespace(self, name: str) -> Any:
+    def namespace(self, name: str) -> "HookNamespace":
         """Get or create a :class:`HookNamespace` for the given name.
 
         Args:

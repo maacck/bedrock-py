@@ -7,7 +7,13 @@ import threading
 from typing import Any
 
 from .entities import AppConfig
-from .exc import AppRegistryNotReady, DuplicateModuleError, ModuleDependencyError, ModuleLifecycleError
+from .exc import (
+    AppRegistryNotReady,
+    DuplicateModuleError,
+    InvalidModuleCallableError,
+    ModuleDependencyError,
+    ModuleLifecycleError,
+)
 from .manifest import build_app_config
 from .signals import module_loaded, module_ready, module_shutdown, registry_ready, registry_shutdown
 
@@ -121,11 +127,11 @@ class ModuleRegistry:
             All installed modules in dependency-resolved order.
 
         Raises:
-            RuntimeError: If ``populate`` is called while already populating.
+            ModuleLifecycleError: If ``populate`` is called while already populating.
         """
         with self._lock:
             if self._loading:
-                raise RuntimeError("populate() is not reentrant.")
+                raise ModuleLifecycleError("populate() is not reentrant.")
             self._loading = True
 
         try:
@@ -290,7 +296,7 @@ class ModuleRegistry:
                 missing_required.append(parameter.name)
 
         if missing_required:
-            raise TypeError(
+            raise InvalidModuleCallableError(
                 self._format_invalid_hook_signature_error(
                     app=app, hook_name=hook_name, missing_required=missing_required, positional_only=positional_only
                 )
@@ -302,7 +308,7 @@ class ModuleRegistry:
         if kwargs:
             return kwargs
 
-        raise TypeError(
+        raise InvalidModuleCallableError(
             self._format_invalid_hook_signature_error(
                 app=app, hook_name=hook_name, missing_required=[], positional_only=positional_only
             )

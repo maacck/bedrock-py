@@ -22,7 +22,7 @@ Python monorepo for Bedrock modular framework. `uv` workspaces, `src/` layout.
 
 ```bash
 # Setup
-uv sync
+uv sync --all-packages
 
 # Build
 uv build --all-packages

@@ -17,8 +17,6 @@ All public operations (``revision``, ``upgrade``, ``downgrade``, ``heads``,
 Alembic branch-aware invocation.
 """
 
-from __future__ import annotations
-
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -27,6 +25,9 @@ from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from alembic.util.exc import CommandError
+
+from ..exc import BedrockExc
+from ..logging import get_logger
 
 if TYPE_CHECKING:
     from ..module.entities import AppConfig
@@ -37,8 +38,10 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 _BEDROCK_MARKER = "bedrock_managed"
 
+log = get_logger(__name__)
 
-class MigrationError(RuntimeError):
+
+class MigrationError(BedrockExc):
     """Raised when a migration operation cannot be completed.
 
     Attributes:
@@ -46,9 +49,11 @@ class MigrationError(RuntimeError):
             if applicable.
     """
 
+    detail: str = "Migration operation failed."
+
     def __init__(self, message: str, app_import_path: str | None = None) -> None:
-        super().__init__(message)
         self.app_import_path = app_import_path
+        super().__init__(msg=message)
 
 
 class BranchOwnershipError(MigrationError):
@@ -104,7 +109,7 @@ class MigrationsManager:
 
     def __init__(
         self,
-        registry: ModuleRegistry,
+        registry: "ModuleRegistry",
         database_url: str,
         script_location: str | None = None,
     ) -> None:
@@ -251,6 +256,7 @@ class MigrationsManager:
                 or self._revision_in_branch(script, rev.revision, branch_label)
             }
         except Exception:
+            log.debug("Failed to collect applied revisions for branch '%s'", branch_label, exc_info=True)
             return set()
 
         if not branch_rev_ids:
@@ -262,6 +268,7 @@ class MigrationsManager:
                 migration_ctx = MigrationContext.configure(conn)
                 applied = migration_ctx.get_current_heads()
         except Exception:
+            log.debug("Failed to query current migration heads from database", exc_info=True)
             return set()
         finally:
             engine.dispose()
@@ -288,6 +295,7 @@ class MigrationsManager:
                 if rev.revision == rev_id:
                     return True
         except Exception:
+            log.debug("Failed to iterate revisions for branch '%s' membership check", branch_label, exc_info=True)
             pass
         return False
 
@@ -307,9 +315,10 @@ class MigrationsManager:
             head_revs = {r.revision for r in script.get_revisions(f"{branch_label}@head")}
             return head_revs == current_revs
         except Exception:
+            log.debug("Failed to determine head revisions for branch '%s'", branch_label, exc_info=True)
             return False
 
-    def _create_tables_and_stamp(self, cfg: Config, app: AppConfig) -> None:
+    def _create_tables_and_stamp(self, cfg: Config, app: "AppConfig") -> None:
         """Create all tables for *app* and stamp the branch at head.
 
         Used during first-time installation when no revision history exists for
@@ -518,7 +527,7 @@ class MigrationsManager:
         except CommandError as exc:
             raise MigrationError(str(exc), app_import_path) from exc
 
-    def _get_app(self, app_import_path: str) -> AppConfig:
+    def _get_app(self, app_import_path: str) -> "AppConfig":
         """Return the :class:`~bedrock.module.entities.AppConfig` for *app_import_path*
         and run a branch-ownership audit on its migrations directory.
 
@@ -597,7 +606,7 @@ class MigrationsManager:
 
         return cfg
 
-    def _ensure_migrations_dir(self, app: AppConfig) -> Path:
+    def _ensure_migrations_dir(self, app: "AppConfig") -> Path:
         """Create the app's ``migrations/`` directory if it does not exist.
 
         Args:
@@ -630,9 +639,10 @@ class MigrationsManager:
         except Exception:
             # If the script directory cannot be read yet (first run), treat as
             # non-existent branch rather than propagating an internal error.
+            log.debug("Failed to read script directory for branch existence check on '%s'", branch_label, exc_info=True)
             return False
 
-    def _audit_app_revisions(self, cfg: Config, app: AppConfig) -> None:
+    def _audit_app_revisions(self, cfg: Config, app: "AppConfig") -> None:
         """Verify that every revision file in *app*'s migrations directory
         declares only branch labels that belong to that app.
 
@@ -658,6 +668,7 @@ class MigrationsManager:
         try:
             script = ScriptDirectory.from_config(cfg)
         except Exception:
+            log.debug("Failed to load script directory for audit of app '%s'", app.name, exc_info=True)
             return
 
         for rev in script.walk_revisions():
