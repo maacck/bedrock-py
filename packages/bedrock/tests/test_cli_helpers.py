@@ -366,7 +366,9 @@ class TestPlaybookCommand:
         monkeypatch.setattr(
             cli_apps,
             "build_app_config",
-            lambda import_path: (_ for _ in ()).throw(InvalidManifestError("Cannot locate package for import path 'demo.app'.")),
+            lambda import_path: (_ for _ in ()).throw(
+                InvalidManifestError("Cannot locate package for import path 'demo.app'.")
+            ),
         )
 
         with pytest.raises(typer.Exit) as exc_info:
@@ -377,7 +379,9 @@ class TestPlaybookCommand:
             (("[bold red]Error:[/bold red] Cannot locate package for import path 'demo.app'.",), {})
         ]
 
-    def test_playbook_raises_when_playbook_dir_is_missing(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_playbook_raises_when_playbook_dir_is_missing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         package_dir = tmp_path / "demo_app"
         package_dir.mkdir()
 
@@ -405,5 +409,10 @@ class TestPlaybookCommand:
 
         assert exc_info.value.exit_code == 1
         assert self._latest_messages() == [
-            ((f"[bold red]Error:[/bold red] Missing playbook file at '{playbook_dir / 'references' / 'missing.md'}'.",), {})
+            (
+                (
+                    f"[bold red]Error:[/bold red] Missing playbook file at '{playbook_dir / 'references' / 'missing.md'}'.",
+                ),
+                {},
+            )
         ]
