@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Literal
 
 from loguru import logger
+from loguru._logger import Logger
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 LOG_FORMAT = os.getenv(
@@ -77,7 +78,7 @@ def configure_logging(
     )
 
 
-def get_logger(name: str | None = None) -> logger:
+def get_logger(name: str | None = None) -> Logger:
     """Get a logger instance.
 
     Args:
