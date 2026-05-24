@@ -149,6 +149,7 @@ class TestInstallCommand:
     def _patch_apps_get(self, monkeypatch: pytest.MonkeyPatch, app_config: SimpleNamespace) -> None:
         from bedrock.module import apps
 
+        monkeypatch.setattr(apps, "populate", lambda import_paths: [app_config])
         monkeypatch.setattr(apps, "get", lambda name: app_config)
 
     def test_install_runs_all_hooks(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -260,6 +261,7 @@ class TestInstallCommand:
     def test_install_raises_on_unknown_module(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from bedrock.module import apps
 
+        monkeypatch.setattr(apps, "populate", lambda import_paths: None)
         monkeypatch.setattr(apps, "get", lambda name: (_ for _ in ()).throw(KeyError(name)))
 
         with pytest.raises(typer.Exit):
