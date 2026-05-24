@@ -105,7 +105,7 @@ def _build_include_name(app_tables: frozenset[str]):
 _attrs = config.attributes
 _is_bedrock = _attrs.get("bedrock_managed", False)
 _current_app: str | None = _attrs.get("current_app")
-_registry: ModuleRegistry | None = _attrs.get("registry")
+_registry: "ModuleRegistry | None" = _attrs.get("registry")
 
 _include_name = None
 

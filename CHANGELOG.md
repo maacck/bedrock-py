@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.2] - 2026-05-23
+
+### Fixed
+
+- cli: populate apps on `bedrock app install` to ensure module state is ready
+- database: allow calling `get_primary_keys` as a classmethod on `BedrockModel` classes
+- database: correct type hint for `_registry` in `migrations/env.py` using quoted type annotations
+- logging: update return type of `get_logger` to return `Logger` instead of `logger` module instance
+
 ## [0.1.1] - 2026-05-18
 
 ### Added
