@@ -38,7 +38,7 @@ Documentation = "https://bedrock-py.com"
 "Bug Tracker" = "https://github.com/maacck/bedrock-py/issues"
 
 [project.optional-dependencies]
-cache-redis = ["redis>=4.2.0"]
+cache-redis = ["redis>=8.0.1"]
 
 [project.scripts]
 bedrock = "bedrock.cli.main:entrypoint"
