@@ -15,7 +15,7 @@ dev = [
 ]
 docs = [
     "mkdocstrings[python]>=0.26.0",
-    "griffe>=1.0.0",
+    "griffe>=2.1.0",
 ]
 
 [tool.uv.sources]
