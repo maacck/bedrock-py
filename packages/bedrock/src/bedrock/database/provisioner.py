@@ -144,6 +144,37 @@ def check_database_exists(settings: DbSettings) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def _build_maintenance_url(settings: DbSettings) -> str:
+    """Build a connection URL targeting the ``postgres`` maintenance database.
+
+    Provisioning operations must connect to a database that is guaranteed to
+    exist (``postgres``) in order to issue ``CREATE DATABASE`` or query
+    ``pg_catalog.pg_database`` for the actual target database.  This helper
+    reuses the driver, host, port, and credentials from *settings* but
+    substitutes the database name with the PostgreSQL system database
+    ``"postgres"``.
+
+    Args:
+        settings: Resolved database settings.
+
+    Returns:
+        A SQLAlchemy-compatible URL string ending in ``/postgres``.
+    """
+    from urllib.parse import quote as _quote
+
+    if settings.HOST is None or settings.PORT is None:
+        raise ValueError("HOST and PORT must be configured for non-sqlite databases.")
+
+    credentials = ""
+    if settings.USERNAME is not None:
+        credentials = settings.USERNAME
+        if settings.PASSWORD is not None:
+            credentials = f"{credentials}:{_quote(settings.PASSWORD)}"
+        credentials = f"{credentials}@"
+
+    return f"{settings.TYPE}+{settings.DRIVER}://{credentials}{settings.HOST}:{settings.PORT}/postgres"
+
+
 def _database_exists(settings: DbSettings) -> bool:
     """Query ``pg_database`` through the maintenance database to check existence.
 
@@ -155,7 +186,7 @@ def _database_exists(settings: DbSettings) -> bool:
     """
     from sqlalchemy import create_engine
 
-    maintenance_url = settings.maintenance_database_url
+    maintenance_url = _build_maintenance_url(settings)
     engine = create_engine(maintenance_url, isolation_level="AUTOCOMMIT")
 
     try:
@@ -187,7 +218,7 @@ def _create_database(settings: DbSettings) -> None:
     from sqlalchemy import create_engine
 
     database_name = settings.SCHEMA
-    maintenance_url = settings.maintenance_database_url
+    maintenance_url = _build_maintenance_url(settings)
     engine = create_engine(maintenance_url, isolation_level="AUTOCOMMIT")
 
     try:

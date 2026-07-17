@@ -265,20 +265,19 @@ def uninstall(
 def create_database() -> None:
     """Provision the configured PostgreSQL database if it does not yet exist.
 
-    Connects to the *maintenance* database (``DATABASE_MAINTENANCE_DATABASE``,
-    default ``postgres``) and issues ``CREATE DATABASE <name> IF NOT EXISTS``
-    for the target database name specified by ``DATABASE_SCHEMA``.
+    Connects to the PostgreSQL ``postgres`` maintenance database and issues
+    ``CREATE DATABASE <name>`` for the target database name specified by
+    ``DATABASE_SCHEMA``.
 
     This command is a no-op for SQLite; it is safe to call even when the
     database already exists (idempotent).
 
     Set the following environment variables before running:
 
-    - ``DATABASE_TYPE=postgresql`` (or ``postgresql``)
+    - ``DATABASE_TYPE=postgresql``
     - ``DATABASE_DRIVER=psycopg`` (requires the ``postgres`` package extra)
     - ``DATABASE_HOST``, ``DATABASE_PORT``, ``DATABASE_USERNAME``, ``DATABASE_PASSWORD``
     - ``DATABASE_SCHEMA`` — the target database name to create
-    - ``DATABASE_MAINTENANCE_DATABASE`` — maintenance DB (default ``postgres``)
 
     Examples::
 

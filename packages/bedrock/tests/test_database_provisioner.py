@@ -8,7 +8,7 @@ Covers unit tests (using mocks) for all provisioner paths:
 - Insufficient CREATEDB privilege → actionable error
 - ``_is_missing_database_error`` detection logic
 - ``DatabaseDoesNotExistError`` raised by ``_get_current_revisions`` when DB is absent
-- ``DbSettings`` new fields (PG_SCHEMA, MAINTENANCE_DATABASE, maintenance_database_url)
+- ``DbSettings`` new fields (PG_SCHEMA)
 
 Integration tests are guarded by the ``postgres`` mark and require a live
 PostgreSQL server.  Run them with::
@@ -42,10 +42,6 @@ class TestDbSettingsNewFields:
         settings = DbSettings(TYPE="postgresql", DRIVER="psycopg", HOST="localhost", PORT=5432, SCHEMA="mydb")
         assert settings.PG_SCHEMA is None
 
-    def test_maintenance_database_defaults_to_postgres(self):
-        settings = DbSettings(TYPE="postgresql", DRIVER="psycopg", HOST="localhost", PORT=5432, SCHEMA="mydb")
-        assert settings.MAINTENANCE_DATABASE == "postgres"
-
     def test_pg_schema_appears_in_url(self):
         settings = DbSettings(
             TYPE="postgresql",
@@ -71,7 +67,9 @@ class TestDbSettingsNewFields:
         assert "?" not in url
         assert "search_path" not in url
 
-    def test_maintenance_database_url_uses_maintenance_db(self):
+    def test_build_maintenance_url_always_targets_postgres_db(self):
+        from bedrock.database.provisioner import _build_maintenance_url
+
         settings = DbSettings(
             TYPE="postgresql",
             DRIVER="psycopg",
@@ -79,27 +77,26 @@ class TestDbSettingsNewFields:
             PORT=5432,
             SCHEMA="myapp",
             USERNAME="admin",
-            MAINTENANCE_DATABASE="postgres",
         )
-        maint_url = settings.maintenance_database_url
+        maint_url = _build_maintenance_url(settings)
         assert maint_url.endswith("/postgres")
         assert "myapp" not in maint_url
 
-    def test_maintenance_database_url_custom_maintenance_db(self):
+    def test_build_maintenance_url_preserves_credentials(self):
+        from bedrock.database.provisioner import _build_maintenance_url
+
         settings = DbSettings(
             TYPE="postgresql",
             DRIVER="psycopg",
             HOST="localhost",
             PORT=5432,
             SCHEMA="target_db",
-            MAINTENANCE_DATABASE="template1",
+            USERNAME="admin",
+            PASSWORD="secret",
         )
-        assert settings.maintenance_database_url.endswith("/template1")
-
-    def test_maintenance_database_url_raises_for_sqlite(self):
-        settings = DbSettings(TYPE="sqlite", SCHEMA=":memory:")
-        with pytest.raises(ValueError, match="not applicable for SQLite"):
-            _ = settings.maintenance_database_url
+        url = _build_maintenance_url(settings)
+        assert "admin" in url
+        assert url.endswith("/postgres")
 
 
 # ---------------------------------------------------------------------------
@@ -382,7 +379,6 @@ def pg_settings():
         DATABASE_USERNAME=postgres
         DATABASE_PASSWORD=<password>
         DATABASE_SCHEMA=bedrock_test_integ
-        DATABASE_MAINTENANCE_DATABASE=postgres
     """
     settings = DbSettings()
     if settings.is_sqlite:
@@ -394,9 +390,10 @@ def pg_settings():
 def clean_test_database(pg_settings: DbSettings):
     """Ensure the integration test database does not exist before the test and drops it after."""
     import sqlalchemy
+    from bedrock.database.provisioner import _build_maintenance_url
     from sqlalchemy import text
 
-    maint_url = pg_settings.maintenance_database_url
+    maint_url = _build_maintenance_url(pg_settings)
     engine = sqlalchemy.create_engine(maint_url, isolation_level="AUTOCOMMIT")
     db_name = pg_settings.SCHEMA
 
@@ -444,7 +441,9 @@ class TestPostgreSQLIntegration:
         db_name = "bedrock_test_noperm_" + pg_settings.SCHEMA
         restricted_settings = pg_settings.model_copy(update={"SCHEMA": db_name, "USERNAME": "bedrock_noperm_user"})
 
-        maint_engine = create_engine(pg_settings.maintenance_database_url, isolation_level="AUTOCOMMIT")
+        from bedrock.database.provisioner import _build_maintenance_url
+
+        maint_engine = create_engine(_build_maintenance_url(pg_settings), isolation_level="AUTOCOMMIT")
         try:
             with maint_engine.connect() as conn:
                 conn.execute(
@@ -467,7 +466,7 @@ class TestPostgreSQLIntegration:
             assert "CREATEDB" in str(exc_info.value)
             assert db_name in str(exc_info.value)
         finally:
-            cleanup_engine = create_engine(pg_settings.maintenance_database_url, isolation_level="AUTOCOMMIT")
+            cleanup_engine = create_engine(_build_maintenance_url(pg_settings), isolation_level="AUTOCOMMIT")
             with cleanup_engine.connect() as conn:
                 conn.execute(text("DROP ROLE IF EXISTS bedrock_noperm_user"))
             cleanup_engine.dispose()
