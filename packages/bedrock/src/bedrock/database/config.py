@@ -6,12 +6,14 @@ from pydantic_settings import BaseSettings
 class DbSettings(BaseSettings):
     """Database settings used to build a SQLAlchemy connection URL.
 
-    For PostgreSQL, two database-level concepts are distinguished:
+    ``SCHEMA`` has different meanings depending on the database type:
 
-    - ``SCHEMA`` — the target database name (what appears at the end of the URL).
-    - ``PG_SCHEMA`` — an optional PostgreSQL *schema* namespace inside the target
-      database (e.g. ``public``, ``bedrock``).  When set, it is appended as the
-      ``options=-csearch_path=<value>`` query parameter.
+    - **SQLite** — file path (or ``:memory:``).
+    - **MySQL / MariaDB** — the schema / database name in the URL path.
+    - **PostgreSQL** — the *database* name in the URL path.  The PostgreSQL
+      *schema* namespace within that database is controlled by ``PG_SCHEMA``
+      (defaults to ``"public"``), which is always injected into the connection
+      URL as ``options=-csearch_path=<value>``.
     """
 
     model_config = {"env_prefix": "DATABASE_"}
@@ -28,8 +30,9 @@ class DbSettings(BaseSettings):
     POOL_RECYCLE: int = 1800
     SCHEMA: str = "bedrock.db"
 
-    # PostgreSQL-only: optional schema namespace within the target database.
-    PG_SCHEMA: str | None = None
+    # PostgreSQL schema namespace inside the target database (search_path).
+    # Defaults to "public" — PostgreSQL's built-in default schema.
+    PG_SCHEMA: str = "public"
 
     @property
     def SQLALCHEMY_DATABASE_URI(self) -> str:
@@ -54,7 +57,7 @@ class DbSettings(BaseSettings):
 
         base = f"{self.TYPE}+{self.DRIVER}://{credentials}{self.HOST}:{self.PORT}/{self.SCHEMA}"
 
-        if self.PG_SCHEMA is not None:
+        if self.is_postgresql:
             base = f"{base}?options=-csearch_path%3D{quote(self.PG_SCHEMA, safe='')}"
 
         return base
@@ -70,3 +73,9 @@ class DbSettings(BaseSettings):
         """Return whether the configured database is an in-memory SQLite database."""
 
         return self.is_sqlite and self.SCHEMA == ":memory:"
+
+    @property
+    def is_postgresql(self) -> bool:
+        """Return whether the configured database dialect is PostgreSQL."""
+
+        return self.TYPE.lower() == "postgresql"

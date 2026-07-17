@@ -38,11 +38,24 @@ from bedrock.database.provisioner import (
 class TestDbSettingsNewFields:
     """Verify the new PostgreSQL-specific settings fields."""
 
-    def test_pg_schema_defaults_to_none(self):
+    def test_pg_schema_defaults_to_public(self):
         settings = DbSettings(TYPE="postgresql", DRIVER="psycopg", HOST="localhost", PORT=5432, SCHEMA="mydb")
-        assert settings.PG_SCHEMA is None
+        assert settings.PG_SCHEMA == "public"
 
-    def test_pg_schema_appears_in_url(self):
+    def test_postgresql_url_always_includes_search_path(self):
+        """PostgreSQL URLs always carry search_path, defaulting to 'public'."""
+        settings = DbSettings(
+            TYPE="postgresql",
+            DRIVER="psycopg",
+            HOST="localhost",
+            PORT=5432,
+            SCHEMA="mydb",
+        )
+        url = settings.SQLALCHEMY_DATABASE_URI
+        assert "search_path" in url
+        assert "public" in url
+
+    def test_pg_schema_custom_value_appears_in_url(self):
         settings = DbSettings(
             TYPE="postgresql",
             DRIVER="psycopg",
@@ -55,17 +68,18 @@ class TestDbSettingsNewFields:
         assert "search_path" in url
         assert "bedrock" in url
 
-    def test_no_pg_schema_produces_clean_url(self):
+    def test_mysql_url_has_no_search_path(self):
+        """Non-PostgreSQL dialects (e.g. MySQL) must not carry a search_path."""
         settings = DbSettings(
-            TYPE="postgresql",
-            DRIVER="psycopg",
+            TYPE="mysql",
+            DRIVER="pymysql",
             HOST="localhost",
-            PORT=5432,
+            PORT=3306,
             SCHEMA="mydb",
         )
         url = settings.SQLALCHEMY_DATABASE_URI
-        assert "?" not in url
         assert "search_path" not in url
+        assert "?" not in url
 
     def test_build_maintenance_url_always_targets_postgres_db(self):
         from bedrock.database.provisioner import _build_maintenance_url
