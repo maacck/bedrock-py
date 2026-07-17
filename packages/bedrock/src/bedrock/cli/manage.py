@@ -53,14 +53,24 @@ def install(
     skip_migrations: bool = typer.Option(
         False, "--skip-migrations", help="Skip running database migrations during installation."
     ),
+    create_database: bool = typer.Option(
+        False,
+        "--create-database",
+        help=(
+            "Provision the PostgreSQL target database before applying schema operations. "
+            "Connects to the maintenance database and issues CREATE DATABASE if the target "
+            "does not already exist. Idempotent — safe to pass on every run."
+        ),
+    ),
 ):
     """Install the current Bedrock application.
 
     For each module this command:
 
-    1. Ensures the database schema is up to date (create tables on first install,
+    1. Optionally provisions the target PostgreSQL database (``--create-database``).
+    2. Ensures the database schema is up to date (create tables on first install,
        upgrade if behind head).
-    2. Runs the optional ``installation.py`` lifecycle hooks
+    3. Runs the optional ``installation.py`` lifecycle hooks
        (``pre_install`` → ``install`` → ``post_install``).
     """
     from bedrock.module import apps
@@ -75,6 +85,29 @@ def install(
             raise typer.Exit(1) from ex
 
     modules_to_install = [apps.get(app)] if app else apps.all()
+
+    # ------------------------------------------------------------------
+    # Optional database provisioning (PostgreSQL only)
+    # ------------------------------------------------------------------
+    if create_database and not skip_migrations:
+        from bedrock.database.config import DbSettings
+        from bedrock.database.provisioner import DatabaseProvisionError, ensure_database_exists
+
+        settings = DbSettings()
+        if settings.is_sqlite:
+            console.print("[dim]SQLite target — skipping database provisioning.[/dim]")
+        else:
+            try:
+                created = ensure_database_exists(settings)
+                if created:
+                    console.print(
+                        f"[bold green]✓[/bold green] PostgreSQL database [bold]{settings.SCHEMA}[/bold] provisioned."
+                    )
+                else:
+                    console.print(f"[dim]PostgreSQL database [bold]{settings.SCHEMA}[/bold] already exists.[/dim]")
+            except DatabaseProvisionError as exc:
+                console.print(f"[bold red]✗ Database provisioning failed:[/bold red] {exc}")
+                raise typer.Exit(1) from exc
 
     manager = None if skip_migrations else _bootstrap_migrations_manager()
 

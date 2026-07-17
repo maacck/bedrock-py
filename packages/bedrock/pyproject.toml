@@ -39,6 +39,7 @@ Documentation = "https://bedrock-py.com"
 
 [project.optional-dependencies]
 cache-redis = ["redis>=4.2.0"]
+postgres = ["psycopg[binary]>=3.1"]
 
 [project.scripts]
 bedrock = "bedrock.cli.main:entrypoint"
@@ -57,4 +58,10 @@ dev = [
     "pytest-asyncio>=1.2.0",
     "coverage>=7.13.5",
     "pytest-cov>=7.1.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "strict"
+markers = [
+    "postgres: marks tests as requiring a live PostgreSQL server (deselect with '-m not postgres')",
 ]

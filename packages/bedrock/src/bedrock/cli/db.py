@@ -261,4 +261,55 @@ def uninstall(
         raise typer.Exit(1) from exc
 
 
+@db_app.command(name="create")
+def create_database() -> None:
+    """Provision the configured PostgreSQL database if it does not yet exist.
+
+    Connects to the *maintenance* database (``DATABASE_MAINTENANCE_DATABASE``,
+    default ``postgres``) and issues ``CREATE DATABASE <name> IF NOT EXISTS``
+    for the target database name specified by ``DATABASE_SCHEMA``.
+
+    This command is a no-op for SQLite; it is safe to call even when the
+    database already exists (idempotent).
+
+    Set the following environment variables before running:
+
+    - ``DATABASE_TYPE=postgresql`` (or ``postgresql``)
+    - ``DATABASE_DRIVER=psycopg`` (requires the ``postgres`` package extra)
+    - ``DATABASE_HOST``, ``DATABASE_PORT``, ``DATABASE_USERNAME``, ``DATABASE_PASSWORD``
+    - ``DATABASE_SCHEMA`` — the target database name to create
+    - ``DATABASE_MAINTENANCE_DATABASE`` — maintenance DB (default ``postgres``)
+
+    Examples::
+
+        DATABASE_TYPE=postgresql DATABASE_DRIVER=psycopg DATABASE_HOST=localhost \\
+            DATABASE_PORT=5432 DATABASE_USERNAME=admin DATABASE_PASSWORD=secret \\
+            DATABASE_SCHEMA=myapp bedrock db create
+    """
+    from bedrock.database.config import DbSettings
+    from bedrock.database.provisioner import DatabaseProvisionError, ensure_database_exists
+
+    settings = DbSettings()
+
+    if settings.is_sqlite:
+        _console.print("[dim]SQLite database — no provisioning needed.[/dim]")
+        return
+
+    database_name = settings.SCHEMA
+
+    try:
+        created = ensure_database_exists(settings)
+    except DatabaseProvisionError as exc:
+        _console.print(f"[bold red]✗ Database provisioning failed:[/bold red] {exc}")
+        raise typer.Exit(1) from exc
+    except Exception as exc:
+        _console.print(f"[bold red]✗ Unexpected error during provisioning:[/bold red] {exc}")
+        raise typer.Exit(1) from exc
+
+    if created:
+        _console.print(f"[bold green]✓[/bold green] PostgreSQL database [bold]{database_name}[/bold] created.")
+    else:
+        _console.print(f"[dim]PostgreSQL database [bold]{database_name}[/bold] already exists — nothing to do.[/dim]")
+
+
 __all__ = ["db_app"]

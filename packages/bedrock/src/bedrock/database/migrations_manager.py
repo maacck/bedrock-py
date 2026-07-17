@@ -243,9 +243,16 @@ class MigrationsManager:
         Returns:
             Set of applied revision ID strings for this branch.  Empty when the
             branch has never been applied.
+
+        Raises:
+            DatabaseDoesNotExistError: If the target PostgreSQL database does not
+                exist.  This is explicitly surfaced so callers never interpret a
+                missing database as an empty revision history.
         """
         from alembic.runtime.migration import MigrationContext
         from sqlalchemy import create_engine
+
+        from .provisioner import DatabaseDoesNotExistError
 
         try:
             script = ScriptDirectory.from_config(cfg)
@@ -267,7 +274,12 @@ class MigrationsManager:
             with engine.connect() as conn:
                 migration_ctx = MigrationContext.configure(conn)
                 applied = migration_ctx.get_current_heads()
-        except Exception:
+        except Exception as exc:
+            engine.dispose()
+            if _is_missing_database_error(exc):
+                # Extract database name from the URL (last path segment).
+                db_name = self._database_url.rsplit("/", 1)[-1].split("?")[0]
+                raise DatabaseDoesNotExistError(db_name) from exc
             log.debug("Failed to query current migration heads from database", exc_info=True)
             return set()
         finally:
@@ -691,6 +703,35 @@ class MigrationsManager:
                     declared_labels=labels,
                     expected_label=expected_label,
                 )
+
+
+def _is_missing_database_error(exc: Exception) -> bool:
+    """Return ``True`` when *exc* indicates that the target database does not exist.
+
+    Detects the PostgreSQL error code ``3D000`` (``invalid_catalog_name``) which
+    is raised when a connection is attempted against a non-existent database.
+    This helper inspects the exception chain so it works whether the driver
+    wraps the error or raises it directly.
+
+    Args:
+        exc: The exception to inspect.
+
+    Returns:
+        ``True`` when the exception signals a missing database.
+    """
+    # Walk the exception chain looking for a known signal.
+    current: BaseException | None = exc
+    while current is not None:
+        # psycopg2 / psycopg3 expose pgcode on the DBAPI exception.
+        pgcode = getattr(current, "pgcode", None)
+        if pgcode == "3D000":
+            return True
+        # Some drivers embed the error code in the message string.
+        msg = str(current).lower()
+        if "3d000" in msg or "does not exist" in msg and "database" in msg:
+            return True
+        current = current.__cause__ or current.__context__
+    return False
 
 
 __all__ = ["BranchOwnershipError", "MigrationError", "MigrationsManager"]

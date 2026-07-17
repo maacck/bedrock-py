@@ -4,7 +4,18 @@ from pydantic_settings import BaseSettings
 
 
 class DbSettings(BaseSettings):
-    """Database settings used to build a SQLAlchemy connection URL."""
+    """Database settings used to build a SQLAlchemy connection URL.
+
+    For PostgreSQL, three database-level concepts are distinguished:
+
+    - ``SCHEMA`` — the target database name (what appears at the end of the URL).
+    - ``PG_SCHEMA`` — an optional PostgreSQL *schema* namespace inside the target
+      database (e.g. ``public``, ``bedrock``).  When set, it is appended as the
+      ``options=-csearch_path=<value>`` query parameter.
+    - ``MAINTENANCE_DATABASE`` — the always-available administrative database used
+      to connect when the target database does not yet exist (typically ``postgres``).
+      Only relevant for provisioning operations.
+    """
 
     model_config = {"env_prefix": "DATABASE_"}
 
@@ -19,6 +30,10 @@ class DbSettings(BaseSettings):
     POOL_SIZE: int = 10
     POOL_RECYCLE: int = 1800
     SCHEMA: str = "bedrock.db"
+
+    # PostgreSQL-only extras
+    PG_SCHEMA: str | None = None
+    MAINTENANCE_DATABASE: str = "postgres"
 
     @property
     def SQLALCHEMY_DATABASE_URI(self) -> str:
@@ -41,7 +56,38 @@ class DbSettings(BaseSettings):
                 credentials = f"{credentials}:{quote(self.PASSWORD)}"
             credentials = f"{credentials}@"
 
-        return f"{self.TYPE}+{self.DRIVER}://{credentials}{self.HOST}:{self.PORT}/{self.SCHEMA}"
+        base = f"{self.TYPE}+{self.DRIVER}://{credentials}{self.HOST}:{self.PORT}/{self.SCHEMA}"
+
+        if self.PG_SCHEMA is not None:
+            base = f"{base}?options=-csearch_path%3D{quote(self.PG_SCHEMA, safe='')}"
+
+        return base
+
+    @property
+    def maintenance_database_url(self) -> str:
+        """Build a SQLAlchemy URL that connects to the maintenance database.
+
+        The maintenance database is used when the target database may not exist
+        yet (e.g. during ``bedrock db create``).  It falls back to the value of
+        ``MAINTENANCE_DATABASE`` (default ``postgres``).
+
+        Only meaningful for non-SQLite databases; raises ``ValueError`` for
+        SQLite just as ``SQLALCHEMY_DATABASE_URI`` does.
+        """
+        if self.TYPE == "sqlite":
+            raise ValueError("Maintenance database is not applicable for SQLite.")
+
+        if self.HOST is None or self.PORT is None:
+            raise ValueError("HOST and PORT must be configured for non-sqlite databases.")
+
+        credentials = ""
+        if self.USERNAME is not None:
+            credentials = self.USERNAME
+            if self.PASSWORD is not None:
+                credentials = f"{credentials}:{quote(self.PASSWORD)}"
+            credentials = f"{credentials}@"
+
+        return f"{self.TYPE}+{self.DRIVER}://{credentials}{self.HOST}:{self.PORT}/{self.MAINTENANCE_DATABASE}"
 
     @property
     def is_sqlite(self) -> bool:
