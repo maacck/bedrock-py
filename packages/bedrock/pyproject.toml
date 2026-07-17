@@ -39,7 +39,6 @@ Documentation = "https://bedrock-py.com"
 
 [project.optional-dependencies]
 cache-redis = ["redis>=4.2.0"]
-postgres = ["psycopg[binary]>=3.1"]
 
 [project.scripts]
 bedrock = "bedrock.cli.main:entrypoint"
