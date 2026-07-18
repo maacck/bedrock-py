@@ -7,8 +7,6 @@ from typing import Protocol
 
 from pydantic_settings import BaseSettings
 
-_BACKEND_REGISTRY: dict[str, tuple[type[BaseSettings], str]] = {}
-
 
 class CacheBackend(Protocol):
     """Protocol that all cache backends must implement.
@@ -79,19 +77,3 @@ class CacheBackend(Protocol):
 
     def close(self) -> None: ...
     async def aclose(self) -> None: ...
-
-
-def register_backend(name: str, settings_cls: type[BaseSettings], import_path: str) -> None:
-    """Register a cache backend.
-
-    Args:
-        name: Unique backend identifier (e.g. ``"redis"``).
-        settings_cls: Pydantic ``BaseSettings`` subclass.
-        import_path: Colon-delimited path, e.g. ``"pkg.mod:ClassName"``.
-    """
-    _BACKEND_REGISTRY[name] = settings_cls, import_path
-
-
-def list_backends() -> list[str]:
-    """Return all registered backend names."""
-    return sorted(_BACKEND_REGISTRY.keys())

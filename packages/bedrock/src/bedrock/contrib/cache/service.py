@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 _BACKEND_REGISTRY = ClassRegistry(
     {
         "memory": "bedrock.contrib.cache.backends.memory:InMemoryBackend",
+        "redis": "bedrock.contrib.cache.backends.redis:RedisBackend",
     }
 )
 
