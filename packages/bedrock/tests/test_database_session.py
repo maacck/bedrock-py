@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from unittest.mock import Mock
+
+import bedrock.database.manager as manager_module
 import pytest
 from bedrock.database import DatabaseManager, SessionFactory
 from bedrock.database.manager import DatabaseNotConfiguredError
@@ -322,3 +325,74 @@ class TestBackwardCompatibility:
         finally:
             mock_session.close()
             _current_db_session.set(None)
+
+
+class TestDatabaseManagerReinitialization:
+    """Verify replacement initialization cleans up the previous engine."""
+
+    def test_reinitialization_disposes_the_previous_engine(self, monkeypatch):
+        manager = DatabaseManager()
+        old_engine = Mock()
+        new_engine = Mock()
+        engines = iter([(old_engine, sessionmaker()), (new_engine, sessionmaker())])
+        monkeypatch.setattr(
+            manager_module,
+            "build_session_local_from_settings",
+            lambda **_: next(engines),
+        )
+
+        manager.init("sqlite:///:memory:")
+        manager.init("sqlite:///:memory:")
+
+        old_engine.dispose.assert_called_once_with()
+        assert manager.engine is new_engine
+
+    def test_reinitialization_clears_the_old_context_session(self, monkeypatch):
+        manager = DatabaseManager()
+        old_engine = Mock()
+        new_engine = Mock()
+        old_session = Mock()
+        new_session = Mock()
+        engines = iter(
+            [
+                (old_engine, lambda: old_session),
+                (new_engine, lambda: new_session),
+            ]
+        )
+        monkeypatch.setattr(
+            manager_module,
+            "build_session_local_from_settings",
+            lambda **_: next(engines),
+        )
+        _current_db_session.set(None)
+
+        try:
+            manager.init("sqlite:///:memory:")
+            assert manager.session is old_session
+
+            manager.init("sqlite:///:memory:")
+
+            old_session.close.assert_called_once_with()
+            assert manager.session is new_session
+        finally:
+            manager.clear_session()
+
+    def test_failed_reinitialization_preserves_the_existing_engine(self, monkeypatch):
+        manager = DatabaseManager()
+        old_engine = Mock()
+        monkeypatch.setattr(
+            manager_module,
+            "build_session_local_from_settings",
+            lambda **_: (old_engine, sessionmaker()),
+        )
+        manager.init("sqlite:///:memory:")
+
+        def fail_initialization(**_):
+            raise RuntimeError("cannot create engine")
+
+        monkeypatch.setattr(manager_module, "build_session_local_from_settings", fail_initialization)
+        with pytest.raises(RuntimeError, match="cannot create engine"):
+            manager.init("sqlite:///:memory:")
+
+        old_engine.dispose.assert_not_called()
+        assert manager.engine is old_engine
