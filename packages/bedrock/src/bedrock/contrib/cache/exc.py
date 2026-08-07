@@ -29,6 +29,15 @@ class BackendNotConfiguredError(CacheError):
     detail: str = "Cache backend is not configured."
 
 
+class CacheClearRequiresPrefixError(CacheError):
+    """Raised when Redis cache clearing lacks a configured key namespace."""
+
+    detail: str = (
+        "Redis cache clear requires a non-empty CACHE_REDIS_KEY_PREFIX. "
+        "Configure a dedicated prefix before clearing cache keys."
+    )
+
+
 class CacheLockError(CacheError):
     """Base exception for cache lock failures."""
 

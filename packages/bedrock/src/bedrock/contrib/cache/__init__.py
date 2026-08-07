@@ -17,6 +17,7 @@ from .base import CacheBackend
 from .coder import CacheCoder
 from .exc import (
     BackendNotConfiguredError,
+    CacheClearRequiresPrefixError,
     CacheConnectionError,
     CacheError,
     CacheLockAcquisitionError,
@@ -31,6 +32,7 @@ from .service import CacheService, cache, register_backend
 __all__ = [
     "BackendNotConfiguredError",
     "CacheBackend",
+    "CacheClearRequiresPrefixError",
     "CacheCoder",
     "CacheConnectionError",
     "CacheError",

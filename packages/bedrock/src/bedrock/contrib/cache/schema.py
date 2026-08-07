@@ -173,15 +173,17 @@ class CacheSlot[T]:
         value: T,
         *,
         ex: int | None = None,
+        px: int | None = None,
         ea: float | None = None,
         **params: Any,
     ) -> None:
         """Write a value for this slot."""
-        resolved_ex = self._ttl if ex is None and ea is None else ex
+        resolved_ex = self._ttl if ex is None and px is None and ea is None else ex
         self._namespace._cache_service.set(
             self.build_key(**params),
             value,
             ex=resolved_ex,
+            px=px,
             ea=ea,
             coder=self._coder,
         )
@@ -191,15 +193,17 @@ class CacheSlot[T]:
         value: T,
         *,
         ex: int | None = None,
+        px: int | None = None,
         ea: float | None = None,
         **params: Any,
     ) -> None:
         """Asynchronous variant of :meth:`set`."""
-        resolved_ex = self._ttl if ex is None and ea is None else ex
+        resolved_ex = self._ttl if ex is None and px is None and ea is None else ex
         await self._namespace._cache_service.aset(
             self.build_key(**params),
             value,
             ex=resolved_ex,
+            px=px,
             ea=ea,
             coder=self._coder,
         )

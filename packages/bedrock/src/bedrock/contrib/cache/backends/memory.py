@@ -50,11 +50,17 @@ class InMemoryBackend(CacheBackend):
     # -- Core operations --------------------------------------------------
 
     @staticmethod
-    def _resolve_expires_at(ex: int | None = None, ea: float | None = None) -> float | None:
+    def _resolve_expires_at(
+        ex: int | None = None,
+        px: int | None = None,
+        ea: float | None = None,
+    ) -> float | None:
         if ex is not None:
             return time.monotonic() + ex
+        if px is not None:
+            return time.monotonic() + px / 1000
         if ea is not None:
-            return ea
+            return time.monotonic() + (ea - time.time())
         return None
 
     def get(self, key: str, default: bytes | None = None) -> bytes | None:
@@ -105,24 +111,45 @@ class InMemoryBackend(CacheBackend):
             remaining = int(entry.expires_at - time.monotonic())
             return entry.value, max(remaining, 0)
 
-    def set(self, key: str, value: bytes, ex: int | None = None, ea: float | None = None) -> None:
+    def set(
+        self,
+        key: str,
+        value: bytes,
+        ex: int | None = None,
+        px: int | None = None,
+        ea: float | None = None,
+    ) -> None:
         """Store a value in the cache."""
-        expires_at = self._resolve_expires_at(ex=ex, ea=ea)
+        expires_at = self._resolve_expires_at(ex=ex, px=px, ea=ea)
         self._store[key] = CacheEntry(value=value, expires_at=expires_at)
         if self._settings.max_size > 0 and len(self._store) > self._settings.max_size:
             self._evict()
 
-    async def aset(self, key: str, value: bytes, ex: int | None = None, ea: float | None = None) -> None:
+    async def aset(
+        self,
+        key: str,
+        value: bytes,
+        ex: int | None = None,
+        px: int | None = None,
+        ea: float | None = None,
+    ) -> None:
         """Asynchronous variant of :meth:`set`."""
-        expires_at = self._resolve_expires_at(ex=ex, ea=ea)
+        expires_at = self._resolve_expires_at(ex=ex, px=px, ea=ea)
         async with self._lock:
             self._store[key] = CacheEntry(value=value, expires_at=expires_at)
             if self._settings.max_size > 0 and len(self._store) > self._settings.max_size:
                 self._evict_locked()
 
-    def add(self, key: str, value: bytes, ex: int | None = None, ea: float | None = None) -> bool:
+    def add(
+        self,
+        key: str,
+        value: bytes,
+        ex: int | None = None,
+        px: int | None = None,
+        ea: float | None = None,
+    ) -> bool:
         """Store a value only when the key does not already exist."""
-        expires_at = self._resolve_expires_at(ex=ex, ea=ea)
+        expires_at = self._resolve_expires_at(ex=ex, px=px, ea=ea)
         with self._sync_lock:
             entry = self._store.get(key)
             if entry is not None and not entry.is_expired:
@@ -134,9 +161,16 @@ class InMemoryBackend(CacheBackend):
                 self._evict()
             return True
 
-    async def aadd(self, key: str, value: bytes, ex: int | None = None, ea: float | None = None) -> bool:
+    async def aadd(
+        self,
+        key: str,
+        value: bytes,
+        ex: int | None = None,
+        px: int | None = None,
+        ea: float | None = None,
+    ) -> bool:
         """Asynchronous variant of :meth:`add`."""
-        expires_at = self._resolve_expires_at(ex=ex, ea=ea)
+        expires_at = self._resolve_expires_at(ex=ex, px=px, ea=ea)
         async with self._lock:
             entry = self._store.get(key)
             if entry is not None and not entry.is_expired:
@@ -268,27 +302,44 @@ class InMemoryBackend(CacheBackend):
                     del self._store[key]
             return result
 
-    def set_many(self, mapping: dict[str, bytes], ex: int | None = None, ea: float | None = None) -> None:
+    def set_many(
+        self,
+        mapping: dict[str, bytes],
+        ex: int | None = None,
+        px: int | None = None,
+        ea: float | None = None,
+    ) -> None:
         """Store multiple key-value pairs in one call."""
         for key, value in mapping.items():
-            self.set(key, value, ex=ex, ea=ea)
+            self.set(key, value, ex=ex, px=px, ea=ea)
 
-    async def aset_many(self, mapping: dict[str, bytes], ex: int | None = None, ea: float | None = None) -> None:
+    async def aset_many(
+        self,
+        mapping: dict[str, bytes],
+        ex: int | None = None,
+        px: int | None = None,
+        ea: float | None = None,
+    ) -> None:
         """Asynchronous variant of :meth:`set_many`."""
         for key, value in mapping.items():
-            await self.aset(key, value, ex=ex, ea=ea)
+            await self.aset(key, value, ex=ex, px=px, ea=ea)
 
     # -- Convenience operations -------------------------------------------
 
     def get_or_set(
-        self, key: str, default_provider: callable[[], bytes] | bytes, ex: int | None = None, ea: float | None = None
+        self,
+        key: str,
+        default_provider: callable[[], bytes] | bytes,
+        ex: int | None = None,
+        px: int | None = None,
+        ea: float | None = None,
     ) -> bytes | None:
         """Get a cached value, or set and return ``default`` if missing."""
         value = self.get(key)
         if value is not None:
             return value
         value = default_provider() if callable(default_provider) else default_provider
-        self.set(key, value, ex=ex, ea=ea)
+        self.set(key, value, ex=ex, px=px, ea=ea)
         return value
 
     async def aget_or_set(
@@ -296,6 +347,7 @@ class InMemoryBackend(CacheBackend):
         key: str,
         default_provider: callable[[], bytes] | bytes | callable[[], Awaitable[bytes]],
         ex: int | None = None,
+        px: int | None = None,
         ea: float | None = None,
     ) -> bytes | None:
         """Asynchronous variant of :meth:`get_or_set`."""
@@ -310,7 +362,7 @@ class InMemoryBackend(CacheBackend):
                     value = default_provider()
             else:
                 value = default_provider
-            await self._aset_locked(key, value, ex=ex, ea=ea)
+            await self._aset_locked(key, value, ex=ex, px=px, ea=ea)
             return value
 
     # -- Key listing ------------------------------------------------------
@@ -393,9 +445,16 @@ class InMemoryBackend(CacheBackend):
             return None
         return entry.value
 
-    async def _aset_locked(self, key: str, value: bytes, ex: int | None = None, ea: float | None = None) -> None:
+    async def _aset_locked(
+        self,
+        key: str,
+        value: bytes,
+        ex: int | None = None,
+        px: int | None = None,
+        ea: float | None = None,
+    ) -> None:
         """Set a value (caller holds lock)."""
-        expires_at = self._resolve_expires_at(ex=ex, ea=ea)
+        expires_at = self._resolve_expires_at(ex=ex, px=px, ea=ea)
         self._store[key] = CacheEntry(value=value, expires_at=expires_at)
         if self._settings.max_size > 0 and len(self._store) > self._settings.max_size:
             self._evict_locked()
