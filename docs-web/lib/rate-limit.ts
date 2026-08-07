@@ -1,74 +1,187 @@
-const TOKENS_PER_WINDOW = 100_000;
-const WINDOW_SECONDS = 3600;
+import { RATE_LIMIT, type ReserveResult } from "./rate-limit-budget";
 
-interface RateLimitResult {
-  allowed: boolean;
-  remaining: number;
-  resetAt: number;
-  current: number;
+export { RATE_LIMIT };
+
+/**
+ * Only the Cloudflare-injected `cf-connecting-ip` header is trusted.
+ * `x-forwarded-for` is client-controllable and must never be used as a
+ * rate-limit identity. Returns null when the trusted header is missing so
+ * callers can reject the request instead of falling back to a spoofable
+ * or shared identity.
+ */
+export function getClientIp(req: Request): string | null {
+  const ip = req.headers.get("cf-connecting-ip")?.trim();
+  return ip ? ip : null;
 }
 
-interface WindowData {
-  tokens: number;
-  resetAt: number;
+/** Rough token estimate: ~4 characters per token for English/code text. */
+export function estimateTokens(text: string): number {
+  return Math.ceil(text.length / 4);
 }
 
-function getWindowKey(ip: string): string {
-  const now = Math.floor(Date.now() / 1000);
-  const windowStart = now - (now % WINDOW_SECONDS);
-  return `rl:${ip}:${windowStart}`;
+interface MessageLike {
+  role?: unknown;
+  content?: unknown;
+  parts?: unknown;
 }
 
-export async function checkRateLimit(
-  kv: KVNamespace,
-  ip: string,
-): Promise<RateLimitResult> {
-  const key = getWindowKey(ip);
-  const resetAt =
-    Math.floor(Date.now() / 1000 / WINDOW_SECONDS) * WINDOW_SECONDS +
-    WINDOW_SECONDS;
+function messageText(message: MessageLike): string {
+  if (typeof message.content === "string") return message.content;
+  if (!Array.isArray(message.parts)) return "";
+  let text = "";
+  for (const part of message.parts) {
+    if (
+      part &&
+      typeof part === "object" &&
+      (part as { type?: unknown }).type === "text" &&
+      typeof (part as { text?: unknown }).text === "string"
+    ) {
+      text += (part as { text: string }).text;
+    }
+  }
+  return text;
+}
 
-  const raw = await kv.get<WindowData>(key, { type: "json" });
-  const current = raw?.tokens ?? 0;
+export type ChatBodyValidation =
+  | { ok: true; messages: MessageLike[]; estimatedInputTokens: number }
+  | { ok: false; status: number; code: string; message: string };
 
-  if (current >= TOKENS_PER_WINDOW) {
-    return { allowed: false, remaining: 0, resetAt, current };
+/**
+ * Early rejection based on the declared content-length, before the body
+ * is read. The header can be forged, so the post-read check in
+ * parseAndValidateChatBody remains the authoritative bound.
+ */
+export function isDeclaredBodyTooLarge(req: Request): boolean {
+  const declared = Number(req.headers.get("content-length"));
+  return Number.isFinite(declared) && declared > RATE_LIMIT.MAX_BODY_BYTES;
+}
+
+/**
+ * Validate and bound the chat request body before any model call:
+ * request size, message count and estimated input tokens are all capped.
+ */
+export function parseAndValidateChatBody(rawBody: string): ChatBodyValidation {
+  if (new TextEncoder().encode(rawBody).length > RATE_LIMIT.MAX_BODY_BYTES) {
+    return {
+      ok: false,
+      status: 413,
+      code: "body_too_large",
+      message: `Request body exceeds the ${RATE_LIMIT.MAX_BODY_BYTES} byte limit.`,
+    };
   }
 
-  return {
-    allowed: true,
-    remaining: TOKENS_PER_WINDOW - current,
-    resetAt,
-    current,
-  };
+  let body: unknown;
+  try {
+    body = JSON.parse(rawBody);
+  } catch {
+    return {
+      ok: false,
+      status: 400,
+      code: "invalid_json",
+      message: "Request body must be valid JSON.",
+    };
+  }
+
+  const messages = (body as { messages?: unknown })?.messages;
+  if (
+    !Array.isArray(messages) ||
+    messages.length === 0 ||
+    messages.some(
+      (m) => !m || typeof m !== "object" || typeof m.role !== "string",
+    )
+  ) {
+    return {
+      ok: false,
+      status: 400,
+      code: "invalid_messages",
+      message: "`messages` must be a non-empty array of chat messages.",
+    };
+  }
+
+  if (messages.length > RATE_LIMIT.MAX_MESSAGES) {
+    return {
+      ok: false,
+      status: 400,
+      code: "too_many_messages",
+      message: `At most ${RATE_LIMIT.MAX_MESSAGES} messages are allowed per request.`,
+    };
+  }
+
+  const estimatedInputTokens = messages.reduce(
+    (sum, m) => sum + estimateTokens(messageText(m as MessageLike)),
+    0,
+  );
+  if (estimatedInputTokens > RATE_LIMIT.MAX_INPUT_TOKENS) {
+    return {
+      ok: false,
+      status: 400,
+      code: "input_too_large",
+      message: `Estimated input of ${estimatedInputTokens} tokens exceeds the ${RATE_LIMIT.MAX_INPUT_TOKENS} token limit.`,
+    };
+  }
+
+  return { ok: true, messages: messages as MessageLike[], estimatedInputTokens };
 }
 
-export async function trackTokenUsage(
-  kv: KVNamespace,
+/** Minimal structural types so the client helpers stay unit-testable. */
+export interface RateLimiterStub {
+  fetch(input: string, init?: RequestInit): Promise<Response>;
+}
+
+export interface RateLimiterNamespace {
+  idFromName(name: string): unknown;
+  get(id: unknown): RateLimiterStub;
+}
+
+function getStub(ns: RateLimiterNamespace, ip: string): RateLimiterStub {
+  return ns.get(ns.idFromName(ip));
+}
+
+async function callLimiter(
+  stub: RateLimiterStub,
+  path: string,
+  payload: Record<string, unknown>,
+): Promise<Response> {
+  return stub.fetch(`https://rate-limiter.internal${path}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function reserveBudget(
+  ns: RateLimiterNamespace,
   ip: string,
-  inputTokens: number,
-  outputTokens: number,
-): Promise<void> {
-  const key = getWindowKey(ip);
-  const ttl = WINDOW_SECONDS * 2;
-
-  const raw: WindowData | null = await kv.get(key, { type: "json" });
-  const current = raw?.tokens ?? 0;
-  const total = inputTokens + outputTokens;
-
-  await kv.put(
-    key,
-    JSON.stringify({ tokens: current + total, resetAt: raw?.resetAt ?? 0 }),
-    {
-      expirationTtl: ttl,
-    },
-  );
+  tokens: number,
+): Promise<ReserveResult> {
+  const res = await callLimiter(getStub(ns, ip), "/reserve", { tokens });
+  return (await res.json()) as ReserveResult;
 }
 
-export function getClientIp(req: Request): string {
-  return (
-    req.headers.get("cf-connecting-ip") ??
-    req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ??
-    "unknown"
-  );
+export async function settleBudget(
+  ns: RateLimiterNamespace,
+  ip: string,
+  reservationId: string,
+  actualTokens: number,
+): Promise<void> {
+  await callLimiter(getStub(ns, ip), "/settle", {
+    reservationId,
+    actualTokens,
+  });
+}
+
+export async function forfeitBudget(
+  ns: RateLimiterNamespace,
+  ip: string,
+  reservationId: string,
+): Promise<void> {
+  await callLimiter(getStub(ns, ip), "/forfeit", { reservationId });
+}
+
+export async function releaseBudget(
+  ns: RateLimiterNamespace,
+  ip: string,
+  reservationId: string,
+): Promise<void> {
+  await callLimiter(getStub(ns, ip), "/release", { reservationId });
 }

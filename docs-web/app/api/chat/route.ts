@@ -10,7 +10,17 @@ import { source } from "@/lib/source";
 import { Document, type DocumentData } from "flexsearch";
 import { createWorkersAI } from "workers-ai-provider";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
-import { checkRateLimit, trackTokenUsage, getClientIp } from "@/lib/rate-limit";
+import {
+  RATE_LIMIT,
+  estimateTokens,
+  forfeitBudget,
+  getClientIp,
+  isDeclaredBodyTooLarge,
+  parseAndValidateChatBody,
+  releaseBudget,
+  reserveBudget,
+  settleBudget,
+} from "@/lib/rate-limit";
 
 interface CustomDocument extends DocumentData {
   url: string;
@@ -84,74 +94,144 @@ const systemPrompt = [
   "- Keep answers concise and practical. Show code examples when relevant.",
 ].join("\n");
 
-export async function POST(req: Request, ctx: RouteContext<"/api/chat">) {
+function rateLimitHeaders(remaining: number, resetAt: number) {
+  return {
+    "X-RateLimit-Limit": String(RATE_LIMIT.TOKENS_PER_WINDOW),
+    "X-RateLimit-Remaining": String(remaining),
+    "X-RateLimit-Reset": String(resetAt),
+  };
+}
+
+export async function POST(req: Request) {
   const ip = getClientIp(req);
-  const { env } = getCloudflareContext();
-  const rateLimit = await checkRateLimit(env.RATE_LIMIT_KV, ip);
-  if (!rateLimit.allowed) {
+  if (!ip) {
     return Response.json(
       {
-        error: "Rate limit exceeded",
-        message: `You have used ${rateLimit.current} tokens this hour. Limit is 50,000 tokens/hour. Resets at ${new Date(rateLimit.resetAt * 1000).toISOString()}.`,
-        resetAt: rateLimit.resetAt,
+        error: "untrusted_client",
+        message:
+          "Missing cf-connecting-ip header. This API is only reachable through Cloudflare.",
+      },
+      { status: 403 },
+    );
+  }
+
+  if (isDeclaredBodyTooLarge(req)) {
+    return Response.json(
+      {
+        error: "body_too_large",
+        message: `Request body exceeds the ${RATE_LIMIT.MAX_BODY_BYTES} byte limit.`,
+      },
+      { status: 413 },
+    );
+  }
+
+  const parsed = parseAndValidateChatBody(await req.text());
+  if (!parsed.ok) {
+    return Response.json(
+      { error: parsed.code, message: parsed.message },
+      { status: parsed.status },
+    );
+  }
+
+  const { env } = getCloudflareContext();
+
+  // Atomically reserve budget before the model is called. The reservation
+  // covers the estimated input plus a fixed output allowance; the unused
+  // portion is refunded when the stream settles.
+  const reservationTokens =
+    parsed.estimatedInputTokens +
+    estimateTokens(systemPrompt) +
+    RATE_LIMIT.RESERVED_OUTPUT_TOKENS;
+  const reservation = await reserveBudget(
+    env.RATE_LIMITER,
+    ip,
+    reservationTokens,
+  );
+  if (!reservation.allowed || !reservation.reservationId) {
+    return Response.json(
+      {
+        error: "rate_limited",
+        message: `You have used ${reservation.used} of ${RATE_LIMIT.TOKENS_PER_WINDOW} tokens this hour. Resets at ${new Date(reservation.resetAt * 1000).toISOString()}.`,
+        resetAt: reservation.resetAt,
       },
       {
         status: 429,
         headers: {
-          "X-RateLimit-Limit": "50000",
-          "X-RateLimit-Remaining": "0",
-          "X-RateLimit-Reset": String(rateLimit.resetAt),
+          ...rateLimitHeaders(reservation.remaining, reservation.resetAt),
           "Retry-After": String(
-            rateLimit.resetAt - Math.floor(Date.now() / 1000),
+            reservation.resetAt - Math.floor(Date.now() / 1000),
           ),
         },
       },
     );
   }
 
-  const reqJson = await req.json();
+  const reservationId = reservation.reservationId;
+  let finalized = false;
+  const finalize = async (
+    action: () => Promise<void>,
+  ): Promise<void> => {
+    if (finalized) return;
+    finalized = true;
+    await action();
+  };
+
   const workersai = createWorkersAI({ binding: env.AI });
 
-  const result = streamText({
-    model: workersai(process.env.WORKER_AI_MODEL ?? "@cf/moonshotai/kimi-k2.5"),
-    stopWhen: stepCountIs(5),
-    tools: {
-      search: searchTool,
-    },
-    messages: [
-      { role: "system", content: systemPrompt },
-      //@ts-ignore
-      ...(await convertToModelMessages<ChatUIMessage>(reqJson.messages ?? [], {
-        convertDataPart(part) {
-          if (part.type === "data-client")
-            return {
-              type: "text",
-              text: `[Client Context: ${JSON.stringify(part.data)}]`,
-            };
-        },
-      })),
-    ],
-    toolChoice: "auto",
-    onFinish: async ({ usage }) => {
-      await trackTokenUsage(
-        env.RATE_LIMIT_KV,
-        ip,
-        usage.inputTokens ?? 0,
-        usage.outputTokens ?? 0,
-      );
-    },
-    onError: (error) => {
-      console.error(error);
-    },
-  });
+  try {
+    const result = streamText({
+      model: workersai(
+        process.env.WORKER_AI_MODEL ?? "@cf/moonshotai/kimi-k2.5",
+      ),
+      stopWhen: stepCountIs(5),
+      abortSignal: req.signal,
+      tools: {
+        search: searchTool,
+      },
+      messages: [
+        { role: "system", content: systemPrompt },
+        //@ts-ignore
+        ...(await convertToModelMessages<ChatUIMessage>(parsed.messages, {
+          convertDataPart(part) {
+            if (part.type === "data-client")
+              return {
+                type: "text",
+                text: `[Client Context: ${JSON.stringify(part.data)}]`,
+              };
+          },
+        })),
+      ],
+      toolChoice: "auto",
+      onFinish: async ({ totalUsage }) => {
+        await finalize(() =>
+          settleBudget(
+            env.RATE_LIMITER,
+            ip,
+            reservationId,
+            (totalUsage.inputTokens ?? 0) + (totalUsage.outputTokens ?? 0),
+          ),
+        );
+      },
+      // Aborted or errored streams forfeit the full reservation: the model
+      // may already have consumed tokens, and refunding on abort would let
+      // clients bypass the budget by cancelling streams.
+      onAbort: async () => {
+        await finalize(() => forfeitBudget(env.RATE_LIMITER, ip, reservationId));
+      },
+      onError: async (error) => {
+        console.error(error);
+        await finalize(() => forfeitBudget(env.RATE_LIMITER, ip, reservationId));
+      },
+    });
 
-  return result.toUIMessageStreamResponse({
-    headers: {
-      "X-RateLimit-Limit": "50000",
-      "X-RateLimit-Remaining": String(rateLimit.remaining),
-      "X-RateLimit-Reset": String(rateLimit.resetAt),
-    },
-  });
+    return result.toUIMessageStreamResponse({
+      headers: rateLimitHeaders(reservation.remaining, reservation.resetAt),
+    });
+  } catch (error) {
+    // The model call never started: return the reservation in full.
+    await finalize(() => releaseBudget(env.RATE_LIMITER, ip, reservationId));
+    throw error;
+  }
 }
 
 export type SearchTool = typeof searchTool;
