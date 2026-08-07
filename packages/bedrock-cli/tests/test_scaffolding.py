@@ -9,6 +9,7 @@ import pytest
 from bedrock_cli.scaffolding import (
     RenderedFile,
     ScaffoldExistsError,
+    ScaffoldPathError,
     render_files,
 )
 
@@ -93,3 +94,32 @@ class TestRenderFiles:
                 overwrite=True,
             )
             assert target.read_text(encoding="utf-8") != "old content"
+
+    @pytest.mark.parametrize(
+        "relative_path", ["../escaped.py", "/tmp/escaped.py", r"..\\escaped.py", r"nested\\file.py"]
+    )
+    def test_rejects_paths_that_are_not_safe_relative_paths(self, relative_path: str) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            destination = Path(tmpdir) / "destination"
+            with pytest.raises(ScaffoldPathError):
+                render_files(
+                    [RenderedFile(relative_path, "module/__init__.py.j2", {"module_name": "safe"})],
+                    destination,
+                )
+            assert not (Path(tmpdir) / "escaped.py").exists()
+
+    def test_rejects_existing_parent_symlink_that_escapes_destination(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            destination = root / "destination"
+            destination.mkdir()
+            outside = root / "outside"
+            outside.mkdir()
+            (destination / "linked").symlink_to(outside, target_is_directory=True)
+
+            with pytest.raises(ScaffoldPathError):
+                render_files(
+                    [RenderedFile("linked/escaped.py", "module/__init__.py.j2", {"module_name": "safe"})],
+                    destination,
+                )
+            assert not (outside / "escaped.py").exists()

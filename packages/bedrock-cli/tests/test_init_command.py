@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
+import pytest
 from bedrock_cli.main import app
 from typer.testing import CliRunner
 
@@ -59,3 +60,11 @@ class TestInitCommand:
             runner.invoke(app, ["init", "test-proj", "-o", tmpdir])
             manifest = (Path(tmpdir) / "test-proj" / "src" / "test_proj" / "manifest.yaml").read_text(encoding="utf-8")
             assert "test_proj" in manifest
+
+    @pytest.mark.parametrize("name", ["../pwn", r"bad\\name", "bad\nname", "bad:name", "123project"])
+    def test_rejects_unsafe_or_invalid_package_name(self, name: str) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = runner.invoke(app, ["init", name, "-o", tmpdir])
+            assert result.exit_code == 2
+            assert "Invalid value" in result.output
+            assert not (Path(tmpdir).parent / "pwn").exists()

@@ -8,13 +8,19 @@ from typing import Any
 import typer
 
 from bedrock_cli import console
-from bedrock_cli.scaffolding import RenderedFile, ScaffoldExistsError, ScaffoldOverwriteError, render_files
+from bedrock_cli.scaffolding import (
+    RenderedFile,
+    ScaffoldExistsError,
+    ScaffoldOverwriteError,
+    normalize_module_identifier,
+    render_files,
+)
 
 app = typer.Typer(help="Add submodules and domain modules to a Bedrock project.")
 
 
 def _slugify(name: str) -> str:
-    return name.lower().replace("-", "_").replace(" ", "_")
+    return normalize_module_identifier(name)
 
 
 @app.command("submodule")
@@ -36,7 +42,10 @@ def add_submodule(
     overwrite: bool = typer.Option(False, "--overwrite", help="Overwrite existing files."),
 ) -> None:
     """Generate a new Bedrock submodule skeleton."""
-    module_slug = _slugify(name)
+    try:
+        module_slug = _slugify(name)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
     destination = path / module_slug
 
     if with_bootstrap is None:
@@ -82,7 +91,10 @@ def add_domain(
     overwrite: bool = typer.Option(False, "--overwrite", help="Overwrite existing files."),
 ) -> None:
     """Generate a blank domain module skeleton (entities + service stubs)."""
-    module_slug = _slugify(name)
+    try:
+        module_slug = _slugify(name)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
     destination = path / module_slug
 
     console.info(f"Generating domain module [bold]{module_slug}[/bold] in {destination}")
