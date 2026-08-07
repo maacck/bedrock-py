@@ -12,6 +12,7 @@ from bedrock_cli.commands.gen import (
     _slugify,
 )
 from bedrock_cli.main import app
+from jinja2 import DictLoader, Environment
 from typer.testing import CliRunner
 
 runner = CliRunner()
@@ -63,6 +64,13 @@ class TestResolveTemplateName:
 
         with pytest.raises(Exit):
             _resolve_template_name("nonexistent_xyz_template")
+
+    def test_unsafe_template_name_exits_before_rendering(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = runner.invoke(app, ["gen", "../escaped", "myapp.models:User", tmpdir])
+            assert result.exit_code == 2
+            assert "Invalid value" in result.output
+            assert not (Path(tmpdir).parent / "escaped.py").exists()
 
     def test_user_template_found(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -234,6 +242,15 @@ class TestGenCommandIntegration:
         with tempfile.TemporaryDirectory() as tmpdir:
             result = runner.invoke(app, ["gen", "nonexistent_xyz", "myapp.models:User", tmpdir])
             assert result.exit_code == 1
+
+    @patch("bedrock_cli.commands.gen.build_template_environment")
+    def test_gen_reports_custom_template_syntax_error(self, mock_environment) -> None:
+        mock_environment.return_value = Environment(loader=DictLoader({"broken.py.j2": "{% if %}"}))
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = runner.invoke(app, ["gen", "broken", "myapp.models:User", tmpdir])
+            assert result.exit_code == 1
+            assert "contains invalid Jinja syntax" in result.output
+            assert "not found" not in result.output
 
     @patch("bedrock_cli.commands.gen._build_context")
     def test_gen_refuses_overwrite(self, mock_context) -> None:

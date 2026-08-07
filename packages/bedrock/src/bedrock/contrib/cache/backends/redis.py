@@ -8,6 +8,7 @@ from collections.abc import Awaitable, Callable
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from ..base import CacheBackend
+from ..exc import CacheClearRequiresPrefixError
 
 try:
     import redis
@@ -23,6 +24,8 @@ if redis.call('get', KEYS[1]) == ARGV[1] then
 end
 return 0
 """
+
+_CLEAR_BATCH_SIZE = 100
 
 
 class RedisCacheSettings(BaseSettings):
@@ -84,6 +87,12 @@ class RedisBackend(CacheBackend):
         full_key = f"{self._settings.key_prefix}{key}"
         return full_key.encode()
 
+    def _clear_pattern(self, prefix: str | None) -> bytes:
+        """Return the Redis scan pattern after checking namespace safety."""
+        if not self._settings.key_prefix:
+            raise CacheClearRequiresPrefixError()
+        return f"{self._settings.key_prefix}{prefix or ''}*".encode()
+
     # -- Core operations --------------------------------------------------
 
     def get(self, key: str, default: bytes | None = None) -> bytes | None:
@@ -116,40 +125,76 @@ class RedisBackend(CacheBackend):
         ttl = await self._async_client.ttl(raw_key)
         return data, (ttl if ttl > 0 else 0)
 
-    def set(self, key: str, value: bytes, ex: int | None = None, ea: float | None = None) -> None:
+    def set(
+        self,
+        key: str,
+        value: bytes,
+        ex: int | None = None,
+        px: int | None = None,
+        ea: float | None = None,
+    ) -> None:
         """Store a value in the cache."""
         raw_key = self._make_key(key)
         if ex is not None:
             self._client.setex(raw_key, ex, value)
+        elif px is not None:
+            self._client.set(raw_key, value, px=px)
         elif ea is not None:
             self._client.set(raw_key, value, exat=int(ea))
         else:
             self._client.set(raw_key, value)
 
-    async def aset(self, key: str, value: bytes, ex: int | None = None, ea: float | None = None) -> None:
+    async def aset(
+        self,
+        key: str,
+        value: bytes,
+        ex: int | None = None,
+        px: int | None = None,
+        ea: float | None = None,
+    ) -> None:
         """Asynchronous variant of :meth:`set`."""
         raw_key = self._make_key(key)
         if ex is not None:
             await self._async_client.setex(raw_key, ex, value)
+        elif px is not None:
+            await self._async_client.set(raw_key, value, px=px)
         elif ea is not None:
             await self._async_client.set(raw_key, value, exat=int(ea))
         else:
             await self._async_client.set(raw_key, value)
 
-    def add(self, key: str, value: bytes, ex: int | None = None, ea: float | None = None) -> bool:
+    def add(
+        self,
+        key: str,
+        value: bytes,
+        ex: int | None = None,
+        px: int | None = None,
+        ea: float | None = None,
+    ) -> bool:
         """Store a value only when the key does not already exist."""
         raw_key = self._make_key(key)
         if ex is not None:
             return bool(self._client.set(raw_key, value, ex=ex, nx=True))
+        if px is not None:
+            return bool(self._client.set(raw_key, value, px=px, nx=True))
         if ea is not None:
             return bool(self._client.set(raw_key, value, exat=int(ea), nx=True))
         return bool(self._client.set(raw_key, value, nx=True))
 
-    async def aadd(self, key: str, value: bytes, ex: int | None = None, ea: float | None = None) -> bool:
+    async def aadd(
+        self,
+        key: str,
+        value: bytes,
+        ex: int | None = None,
+        px: int | None = None,
+        ea: float | None = None,
+    ) -> bool:
         """Asynchronous variant of :meth:`add`."""
         raw_key = self._make_key(key)
         if ex is not None:
             return bool(await self._async_client.set(raw_key, value, ex=ex, nx=True))
+        if px is not None:
+            return bool(await self._async_client.set(raw_key, value, px=px, nx=True))
         if ea is not None:
             return bool(await self._async_client.set(raw_key, value, exat=int(ea), nx=True))
         return bool(await self._async_client.set(raw_key, value, nx=True))
@@ -193,36 +238,32 @@ class RedisBackend(CacheBackend):
         return bool(await self._async_client.exists(self._make_key(key)))
 
     def clear(self, prefix: str | None = None) -> int:
-        """Remove all entries from the cache, optionally filtered by prefix."""
-        if prefix is not None:
-            pattern = f"{self._settings.key_prefix}{prefix}*".encode()
-            deleted = 0
-            for key in self._client.scan_iter(match=pattern):
-                deleted += self._client.delete(key)
-            return deleted
-        if self._settings.key_prefix:
-            pattern = f"{self._settings.key_prefix}*".encode()
-            deleted = 0
-            for key in self._client.scan_iter(match=pattern):
-                deleted += self._client.delete(key)
-            return deleted
-        return self._client.flushdb()
+        """Delete only keys within the configured namespace, in bounded batches."""
+        pattern = self._clear_pattern(prefix)
+        deleted = 0
+        batch: list[bytes] = []
+        for key in self._client.scan_iter(match=pattern, count=_CLEAR_BATCH_SIZE):
+            batch.append(key)
+            if len(batch) == _CLEAR_BATCH_SIZE:
+                deleted += self._client.delete(*batch)
+                batch.clear()
+        if batch:
+            deleted += self._client.delete(*batch)
+        return deleted
 
     async def aclear(self, prefix: str | None = None) -> int:
         """Asynchronous variant of :meth:`clear`."""
-        if prefix is not None:
-            pattern = f"{self._settings.key_prefix}{prefix}*".encode()
-            deleted = 0
-            async for key in self._async_client.scan_iter(match=pattern):
-                deleted += await self._async_client.delete(key)
-            return deleted
-        if self._settings.key_prefix:
-            pattern = f"{self._settings.key_prefix}*".encode()
-            deleted = 0
-            async for key in self._async_client.scan_iter(match=pattern):
-                deleted += await self._async_client.delete(key)
-            return deleted
-        return await self._async_client.flushdb()
+        pattern = self._clear_pattern(prefix)
+        deleted = 0
+        batch: list[bytes] = []
+        async for key in self._async_client.scan_iter(match=pattern, count=_CLEAR_BATCH_SIZE):
+            batch.append(key)
+            if len(batch) == _CLEAR_BATCH_SIZE:
+                deleted += await self._async_client.delete(*batch)
+                batch.clear()
+        if batch:
+            deleted += await self._async_client.delete(*batch)
+        return deleted
 
     # -- Batch operations -------------------------------------------------
 
@@ -246,26 +287,42 @@ class RedisBackend(CacheBackend):
                 result[key] = data
         return result
 
-    def set_many(self, mapping: dict[str, bytes], ex: int | None = None, ea: float | None = None) -> None:
+    def set_many(
+        self,
+        mapping: dict[str, bytes],
+        ex: int | None = None,
+        px: int | None = None,
+        ea: float | None = None,
+    ) -> None:
         """Store multiple key-value pairs in one call."""
         pipe = self._client.pipeline()
         for key, value in mapping.items():
             raw_key = self._make_key(key)
             if ex is not None:
                 pipe.setex(raw_key, ex, value)
+            elif px is not None:
+                pipe.set(raw_key, value, px=px)
             elif ea is not None:
                 pipe.set(raw_key, value, exat=int(ea))
             else:
                 pipe.set(raw_key, value)
         pipe.execute()
 
-    async def aset_many(self, mapping: dict[str, bytes], ex: int | None = None, ea: float | None = None) -> None:
+    async def aset_many(
+        self,
+        mapping: dict[str, bytes],
+        ex: int | None = None,
+        px: int | None = None,
+        ea: float | None = None,
+    ) -> None:
         """Asynchronous variant of :meth:`set_many`."""
         pipe = self._async_client.pipeline()
         for key, value in mapping.items():
             raw_key = self._make_key(key)
             if ex is not None:
                 pipe.setex(raw_key, ex, value)
+            elif px is not None:
+                pipe.set(raw_key, value, px=px)
             elif ea is not None:
                 pipe.set(raw_key, value, exat=int(ea))
             else:
@@ -279,6 +336,7 @@ class RedisBackend(CacheBackend):
         key: str,
         default_provider: Callable[[], bytes] | bytes,
         ex: int | None = None,
+        px: int | None = None,
         ea: float | None = None,
     ) -> bytes | None:
         """Get a cached value, or set and return ``default`` if missing."""
@@ -286,7 +344,7 @@ class RedisBackend(CacheBackend):
         if value is not None:
             return value
         value = default_provider() if callable(default_provider) else default_provider
-        self.set(key, value, ex=ex, ea=ea)
+        self.set(key, value, ex=ex, px=px, ea=ea)
         return value
 
     async def aget_or_set(
@@ -294,6 +352,7 @@ class RedisBackend(CacheBackend):
         key: str,
         default_provider: Callable[[], bytes] | bytes | Callable[[], Awaitable[bytes]],
         ex: int | None = None,
+        px: int | None = None,
         ea: float | None = None,
     ) -> bytes | None:
         """Asynchronous variant of :meth:`get_or_set`."""
@@ -307,7 +366,7 @@ class RedisBackend(CacheBackend):
                 value = default_provider()
         else:
             value = default_provider
-        await self.aset(key, value, ex=ex, ea=ea)
+        await self.aset(key, value, ex=ex, px=px, ea=ea)
         return value
 
     # -- Key listing ------------------------------------------------------

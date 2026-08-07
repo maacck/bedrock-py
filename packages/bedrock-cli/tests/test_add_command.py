@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
+import pytest
 from bedrock_cli.main import app
 from typer.testing import CliRunner
 
@@ -115,3 +116,10 @@ class TestAddDomain:
             result = runner.invoke(app, ["add", "domain", "user", tmpdir, "--overwrite"])
             assert result.exit_code == 0
             assert (dom_dir / "entities.py").exists()
+
+    @pytest.mark.parametrize("name", ["../pwn", r"bad\\name", "bad\nname", "bad:domain", "123domain"])
+    def test_rejects_unsafe_or_invalid_package_name(self, name: str) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = runner.invoke(app, ["add", "domain", name, tmpdir])
+            assert result.exit_code == 2
+            assert "Invalid value" in result.output

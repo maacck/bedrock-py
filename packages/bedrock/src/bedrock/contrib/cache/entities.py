@@ -14,7 +14,7 @@ class CacheEntry(BaseModel):
 
     Attributes:
         value: The cached Python object.
-        expires_at: Absolute Unix timestamp when this entry expires, or ``None`` for no expiry.
+        expires_at: Monotonic-clock deadline when this entry expires, or ``None`` for no expiry.
     """
 
     value: bytes

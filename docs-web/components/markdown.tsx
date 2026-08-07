@@ -16,6 +16,7 @@ import { DynamicCodeBlock } from 'fumadocs-ui/components/dynamic-codeblock';
 import defaultMdxComponents from 'fumadocs-ui/mdx';
 import { visit } from 'unist-util-visit';
 import type { ElementContent, Root, RootContent } from 'hast';
+import { sanitizeUrl } from '@/lib/safe-url';
 
 export interface Processor {
   process: (content: string) => Promise<ReactNode>;
@@ -54,7 +55,7 @@ export function rehypeWrapWords() {
   };
 }
 
-function createProcessor(): Processor {
+export function createProcessor(): Processor {
   const processor = remark().use(remarkGfm).use(remarkRehype).use(rehypeWrapWords);
 
   return {
@@ -70,11 +71,43 @@ function createProcessor(): Processor {
         components: {
           ...defaultMdxComponents,
           pre: Pre,
-          img: undefined, // use JSX
+          a: SafeAnchor,
+          img: SafeImage,
         },
       });
     },
   };
+}
+
+const DefaultAnchor = defaultMdxComponents.a;
+
+export function SafeAnchor(props: ComponentProps<'a'>) {
+  const href = sanitizeUrl(props.href, 'link');
+
+  if (href === undefined) {
+    // Unsafe URL: degrade to non-navigable text, never render the href.
+    return <span className={props.className}>{props.children}</span>;
+  }
+
+  if (props.target === '_blank') {
+    // New-window links must always carry noopener noreferrer. Only override
+    // rel in this case — passing rel={undefined} would erase the default
+    // component's own rel attribute.
+    return <DefaultAnchor {...props} href={href} rel="noopener noreferrer" />;
+  }
+
+  return <DefaultAnchor {...props} href={href} />;
+}
+
+export function SafeImage(props: ComponentProps<'img'>) {
+  const src = sanitizeUrl(props.src, 'image');
+
+  if (src === undefined) {
+    // Unsafe URL: render nothing, never load the resource.
+    return null;
+  }
+
+  return <img {...props} src={src} alt={props.alt ?? ''} />;
 }
 
 function Pre(props: ComponentProps<'pre'>) {

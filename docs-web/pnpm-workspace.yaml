@@ -1,0 +1,17 @@
+allowBuilds:
+  esbuild: true
+  sharp: true
+  unrs-resolver: true
+  workerd: true
+overrides:
+  next>postcss: ^8.5.18
+  sharp: ^0.35.0
+  undici: ^7.29.0
+  ws: ^8.21.0
+  form-data: ^4.0.6
+  js-yaml@^4.0.0: ^4.3.1
+  brace-expansion@^2.0.0: ^2.1.4
+  brace-expansion@^5.0.0: ^5.0.9
+  dompurify: ^3.4.12
+  qs: ^6.15.2
+  body-parser: ^2.3.0

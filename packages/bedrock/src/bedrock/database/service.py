@@ -18,6 +18,7 @@ from sqlalchemy.sql.elements import ColumnElement
 
 from bedrock.database.base import BedrockModel
 
+from ..exc import InvalidQueryLimitError
 from ..logging import get_logger
 from .filters import Field, Filter, init_filters
 
@@ -25,6 +26,15 @@ logger = get_logger(__name__)
 
 FilterSpec = dict[str, Any]
 FilterSpecs = FilterSpec | list[FilterSpec]
+
+MAX_QUERY_LIMIT = 1000
+
+
+def _validate_query_limit(limit: int) -> int:
+    """Reject query limits that could create unbounded database work."""
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_QUERY_LIMIT:
+        raise InvalidQueryLimitError(f"`limit` must be an integer between 1 and {MAX_QUERY_LIMIT}.")
+    return limit
 
 
 def build_filters(model: type[BedrockModel], filters: list[Filter]) -> ColumnElement[bool]:
@@ -119,6 +129,7 @@ def build_query(
         A tuple of ``(data_query, count_query, filters)`` where *filters*
         is the combined list of active filter clauses.
     """
+    limit = _validate_query_limit(limit)
     sort_by = None
     offset = (page - 1) * limit if page > 1 else 0
     filter_specs = filter_specs or []
@@ -229,6 +240,7 @@ def search_filter_sort_paginate(
         ``"page_info"`` containing the query results and pagination
         metadata.
     """
+    limit = _validate_query_limit(limit)
     select_fields = [model]
     if additional_select is not None:
         select_fields.extend(additional_select)
