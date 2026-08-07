@@ -211,7 +211,7 @@ def search_session(search_engine):
             CustomOpItem(label="hello world"),
             CustomOpItem(label="goodbye world"),
             UnsearchableItem(value="something"),
-    ]
+        ]
     )
     session.commit()
     alpha = session.query(SearchableItem).filter_by(name="Alpha Widget").one()

@@ -297,9 +297,7 @@ class Filter:
                 is not a dictionary.
         """
         if _depth > MAX_FILTER_DEPTH:
-            raise FilterDepthExceededError(
-                f"Filter tree exceeds the maximum depth of {MAX_FILTER_DEPTH}."
-            )
+            raise FilterDepthExceededError(f"Filter tree exceeds the maximum depth of {MAX_FILTER_DEPTH}.")
         if not isinstance(filter_spec, dict):
             raise BadFilterFormatError(f"Filter spec `{filter_spec}` should be a dictionary.")
 
