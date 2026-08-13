@@ -26,9 +26,9 @@ Content-Type: application/json
 | Field | Required | Type | Notes |
 |-------|----------|------|-------|
 | `query` | yes | non-empty string | Trimmed. Maximum 2,000 characters. |
-| `thread_id` | no | UUID string | Omit or `null` to start a new thread. Must be a UUID when present. |
+| `thread_id` | no | UUID string | Omit or `null` to start a new thread. Must be a UUID when present. A valid but unknown UUID also creates a new thread (see [Status codes](#status-codes)). |
 | `device_id` | yes | UUID string | Client-generated ownership key. See [Device ownership](#device-ownership). |
-| `context` | no | object or `null` | Optional. Only `context.location` is accepted (string, max 256 characters). |
+| `context` | no | object or `null` | Optional. Only `context.location` is used (string, max 256 characters). Other keys on `context` are ignored. |
 
 The body must be valid JSON and at most 16 KB. The `Content-Length` header is checked first; the decoded body is the authoritative bound.
 
@@ -65,7 +65,7 @@ Generate a UUID once per browser profile and reuse it. The official docs client 
 2. Follow-ups: send that UUID as `thread_id` with the same `device_id`.
 3. New conversation: drop the stored thread id and omit `thread_id` again.
 
-History is capped server-side (20 messages / 8,192 estimated tokens). Clients never replay prior turns.
+History is capped server-side as a **best-effort** bound: at most 20 messages, and oldest turns are dropped until estimated tokens are at or under 8,192 — except the latest two messages are always retained, even if they alone exceed the token budget. Clients never replay prior turns.
 
 ## Status codes
 
@@ -73,7 +73,7 @@ History is capped server-side (20 messages / 8,192 estimated tokens). Clients ne
 |--------|--------------|------|
 | `400` | `invalid_json`, `invalid_query`, `query_too_long`, `invalid_device`, `invalid_thread`, `invalid_context` | Body or field validation failed. |
 | `403` | `untrusted_client` | Missing Cloudflare `cf-connecting-ip`. The API is only reachable through Cloudflare. |
-| `404` | `thread_not_found` | `thread_id` does not exist for this `device_id` (unknown thread **or** ownership mismatch). |
+| `404` | `thread_not_found` | Ownership mismatch only: the thread exists but `device_id` does not match `thread.deviceId`. A valid but unknown `thread_id` **creates** a new thread (`200`), it does not 404. |
 | `409` | `thread_busy` | Another request is already running on this thread. Retry after the in-flight turn finishes. |
 | `413` | `body_too_large` | Declared or actual body exceeds 16 KB. |
 | `429` | `rate_limited` | Per-IP hourly token budget exhausted. See rate-limit headers and `Retry-After`. |
