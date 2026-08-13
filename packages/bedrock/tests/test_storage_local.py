@@ -166,6 +166,23 @@ def test_list_excludes_metadata_sidecars(svc: StorageService) -> None:
     assert keys == ["m1.txt"]
 
 
+def test_list_omits_empty_directories(svc: StorageService, tmp_path: Path) -> None:
+    """list() emits a directory entry only when its subtree contains an object.
+
+    Physical directories that hold no object (user-created empty dirs, or
+    dirs whose last object was deleted) are omitted, matching S3 common
+    prefixes, which only exist when backed by at least one object.
+    """
+    (tmp_path / "empty").mkdir()
+    assert svc.list().items == []
+    svc.upload("a/1.txt", b"x")
+    svc.upload("a/2.txt", b"x")
+    assert svc.list().items == [StorageListEntry(storage_key="a/", is_dir=True)]
+    svc.delete("a/1.txt")
+    svc.delete("a/2.txt")
+    assert svc.list().items == []
+
+
 def test_provider_metadata_follows_move_and_copy(svc: StorageService) -> None:
     """Metadata sidecars are carried by move() and copy()."""
     svc.upload("src.txt", b"x", provider_metadata={"owner": "alice"})
@@ -207,6 +224,23 @@ def test_exists(svc: StorageService) -> None:
     svc.upload("e.txt", b"x")
     assert svc.exists("e.txt") is True
     assert svc.exists("missing.txt") is False
+
+
+def test_directory_is_not_an_object(svc: StorageService) -> None:
+    """Directories are never objects: object ops treat them as absent (S3 semantics)."""
+    svc.upload("a/b.txt", b"x")
+    assert svc.head("a") is None
+    assert svc.exists("a") is False
+    with pytest.raises(StorageObjectNotFoundError):
+        svc.download("a")
+    with pytest.raises(StorageObjectNotFoundError):
+        list(svc.stream("a"))
+    assert svc.delete("a") is False
+    with pytest.raises(StorageObjectNotFoundError):
+        svc.move("a", "x")
+    with pytest.raises(StorageObjectNotFoundError):
+        svc.copy("a", "x")
+    assert svc.download("a/b.txt") == b"x"
 
 
 class _FailingReader:

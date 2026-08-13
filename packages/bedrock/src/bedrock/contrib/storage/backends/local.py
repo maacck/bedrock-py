@@ -3,6 +3,7 @@
 import mimetypes
 import os
 import shutil
+import stat
 import uuid
 from collections.abc import Iterable
 from datetime import UTC, datetime
@@ -126,15 +127,26 @@ class LocalBackend:
         """Return the full object content as bytes."""
         path = self._path(storage_key)
         try:
-            return path.read_bytes()
+            stat_result = path.stat()
         except FileNotFoundError as exc:
             raise StorageObjectNotFoundError(msg=f"Object {storage_key!r} does not exist.") from exc
         except OSError as exc:
             raise StorageDownloadError(msg=f"Failed to download {storage_key!r}: {exc}") from exc
+        if not stat.S_ISREG(stat_result.st_mode):
+            raise StorageObjectNotFoundError(msg=f"Object {storage_key!r} does not exist.")
+        return path.read_bytes()
 
     def stream(self, storage_key: str, chunk_size: int = 1_048_576) -> Iterable[bytes]:
         """Yield the object content in chunks."""
         path = self._path(storage_key)
+        try:
+            stat_result = path.stat()
+        except FileNotFoundError as exc:
+            raise StorageObjectNotFoundError(msg=f"Object {storage_key!r} does not exist.") from exc
+        except OSError as exc:
+            raise StorageDownloadError(msg=f"Failed to stream {storage_key!r}: {exc}") from exc
+        if not stat.S_ISREG(stat_result.st_mode):
+            raise StorageObjectNotFoundError(msg=f"Object {storage_key!r} does not exist.")
         try:
             with path.open("rb") as fh:
                 while True:
@@ -142,8 +154,6 @@ class LocalBackend:
                     if not chunk:
                         return
                     yield chunk
-        except FileNotFoundError as exc:
-            raise StorageObjectNotFoundError(msg=f"Object {storage_key!r} does not exist.") from exc
         except OSError as exc:
             raise StorageDownloadError(msg=f"Failed to stream {storage_key!r}: {exc}") from exc
 
@@ -152,6 +162,8 @@ class LocalBackend:
         src = self._path(storage_key)
         dest = self._path(dest_storage_key)
         try:
+            if not stat.S_ISREG(src.stat().st_mode):
+                raise StorageObjectNotFoundError(msg=f"Object {storage_key!r} does not exist.")
             dest.parent.mkdir(parents=True, exist_ok=True)
             os.replace(src, dest)
         except FileNotFoundError as exc:
@@ -168,6 +180,8 @@ class LocalBackend:
         src = self._path(storage_key)
         dest = self._path(dest_storage_key)
         try:
+            if not stat.S_ISREG(src.stat().st_mode):
+                raise StorageObjectNotFoundError(msg=f"Object {storage_key!r} does not exist.")
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(src, dest)
         except FileNotFoundError as exc:
@@ -189,11 +203,13 @@ class LocalBackend:
 
         The service passes ``prefix`` already normalized with a trailing slash
         (or ``None`` for the top level). Directory entries use a trailing-slash
-        key with ``is_dir=True`` and no size/last_modified; object entries
-        carry size and UTC ``last_modified`` (same provenance as ``head``).
-        Metadata sidecars are never listed. Pagination: ``continuation_token``
-        is the last returned entry's key and entries whose key sorts at or
-        below it are skipped.
+        key with ``is_dir=True`` and no size/last_modified, and are emitted
+        only when the subtree contains at least one object file (S3
+        common-prefix semantics; empty or sidecar-only directories are
+        omitted). Object entries carry size and UTC ``last_modified`` (same
+        provenance as ``head``). Metadata sidecars are never listed.
+        Pagination: ``continuation_token`` is the last returned entry's key
+        and entries whose key sorts at or below it are skipped.
         """
         prefix = prefix or ""
         if prefix and not prefix.endswith("/"):
@@ -208,7 +224,8 @@ class LocalBackend:
                 if name.endswith(_METADATA_SUFFIX):
                     continue
                 if child.is_dir():
-                    entries.append(StorageListEntry(storage_key=f"{prefix}{name}/", is_dir=True))
+                    if self._dir_has_objects(child):
+                        entries.append(StorageListEntry(storage_key=f"{prefix}{name}/", is_dir=True))
                 else:
                     try:
                         stat_result = child.stat()
@@ -239,7 +256,11 @@ class LocalBackend:
         return StorageListResult(items=entries, continuation_token=token, truncated=truncated)
 
     def head(self, storage_key: str) -> StorageObject | None:
-        """Return object metadata (mime from sidecar, else guessed), or ``None``."""
+        """Return object metadata (mime from sidecar, else guessed), or ``None``.
+
+        Directories and other non-regular files are not objects and return
+        ``None`` (matching S3, where a directory prefix is never an object).
+        """
         path = self._path(storage_key)
         try:
             stat_result = path.stat()
@@ -247,6 +268,8 @@ class LocalBackend:
             return None
         except OSError as exc:
             raise StoragePermissionError(msg=f"Failed to access {storage_key!r}: {exc}") from exc
+        if not stat.S_ISREG(stat_result.st_mode):
+            return None
         meta = self._read_meta(storage_key)
         mime_type = (meta or {}).get("mime_type") or mimetypes.guess_type(storage_key)[0]
         return StorageObject(
@@ -262,8 +285,21 @@ class LocalBackend:
         return self.head(storage_key) is not None
 
     def delete(self, storage_key: str) -> bool:
-        """Delete an object and its metadata sidecar; return ``True`` when it existed."""
+        """Delete an object and its metadata sidecar; return ``True`` when it existed.
+
+        Directories and other non-regular files are not objects; deleting
+        them reports ``False`` (matching S3, where delete on a non-existent
+        object is a no-op).
+        """
         path = self._path(storage_key)
+        try:
+            stat_result = path.stat()
+        except FileNotFoundError:
+            return False
+        except OSError as exc:
+            raise StoragePermissionError(msg=f"Failed to delete {storage_key!r}: {exc}") from exc
+        if not stat.S_ISREG(stat_result.st_mode):
+            return False
         try:
             path.unlink()
         except FileNotFoundError:
@@ -292,6 +328,22 @@ class LocalBackend:
 
     def close(self) -> None:
         """Release backend resources (none for the local filesystem)."""
+
+    def _dir_has_objects(self, path: Path) -> bool:
+        """Return ``True`` when the subtree at ``path`` holds at least one object file.
+
+        Metadata sidecars (``*.bmeta.json``) do not count as objects.
+        Short-circuits on the first regular file; subtrees that cannot be
+        walked are treated as empty so unreadable or vanishing directories are
+        simply not emitted.
+        """
+        try:
+            for child in path.rglob("*"):
+                if child.is_file() and not child.name.endswith(_METADATA_SUFFIX):
+                    return True
+        except OSError:
+            return False
+        return False
 
     def _move_sidecar(self, storage_key: str, dest_storage_key: str) -> None:
         """Move the metadata sidecar, clearing any stale destination sidecar."""
