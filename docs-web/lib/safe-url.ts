@@ -20,6 +20,9 @@ export function sanitizeUrl(value: unknown, kind: UrlKind): string | undefined {
   if (UNSAFE_CHARS_PATTERN.test(value)) return undefined;
 
   if (!SCHEME_PATTERN.test(value)) {
+    // Protocol-relative URLs ("//host/path") resolve against the current scheme
+    // to an EXTERNAL host — not same-origin. Treat them as unsafe.
+    if (value.startsWith("//")) return undefined;
     // Relative path, query, or fragment — resolved against the current origin.
     return value;
   }
