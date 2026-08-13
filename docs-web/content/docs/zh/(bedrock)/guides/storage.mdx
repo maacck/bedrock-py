@@ -1,0 +1,273 @@
+---
+title: 存储
+description: 带可插拔后端的文件存储——本地文件夹与 S3 兼容，支持 upload/download/stream/move/list/head/exists/delete/copy、签名/访问/预览 URL、ACL 与 CDN
+---
+
+Bedrock 内置了一套官方文件存储系统，支持可插拔后端：本地文件系统后端与 S3 兼容后端。整个子系统位于 `bedrock.contrib.storage` 下。
+
+## 快速开始
+
+存储服务是**严格模式**的：在调用 `storage.configure()` 之前不会配置任何后端。在配置之前执行任何操作都会抛出 `StorageBackendNotConfiguredError`——不存在惰性默认后端。
+
+```python
+from bedrock.contrib.storage import storage, LocalStorageSettings
+
+# 必须显式配置：在第一次操作之前调用
+storage.configure("local")  # LocalStorageSettings 默认值：./storage，create_dir=True
+
+storage.upload("media/avatar/a1.png", open("avatar.png", "rb"))
+data = storage.download("media/avatar/a1.png")
+storage.exists("media/avatar/a1.png")  # True
+```
+
+这就是核心使用循环。本页其余部分会介绍配置、完整 API 和高级模式。
+
+## 配置
+
+存储服务使用动态后端注册表。本地后端始终可用；S3 需要可选依赖 `storage-s3`。
+
+### 后端选择
+
+```python
+from bedrock.contrib.storage import storage
+
+# 本地文件系统后端
+storage.configure("local")
+
+# S3 兼容后端（需要：uv add bedrock-core[storage-s3]）
+storage.configure("s3", settings=S3StorageSettings(bucket_name="my-bucket"))
+```
+
+`configure()` 会返回配置好的后端实例。如果不传 `settings` 参数，各后端会从环境变量构建自己的设置。
+
+### 本地后端
+
+将对象以文件形式存储在基础目录下。写入是原子的（临时文件 + `os.replace`）；`mime_type` 与 `provider_metadata` 会持久化在对象旁边的 sidecar 文件中。
+
+```python
+from bedrock.contrib.storage import storage, LocalStorageSettings
+
+storage.configure("local", settings=LocalStorageSettings(base_dir="/data/files"))
+```
+
+| 设置 | 默认值 | 说明 |
+|---------|---------|-------------|
+| `STORAGE_LOCAL_BASE_DIR` | `"./storage"` | 存储对象的根目录 |
+| `STORAGE_LOCAL_CREATE_DIR` | `"true"` | 启动时若根目录不存在则创建 |
+
+<Callout type="warning">
+`.bmeta.json` 后缀被本地后端元数据 sidecar 保留。请勿将其用于真实对象的键名。
+</Callout>
+
+### S3 后端
+
+适用于 AWS S3 及任何 S3 兼容端点（例如通过 `STORAGE_S3_ENDPOINT_URL` 使用 MinIO）。需要 `uv add bedrock-core[storage-s3]`；`boto3` 为惰性导入。
+
+```python
+from bedrock.contrib.storage import storage, S3StorageSettings
+
+storage.configure("s3", settings=S3StorageSettings(bucket_name="my-bucket"))
+storage.upload(
+    "media/avatar/a1.png",
+    open("avatar.png", "rb"),
+    mime_type="image/png",
+    acl="public-read",
+)
+```
+
+| 设置 | 默认值 | 说明 |
+|---------|---------|-------------|
+| `STORAGE_S3_BUCKET_NAME` | `""` | 桶名称（必填） |
+| `STORAGE_S3_REGION_NAME` | `"us-east-1"` | AWS 区域 |
+| `STORAGE_S3_ACCESS_KEY_ID` | 未设置 | 访问密钥 ID |
+| `STORAGE_S3_SECRET_ACCESS_KEY` | 未设置 | 秘密访问密钥 |
+| `STORAGE_S3_SESSION_TOKEN` | 未设置 | 会话令牌 |
+| `STORAGE_S3_ENDPOINT_URL` | 未设置 | 自定义端点（MinIO 等） |
+| `STORAGE_S3_DEFAULT_ACL` | 未设置 | 桶级别的默认 canned ACL |
+
+支持的 canned ACL：`private`、`public-read`、`public-read-write`、`authenticated-read`、`aws-exec-read`、`bucket-owner-read`、`bucket-owner-full-control`。
+
+ACL 解析顺序为：显式 `acl=` 参数 > `S3StorageSettings.default_acl`（或 `STORAGE_S3_DEFAULT_ACL`）> 无。显式或默认 ACL 会对照 canned ACL 列表校验；无效的 `default_acl` 会在 `configure()` 时快速失败。
+
+### 注册自定义后端
+
+```python
+from bedrock.contrib.storage import register_backend, storage
+from bedrock.contrib.storage.base import StorageBackend
+
+class MyBackend:
+    """实现 StorageBackend 协议（12 个操作 + close）。"""
+    ...
+
+register_backend("custom", MyBackend)
+storage.configure("custom")
+```
+
+## StorageService API 参考
+
+`storage` 单例是一个 `StorageService` 实例。所有访问都通过该对象进行。操作接收已经规范化处理的 `storage_key`，且绝不会隐式配置后端。
+
+| 方法 | 签名 | 说明 |
+|--------|-----------|-------------|
+| `storage.upload()` | `upload(storage_key, data, mime_type=None, provider_metadata=None, acl=None) → StorageUploadResult` | 将 `data`（bytes、`Path` 或类文件对象）存储到 `storage_key`；`acl` 仅在上传时生效 |
+| `storage.download()` | `download(storage_key) → bytes` | 返回完整的对象内容 |
+| `storage.stream()` | `stream(storage_key, chunk_size=1_048_576) → Iterable[bytes]` | 分块返回对象内容 |
+| `storage.move()` | `move(storage_key, dest_storage_key) → None` | 在后端内移动对象 |
+| `storage.copy()` | `copy(storage_key, dest_storage_key) → None` | 在后端内复制对象 |
+| `storage.list()` | `list(prefix=None, limit=None, continuation_token=None) → StorageListResult` | 列出目录前缀的直接子项（`prefix` 为 `None` 时列出顶层） |
+| `storage.head()` | `head(storage_key) → StorageObject \| None` | 对象元数据，不存在时返回 `None` |
+| `storage.exists()` | `exists(storage_key) → bool` | 对象存在时返回 `True` |
+| `storage.delete()` | `delete(storage_key) → bool` | 删除对象；存在时返回 `True` |
+| `storage.get_signed_url()` | `get_signed_url(storage_key, method="GET", expires_in=3600) → str` | 指定 `method`（`GET`/`PUT`）的预签名 URL |
+| `storage.get_access_url()` | `get_access_url(storage_key, acl=None, expires_in=3600) → str` | 直接下载 URL（配置 CDN 时会被重写） |
+| `storage.get_preview_url()` | `get_preview_url(storage_key, acl=None, expires_in=3600) → str` | 内联预览 URL（配置 CDN 时会被重写） |
+
+### 列出对象
+
+`list()` 是目录作用域的：前缀指定一个目录，结果只包含它的直接子项——对象条目加上目录条目。`"a"` 与 `"a/"` 等价，且 `list("a")` 永远不会匹配 `a2/` 下的对象。
+
+```python
+result = storage.list("media")  # 目录作用域：media/ 的直接子项
+for entry in result.items:
+    if entry.is_dir:
+        print(entry.storage_key)  # 例如 "media/videos/"
+    else:
+        print(entry.storage_key, entry.size)
+```
+
+分页基于游标：当 `truncated` 为 `True` 时，把上一页结果的 `continuation_token` 传入以获取下一页。
+
+```python
+page = storage.list("media", limit=50)
+while page.truncated:
+    page = storage.list("media", limit=50, continuation_token=page.continuation_token)
+```
+
+### 上传选项
+
+- `mime_type`——存储并作为对象的内容类型返回；省略时两个后端都会根据键名猜测（例如 `"a1.png"` → `image/png`）。
+- `provider_metadata`——不透明的后端相关字符串字典。按约定键名使用小写（S3 会在传输时将元数据键名转为小写；本地后端原样保留）。
+- `acl`——AWS canned ACL（仅 S3；本地后端接受但忽略）。`head()` 永不报告 ACL。
+
+## URL 与 CDN 重写
+
+S3 可以提供三种 URL：
+
+- `get_access_url()`——直接下载 URL。
+- `get_preview_url()`——内联预览 URL（浏览器安全，`ResponseContentDisposition=inline`），用于 `<img>`/`<video>` 等嵌入场景。
+- `get_signed_url()`——针对特定方法的原始预签名 URL。
+
+访问/预览助手上的 `acl` 开关决定 URL 是否签名：显式 `acl=` 参数，否则使用桶级别的 `STORAGE_S3_DEFAULT_ACL`，否则不签名。只有解析为公开 ACL（`public-read`、`public-read-write`）时才生成未签名 URL；其他一切情况（包括 `private`）都生成预签名 URL。
+
+<Callout type="warning">
+只有对真正公开的对象才向 URL 助手传入公开 `acl`——生成的 URL 未签名，可被匿名读取。
+</Callout>
+
+配置 CDN 后，`get_access_url()` / `get_preview_url()` 结果的 host 会被重写到 CDN——无论签名与否——查询字符串保持不变。`get_signed_url()` **永不**被重写。
+
+```python
+storage.configure(
+    "s3",
+    settings=S3StorageSettings(bucket_name="my-bucket"),
+    cdn_base_url="https://cdn.example.com",
+)
+
+storage.get_access_url("media/avatar/a1.png", acl="public-read")
+# https://cdn.example.com/my-bucket/media/avatar/a1.png  （未签名，host 已重写）
+
+storage.get_access_url("media/avatar/a1.png")
+# https://cdn.example.com/my-bucket/media/avatar/a1.png?X-Amz-...  （签名，host 已重写）
+
+storage.get_signed_url("media/avatar/a1.png")
+# https://my-bucket.s3.amazonaws.com/media/avatar/a1.png?X-Amz-...  （永不重写）
+```
+
+<Callout type="warning">
+CDN 必须是到桶的反向代理，且要保留查询字符串与源站 `Host` 头——例如以 S3 为源的 CloudFront 分发，或 `nginx proxy_pass` 到桶/端点。否则预签名查询参数会被剥离，公开 URL 也会失效。
+</Callout>
+
+`get_signed_url()` 仅支持 `method="GET"` 与 `method="PUT"`。v1 不支持预签名 POST 上传：multipart 表单协议需要 `{url, fields}` 成对返回，单一 URL 的 API 无法表达——请改用 `upload()` 或未来的 presigned-post API；其他方法会抛出 `StorageError`。
+
+本地后端没有 URL 操作：三种 URL 方法都会抛出 `StorageUrlUnsupportedError`。请在应用层构建 URL。
+
+## 流式读取
+
+`stream()` 分块返回对象内容，不会整体载入内存——适合大文件。`download()` 总是把完整对象载入内存。
+
+```python
+for chunk in storage.stream("media/videos/demo.mp4", chunk_size=1_048_576):
+    write_chunk(chunk)
+```
+
+## 存储键
+
+键名是 POSIX 风格路径。委派前会先规范化：
+
+- 去除首尾斜杠与空白，合并重复分隔符；
+- 空键与包含 `..` 段的键会抛出 `StorageKeyError`。
+
+```python
+from bedrock.contrib.storage import normalize_storage_key
+
+normalize_storage_key("/media/avatar/a1.png/")  # "media/avatar/a1.png"
+normalize_storage_key("media//avatar/a1.png")   # "media/avatar/a1.png"
+normalize_storage_key("a/../b")                 # 抛出 StorageKeyError
+normalize_storage_key("")                       # 抛出 StorageKeyError
+```
+
+本地后端还会额外校验每个解析后的路径都位于其根目录之内，对越界尝试（反斜杠、`..`、绝对路径）抛出 `StorageKeyError`。
+
+## 异常层级
+
+所有存储异常都继承自 `StorageError`：
+
+```
+StorageError
+├── StorageBackendNotConfiguredError — 未配置后端 / 后端名称未知
+├── StorageConnectionError           — 后端不可达或配置错误
+├── StorageObjectNotFoundError       — 对象不存在
+├── StorageKeyError                  — 存储键无效（空、越界、格式错误）
+├── StorageUploadError               — 上传或移动失败
+├── StorageDownloadError             — 下载或流式读取失败
+├── StoragePermissionError           — 后端拒绝访问对象或桶
+└── StorageUrlUnsupportedError       — 后端不支持 URL 生成
+```
+
+```python
+from bedrock.contrib.storage import (
+    StorageBackendNotConfiguredError,
+    StorageConnectionError,
+    StorageDownloadError,
+    StorageError,
+    StorageKeyError,
+    StorageObjectNotFoundError,
+    StoragePermissionError,
+    StorageUploadError,
+    StorageUrlUnsupportedError,
+)
+```
+
+## 反模式
+
+**不要依赖隐式后端。** 服务是严格模式：在 `configure()` 之前使用任何操作都会抛出 `StorageBackendNotConfiguredError`。不存在惰性默认后端。
+
+**不要在运行时调用 `configure()`。** 重新配置是不同步的——后端会不加锁地在原位置被替换。请在启动时调用一次 `configure()`。
+
+**不要期待异步方法。** v1 API 仅同步——不存在 `a` 前缀方法，而且这是永久性的。未来即使增加异步支持，也会是独立的增量层，绝不会替代现有 API。
+
+**不要用本地后端生成 URL。** `get_signed_url()` / `get_access_url()` / `get_preview_url()` 会抛出 `StorageUrlUnsupportedError`。请在应用层构建 URL（例如静态路由或反向代理）。
+
+**不要假设 S3 上的 `move()` 是原子的。** S3 后端将移动实现为复制 + 删除。两步之间失败会同时留下两个对象。
+
+**不要猜测对象缺失时的行为。** `download()` / `stream()` 抛出 `StorageObjectNotFoundError`；`head()` 返回 `None`；`delete()` 返回 `False`。
+
+**不要使用 `.bmeta.json` 键名。** 该后缀被本地元数据 sidecar 保留；带此后缀的真实对象会与 sidecar 文件冲突。
+
+**不要用页码分页。** `list()` 基于游标——请传回上一次结果的 `continuation_token`。
+
+**不要给私有对象传公开 ACL。** 在 `get_access_url()` / `get_preview_url()` 上显式传入公开 `acl` 会产生未签名 URL；只对真正公开的对象使用。
+
+## 另请参阅
+
+- [数据库](./database) — SQLAlchemy 2.0 数据库层
+- [缓存](./cache) — 内存与 Redis 缓存，带同步/异步 API
