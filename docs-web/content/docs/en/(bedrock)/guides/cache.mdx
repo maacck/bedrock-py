@@ -344,11 +344,11 @@ cache.configure("redis")
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `REDIS_URL` | `"redis://localhost:6379"` | Redis connection URL |
-| `CACHE_REDIS_KEY_PREFIX` | `""` | Required non-empty key prefix before calling `clear()` or `aclear()` |
+| `CACHE_REDIS_KEY_PREFIX` | `""` | Default key namespace. `clear()`/`aclear()` require this **or** an explicit `prefix=` argument |
 | `REDIS_MAX_CONNECTIONS` | `10` | Connection pool size |
 
 <Callout type="warning">
-Redis `clear()` and `aclear()` never flush the Redis database. Configure `CACHE_REDIS_KEY_PREFIX` to a dedicated, non-empty namespace before using either method; they scan and delete only keys in that namespace. Applications that relied on unprefixed clearing must first choose and migrate to a dedicated prefix.
+Redis `clear()` and `aclear()` never flush the Redis database. They scan and delete only keys under a prefix. Pass an explicit `prefix=` argument, or configure `CACHE_REDIS_KEY_PREFIX` to a dedicated non-empty namespace. Clearing fails only when **both** the configured prefix and the explicit argument are empty. Applications that relied on unprefixed `flushdb()` must choose a dedicated prefix.
 </Callout>
 
 ## Exception Hierarchy
@@ -360,7 +360,7 @@ CacheError
 ├── CacheConnectionError      — Backend connection failure
 ├── CacheSerializationError   — Serialization/deserialization failure
 ├── BackendNotConfiguredError — Backend not available
-├── CacheClearRequiresPrefixError — Redis clear lacks a configured key prefix
+├── CacheClearRequiresPrefixError — Redis clear has neither configured nor explicit prefix
 └── CacheLockError
     ├── CacheLockAcquisitionError — Lock acquisition failure
     └── CacheLockOwnershipError   — Lock ownership violation

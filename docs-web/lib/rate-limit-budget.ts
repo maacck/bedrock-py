@@ -12,12 +12,16 @@ export const RATE_LIMIT = {
   /** Single source of truth for the per-IP hourly token budget. */
   TOKENS_PER_WINDOW: 50_000,
   WINDOW_SECONDS: 3_600,
-  MAX_MESSAGES: 50,
-  MAX_BODY_BYTES: 64 * 1_024,
+  MAX_BODY_BYTES: 16 * 1_024,
+  /** Maximum characters accepted for a single user query. */
+  MAX_QUERY_CHARS: 2_000,
   /** Maximum estimated user input tokens accepted per request. */
   MAX_INPUT_TOKENS: 16_000,
   /** Output budget reserved per request and refunded on settlement. */
   RESERVED_OUTPUT_TOKENS: 4_096,
+  /** Server-side conversation history bounds (kept in the thread store). */
+  HISTORY_MAX_TOKENS: 8_192,
+  HISTORY_MAX_MESSAGES: 20,
 } as const;
 
 export interface ReserveResult {
@@ -34,12 +38,16 @@ export interface BudgetSnapshot {
   windowStart: number;
   settled: number;
   outstanding: Record<string, number>;
+  /** Reservations that straddled a window rollover; settle still charges them. */
+  straddling: Record<string, number>;
 }
 
 export class TokenBudgetWindow {
   private windowStart: number;
   private settled = 0;
   private readonly outstanding = new Map<string, number>();
+  /** Expired-window reservation ids kept so settle/forfeit is not a no-op. */
+  private readonly straddling = new Map<string, number>();
 
   constructor(
     private readonly now: () => number = () => Date.now(),
@@ -58,10 +66,17 @@ export class TokenBudgetWindow {
     if (start !== this.windowStart) {
       this.windowStart = start;
       this.settled = 0;
-      // Reservations from an expired window are dropped; their budget is
-      // returned by the reset.
+      // Move (do not drop) outstanding ids so a later settle still charges
+      // the new window. They do not count toward committed after the reset.
+      for (const [id, amount] of this.outstanding) {
+        this.straddling.set(id, amount);
+      }
       this.outstanding.clear();
     }
+  }
+
+  private reservedAmount(reservationId: string): number | undefined {
+    return this.outstanding.get(reservationId) ?? this.straddling.get(reservationId);
   }
 
   /** Committed tokens (settled usage + outstanding reservations). */
@@ -118,10 +133,11 @@ export class TokenBudgetWindow {
    * can never be refunded twice or driven negative.
    */
   settle(reservationId: string, actualTokens: number): void {
+    const reserved = this.reservedAmount(reservationId);
     this.rollWindow();
-    const reserved = this.outstanding.get(reservationId);
-    if (reserved === undefined) return;
+    if (reserved === undefined) return; // unknown id → no-op (never refund twice)
     this.outstanding.delete(reservationId);
+    this.straddling.delete(reservationId);
     // Fail conservative on non-finite input: charge the full reservation
     // rather than letting NaN poison the settled balance.
     this.settled += Number.isFinite(actualTokens)
@@ -131,13 +147,14 @@ export class TokenBudgetWindow {
 
   /** Charge the full reservation (used for aborted/errored streams). */
   forfeit(reservationId: string): void {
-    this.settle(reservationId, this.outstanding.get(reservationId) ?? 0);
+    this.settle(reservationId, this.reservedAmount(reservationId) ?? 0);
   }
 
   /** Return a reservation in full (e.g. the model was never called). */
   release(reservationId: string): void {
     this.rollWindow();
     this.outstanding.delete(reservationId);
+    this.straddling.delete(reservationId);
   }
 
   snapshot(): BudgetSnapshot {
@@ -145,6 +162,7 @@ export class TokenBudgetWindow {
       windowStart: this.windowStart,
       settled: this.settled,
       outstanding: Object.fromEntries(this.outstanding),
+      straddling: Object.fromEntries(this.straddling),
     };
   }
 
@@ -152,8 +170,12 @@ export class TokenBudgetWindow {
     this.windowStart = snapshot.windowStart;
     this.settled = Math.max(0, snapshot.settled);
     this.outstanding.clear();
+    this.straddling.clear();
     for (const [id, amount] of Object.entries(snapshot.outstanding)) {
       this.outstanding.set(id, Math.max(0, amount));
+    }
+    for (const [id, amount] of Object.entries(snapshot.straddling ?? {})) {
+      this.straddling.set(id, Math.max(0, amount));
     }
     this.rollWindow();
   }

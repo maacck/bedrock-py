@@ -14,16 +14,24 @@
   },
   "durable_objects": {
     "bindings": [
+        {
+          "name": "RATE_LIMITER",
+          "class_name": "RateLimiter",
+        },
+        {
+          "name": "THREAD_STORE",
+          "class_name": "ThreadStore",
+        },
+      ],
+    },
+    "migrations": [
       {
-        "name": "RATE_LIMITER",
-        "class_name": "RateLimiter",
+        "tag": "v1",
+        "new_sqlite_classes": ["RateLimiter"],
+      },
+      {
+        "tag": "v2",
+        "new_sqlite_classes": ["ThreadStore"],
       },
     ],
-  },
-  "migrations": [
-    {
-      "tag": "v1",
-      "new_sqlite_classes": ["RateLimiter"],
-    },
-  ],
 }

@@ -88,8 +88,8 @@ class RedisBackend(CacheBackend):
         return full_key.encode()
 
     def _clear_pattern(self, prefix: str | None) -> bytes:
-        """Return the Redis scan pattern after checking namespace safety."""
-        if not self._settings.key_prefix:
+        """Return the Redis scan pattern, requiring a namespace when no prefix is given."""
+        if not self._settings.key_prefix and not prefix:
             raise CacheClearRequiresPrefixError()
         return f"{self._settings.key_prefix}{prefix or ''}*".encode()
 
