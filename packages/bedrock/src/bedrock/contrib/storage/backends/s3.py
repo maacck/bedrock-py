@@ -182,7 +182,9 @@ class S3Backend:
 
         Uses ``Delimiter="/"`` so ``Contents`` yields object entries and
         ``CommonPrefixes`` yields directory entries (trailing-slash key,
-        ``is_dir=True``, no size/last_modified), mirroring the local backend.
+        ``is_dir=True``, no size/last_modified). Object and directory entries
+        are merged and sorted by ``storage_key``, mirroring the local backend
+        and S3's own interleaved lexicographic ordering.
         """
         kwargs: dict = {"Bucket": self._bucket, "Delimiter": "/"}
         if prefix:
@@ -195,7 +197,7 @@ class S3Backend:
             response = self._client.list_objects_v2(**kwargs)
         except self._client.exceptions.ClientError as exc:
             raise StoragePermissionError(msg=f"Failed to list objects: {exc}") from exc
-        items = [
+        entries = [
             StorageListEntry(
                 storage_key=entry["Key"],
                 size=entry.get("Size"),
@@ -203,12 +205,13 @@ class S3Backend:
             )
             for entry in response.get("Contents", [])
         ]
-        items.extend(
+        entries.extend(
             StorageListEntry(storage_key=prefix_entry["Prefix"], is_dir=True)
             for prefix_entry in response.get("CommonPrefixes", [])
         )
+        entries.sort(key=lambda entry: entry.storage_key)
         return StorageListResult(
-            items=items,
+            items=entries,
             continuation_token=response.get("NextContinuationToken"),
             truncated=response.get("IsTruncated", False),
         )

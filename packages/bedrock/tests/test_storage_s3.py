@@ -211,6 +211,23 @@ def test_list_with_prefix_and_pagination(svc: StorageService) -> None:
     assert second.continuation_token is None
 
 
+def test_list_interleaves_objects_and_directories(svc: StorageService) -> None:
+    """list() keeps S3's lexicographic interleaving of objects and directories (A3).
+
+    Regression: directory prefixes and objects are paginated together in key
+    order — a top-level object ``b.txt`` and a directory ``a/`` must return
+    ``[a/ (dir), b.txt]``, not ``[b.txt, a/]``.
+    """
+    svc.upload("a/1.txt", b"x")
+    svc.upload("b.txt", b"x")
+
+    top = svc.list()
+    assert [item.storage_key for item in top.items] == ["a/", "b.txt"]
+    assert top.items[0].is_dir is True
+    assert top.items[1].is_dir is False
+    assert top.truncated is False
+
+
 def test_delete_existence_semantics(svc: StorageService) -> None:
     """delete() returns True when the object existed, False otherwise."""
     svc.upload("d.txt", b"x")
