@@ -1,9 +1,4 @@
-import {
-  stepCountIs,
-  streamText,
-  tool,
-  type UIMessage,
-} from "ai";
+import { stepCountIs, streamText, tool } from "ai";
 import { z } from "zod";
 import { source } from "@/lib/source";
 import { Document, type DocumentData } from "flexsearch";
@@ -28,15 +23,6 @@ interface CustomDocument extends DocumentData {
   description: string;
   content: string;
 }
-
-export type ChatUIMessage = UIMessage<
-  never,
-  {
-    client: {
-      location: string;
-    };
-  }
->;
 
 const searchServer = createSearchServer();
 
