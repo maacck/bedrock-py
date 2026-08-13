@@ -1,0 +1,277 @@
+"""Local filesystem storage backend."""
+
+import mimetypes
+import os
+import shutil
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import BinaryIO, Iterable
+
+import orjson
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from ..entities import StorageListEntry, StorageListResult, StorageObject, StorageUploadResult
+from ..exc import (
+    StorageDownloadError,
+    StorageKeyError,
+    StorageObjectNotFoundError,
+    StorageUploadError,
+    StorageUrlUnsupportedError,
+)
+
+_METADATA_SUFFIX = ".bmeta.json"
+
+_URL_UNSUPPORTED_MESSAGE = "The local backend does not support URL generation; build URLs in your application instead."
+
+
+class LocalStorageSettings(BaseSettings):
+    """Settings for the local filesystem backend."""
+
+    model_config = SettingsConfigDict(env_prefix="STORAGE_LOCAL_", extra="ignore")
+
+    base_dir: str = "./storage"
+    create_dir: bool = True
+
+
+class LocalBackend:
+    """Store objects as files under a base directory.
+
+    Writes are atomic (tmp file + ``os.replace``). Optional mime_type and
+    metadata persist in a sidecar file ``<key>.bmeta.json``; ``list()``
+    excludes sidecars and ``move``/``copy``/``delete`` carry them along.
+    """
+
+    def __init__(self, settings: LocalStorageSettings | None = None) -> None:
+        self._settings = settings or LocalStorageSettings()
+        self._root = Path(self._settings.base_dir)
+        if self._settings.create_dir:
+            self._root.mkdir(parents=True, exist_ok=True)
+
+    def _path(self, storage_key: str) -> Path:
+        """Return the absolute on-disk path for ``storage_key``, enforcing containment.
+
+        Raises:
+            StorageKeyError: If the key resolves outside the backend root.
+        """
+        root = self._root.resolve()
+        resolved = (self._root / storage_key).resolve()
+        if not resolved.is_relative_to(root):
+            raise StorageKeyError(
+                msg=f"storage_key {storage_key!r} resolves outside the backend root {str(root)!r}."
+            )
+        return resolved
+
+    def _meta_path(self, storage_key: str) -> Path:
+        return Path(str(self._path(storage_key)) + _METADATA_SUFFIX)
+
+    def _write_meta(self, storage_key: str, mime_type: str | None, provider_metadata: dict[str, str] | None) -> None:
+        meta_path = self._meta_path(storage_key)
+        if mime_type is None and not provider_metadata:
+            meta_path.unlink(missing_ok=True)
+            return
+        payload = {
+            "mime_type": mime_type or mimetypes.guess_type(storage_key)[0],
+            "provider_metadata": provider_metadata or {},
+        }
+        meta_path.parent.mkdir(parents=True, exist_ok=True)
+        meta_path.write_text(orjson.dumps(payload).decode("utf-8"))
+
+    def _read_meta(self, storage_key: str) -> dict | None:
+        meta_path = self._meta_path(storage_key)
+        if not meta_path.exists():
+            return None
+        return orjson.loads(meta_path.read_bytes())
+
+    def upload(
+        self,
+        storage_key: str,
+        data: bytes | Path | BinaryIO,
+        mime_type: str | None = None,
+        provider_metadata: dict[str, str] | None = None,
+        acl: str | None = None,
+    ) -> StorageUploadResult:
+        """Upload ``data`` (bytes, path, or file-like) to ``storage_key``.
+
+        ``acl`` is accepted for API symmetry but has no effect on the local
+        filesystem.
+        """
+        dest = self._path(storage_key)
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            tmp = dest.parent / f".{dest.name}.tmp-{os.getpid()}"
+            with tmp.open("wb") as fh:
+                if isinstance(data, bytes):
+                    fh.write(data)
+                elif isinstance(data, Path):
+                    with data.open("rb") as src:
+                        shutil.copyfileobj(src, fh)
+                else:
+                    shutil.copyfileobj(data, fh)
+            os.replace(tmp, dest)
+            self._write_meta(storage_key, mime_type, provider_metadata)
+        except StorageKeyError:
+            raise
+        except OSError as exc:
+            raise StorageUploadError(msg=f"Failed to upload {storage_key!r}: {exc}") from exc
+        return StorageUploadResult(storage_key=storage_key, size=dest.stat().st_size)
+
+    def download(self, storage_key: str) -> bytes:
+        """Return the full object content as bytes."""
+        path = self._path(storage_key)
+        try:
+            return path.read_bytes()
+        except FileNotFoundError as exc:
+            raise StorageObjectNotFoundError(msg=f"Object {storage_key!r} does not exist.") from exc
+        except OSError as exc:
+            raise StorageDownloadError(msg=f"Failed to download {storage_key!r}: {exc}") from exc
+
+    def stream(self, storage_key: str, chunk_size: int = 1_048_576) -> Iterable[bytes]:
+        """Yield the object content in chunks."""
+        path = self._path(storage_key)
+        try:
+            with path.open("rb") as fh:
+                while True:
+                    chunk = fh.read(chunk_size)
+                    if not chunk:
+                        return
+                    yield chunk
+        except FileNotFoundError as exc:
+            raise StorageObjectNotFoundError(msg=f"Object {storage_key!r} does not exist.") from exc
+        except OSError as exc:
+            raise StorageDownloadError(msg=f"Failed to stream {storage_key!r}: {exc}") from exc
+
+    def move(self, storage_key: str, dest_storage_key: str) -> None:
+        """Move an object (and its metadata sidecar) to a new key."""
+        src = self._path(storage_key)
+        dest = self._path(dest_storage_key)
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(src, dest)
+        except FileNotFoundError as exc:
+            raise StorageObjectNotFoundError(msg=f"Object {storage_key!r} does not exist.") from exc
+        except OSError as exc:
+            raise StorageUploadError(msg=f"Failed to move {storage_key!r} to {dest_storage_key!r}: {exc}") from exc
+        self._move_sidecar(storage_key, dest_storage_key)
+
+    def copy(self, storage_key: str, dest_storage_key: str) -> None:
+        """Copy an object (and its metadata sidecar) to a new key."""
+        src = self._path(storage_key)
+        dest = self._path(dest_storage_key)
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(src, dest)
+        except FileNotFoundError as exc:
+            raise StorageObjectNotFoundError(msg=f"Object {storage_key!r} does not exist.") from exc
+        except OSError as exc:
+            raise StorageUploadError(msg=f"Failed to copy {storage_key!r} to {dest_storage_key!r}: {exc}") from exc
+        self._copy_sidecar(storage_key, dest_storage_key)
+
+    def list(
+        self,
+        prefix: str | None = None,
+        limit: int | None = None,
+        continuation_token: str | None = None,
+    ) -> StorageListResult:
+        """Return the immediate children of ``prefix`` (top level when None).
+
+        The service passes ``prefix`` already normalized with a trailing slash
+        (or ``None`` for the top level). Directory entries use a trailing-slash
+        key with ``is_dir=True``; metadata sidecars are never listed.
+        Pagination: ``continuation_token`` is the last returned entry's key and
+        entries whose key sorts at or below it are skipped.
+        """
+        prefix = prefix or ""
+        if prefix and not prefix.endswith("/"):
+            prefix += "/"
+        scan_dir = self._root / prefix if prefix else self._root
+        if not scan_dir.is_dir():
+            return StorageListResult(items=[])
+        entries: list[StorageListEntry] = []
+        for child in scan_dir.iterdir():
+            name = child.name
+            if name.endswith(_METADATA_SUFFIX) or self._is_temp_file(name):
+                continue
+            if child.is_dir():
+                entries.append(StorageListEntry(storage_key=f"{prefix}{name}/", is_dir=True))
+            else:
+                entries.append(StorageListEntry(storage_key=f"{prefix}{name}"))
+        entries.sort(key=lambda entry: entry.storage_key)
+        if continuation_token:
+            entries = [entry for entry in entries if entry.storage_key > continuation_token]
+        truncated = False
+        token = None
+        if limit is not None and len(entries) > limit:
+            entries = entries[:limit]
+            truncated = True
+            token = entries[-1].storage_key
+        return StorageListResult(items=entries, continuation_token=token, truncated=truncated)
+
+    def head(self, storage_key: str) -> StorageObject | None:
+        """Return object metadata (mime from sidecar, else guessed), or ``None``."""
+        path = self._path(storage_key)
+        try:
+            stat_result = path.stat()
+        except FileNotFoundError:
+            return None
+        meta = self._read_meta(storage_key)
+        mime_type = (meta or {}).get("mime_type") or mimetypes.guess_type(storage_key)[0]
+        return StorageObject(
+            storage_key=storage_key,
+            size=stat_result.st_size,
+            last_modified=datetime.fromtimestamp(stat_result.st_mtime, tz=timezone.utc),
+            mime_type=mime_type,
+            provider_metadata=dict((meta or {}).get("provider_metadata") or {}),
+        )
+
+    def exists(self, storage_key: str) -> bool:
+        """Return ``True`` when the object exists (``head() is not None``)."""
+        return self.head(storage_key) is not None
+
+    def delete(self, storage_key: str) -> bool:
+        """Delete an object and its metadata sidecar; return ``True`` when it existed."""
+        path = self._path(storage_key)
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            return False
+        except IsADirectoryError:
+            return False
+        self._delete_sidecar(storage_key)
+        return True
+
+    def get_signed_url(self, storage_key: str, method: str = "GET", expires_in: int = 3600) -> str:
+        """Raise StorageUrlUnsupportedError: the local backend has no URL operations."""
+        raise StorageUrlUnsupportedError(msg=_URL_UNSUPPORTED_MESSAGE)
+
+    def get_access_url(self, storage_key: str, acl: str | None = None, expires_in: int = 3600) -> str:
+        """Raise StorageUrlUnsupportedError: the local backend has no URL operations."""
+        raise StorageUrlUnsupportedError(msg=_URL_UNSUPPORTED_MESSAGE)
+
+    def get_preview_url(self, storage_key: str, acl: str | None = None, expires_in: int = 3600) -> str:
+        """Raise StorageUrlUnsupportedError: the local backend has no URL operations."""
+        raise StorageUrlUnsupportedError(msg=_URL_UNSUPPORTED_MESSAGE)
+
+    def close(self) -> None:
+        """Release backend resources (none for the local filesystem)."""
+
+    @staticmethod
+    def _is_temp_file(name: str) -> bool:
+        """Return ``True`` for transient atomic-write tmp files (``.{name}.tmp-{pid}``)."""
+        return name.startswith(".") and ".tmp-" in name and name.rsplit(".tmp-", 1)[1].isdigit()
+
+    def _move_sidecar(self, storage_key: str, dest_storage_key: str) -> None:
+        src_meta = self._meta_path(storage_key)
+        if src_meta.exists():
+            dest_meta = self._meta_path(dest_storage_key)
+            dest_meta.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(src_meta, dest_meta)
+
+    def _copy_sidecar(self, storage_key: str, dest_storage_key: str) -> None:
+        src_meta = self._meta_path(storage_key)
+        if src_meta.exists():
+            dest_meta = self._meta_path(dest_storage_key)
+            dest_meta.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(src_meta, dest_meta)
+
+    def _delete_sidecar(self, storage_key: str) -> None:
+        self._meta_path(storage_key).unlink(missing_ok=True)

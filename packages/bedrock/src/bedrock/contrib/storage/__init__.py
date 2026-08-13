@@ -1,5 +1,6 @@
 """Bedrock Storage — file storage abstraction with pluggable backends."""
 
+from .backends.local import LocalBackend, LocalStorageSettings
 from .entities import StorageListEntry, StorageListResult, StorageObject, StorageUploadResult
 from .exc import (
     StorageBackendNotConfiguredError,
@@ -15,6 +16,8 @@ from .exc import (
 from .service import StorageService, list_backends, normalize_storage_key, register_backend, storage
 
 __all__ = [
+    "LocalBackend",
+    "LocalStorageSettings",
     "StorageBackendNotConfiguredError",
     "StorageConnectionError",
     "StorageDownloadError",
