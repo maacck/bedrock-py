@@ -176,9 +176,11 @@ class LocalBackend:
 
         The service passes ``prefix`` already normalized with a trailing slash
         (or ``None`` for the top level). Directory entries use a trailing-slash
-        key with ``is_dir=True``; metadata sidecars are never listed.
-        Pagination: ``continuation_token`` is the last returned entry's key and
-        entries whose key sorts at or below it are skipped.
+        key with ``is_dir=True`` and no size/last_modified; object entries
+        carry size and UTC ``last_modified`` (same provenance as ``head``).
+        Metadata sidecars are never listed. Pagination: ``continuation_token``
+        is the last returned entry's key and entries whose key sorts at or
+        below it are skipped.
         """
         prefix = prefix or ""
         if prefix and not prefix.endswith("/"):
@@ -194,7 +196,17 @@ class LocalBackend:
             if child.is_dir():
                 entries.append(StorageListEntry(storage_key=f"{prefix}{name}/", is_dir=True))
             else:
-                entries.append(StorageListEntry(storage_key=f"{prefix}{name}"))
+                try:
+                    stat_result = child.stat()
+                except OSError:
+                    continue  # object vanished between scan and stat
+                entries.append(
+                    StorageListEntry(
+                        storage_key=f"{prefix}{name}",
+                        size=stat_result.st_size,
+                        last_modified=datetime.fromtimestamp(stat_result.st_mtime, tz=timezone.utc),
+                    )
+                )
         entries.sort(key=lambda entry: entry.storage_key)
         if continuation_token:
             entries = [entry for entry in entries if entry.storage_key > continuation_token]

@@ -135,10 +135,10 @@ def test_list_with_prefix_and_pagination(svc: StorageService) -> None:
     assert top.continuation_token is None
 
     inside = svc.list("a")
-    assert inside.items == [
-        StorageListEntry(storage_key="a/1.txt"),
-        StorageListEntry(storage_key="a/2.txt"),
-    ]
+    assert [entry.storage_key for entry in inside.items] == ["a/1.txt", "a/2.txt"]
+    assert [entry.size for entry in inside.items] == [1, 1]
+    assert all(entry.last_modified is not None for entry in inside.items)
+    assert all(entry.is_dir is False for entry in inside.items)
 
     first = svc.list(limit=1)
     assert first.items == [StorageListEntry(storage_key="a/", is_dir=True)]
