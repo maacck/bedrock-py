@@ -1,0 +1,146 @@
+---
+title: Docs Chat API
+description: Request and response contract for POST /api/chat on the documentation site
+---
+
+The documentation site exposes `POST /api/chat` as a docs assistant. As of 0.2.0 the client no longer sends a `messages` array. Conversation history is stored server-side per thread. The client sends one query plus ownership fields; the server returns a streamed UI-message response and a thread id.
+
+This page documents that contract. It is **not** part of the `bedrock-core` Python package.
+
+## Request
+
+```http
+POST /api/chat
+Content-Type: application/json
+```
+
+```json
+{
+  "query": "How do I register a cache backend?",
+  "thread_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+  "device_id": "11111111-2222-3333-4444-555555555555",
+  "context": { "location": "/docs/guides/cache" }
+}
+```
+
+| Field | Required | Type | Notes |
+|-------|----------|------|-------|
+| `query` | yes | non-empty string | Trimmed. Maximum 2,000 characters. |
+| `thread_id` | no | UUID string | Omit or `null` to start a new thread. Must be a UUID when present. |
+| `device_id` | yes | UUID string | Client-generated ownership key. See [Device ownership](#device-ownership). |
+| `context` | no | object or `null` | Optional. Only `context.location` is accepted (string, max 256 characters). |
+
+The body must be valid JSON and at most 16 KB. The `Content-Length` header is checked first; the decoded body is the authoritative bound.
+
+### What changed
+
+Previously the endpoint accepted a full `messages` array (roles and tool parts). That surface is closed. History is server-owned. Clients send only the current `query`.
+
+## Response
+
+A successful request returns a streamed UI-message body (the same SSE / UI-message chunk format the docs chat widget consumes) plus these headers:
+
+| Header | Meaning |
+|--------|---------|
+| `X-Thread-Id` | Server-issued thread id. Persist it and send it back as `thread_id` on follow-ups. Present on success and on `429`. |
+| `X-RateLimit-Limit` | Tokens allowed per hour for this client IP (currently 50,000). |
+| `X-RateLimit-Remaining` | Tokens remaining in the current window after this reservation. |
+| `X-RateLimit-Reset` | Unix timestamp (seconds) when the window resets. |
+
+On `429`, the same rate-limit headers are returned together with `Retry-After` (seconds until reset) and `X-Thread-Id`.
+
+## Device ownership
+
+`device_id` is a **client-generated ownership key**. It is **NOT authentication**.
+
+- Anyone who knows a `device_id` + `thread_id` pair can continue that thread.
+- The value is spoofable. Do not treat it as a user identity, session, or auth boundary.
+- The server uses it only to bind a thread to the client that created it. A mismatched `device_id` is treated as "thread not found" (`404`), not as an authorization challenge.
+
+Generate a UUID once per browser profile and reuse it. The official docs client stores it in `localStorage` (see [Client storage](#client-storage)).
+
+## Thread lifecycle
+
+1. First turn: omit `thread_id` (or send `null`). The server mints a UUID and returns it in `X-Thread-Id`.
+2. Follow-ups: send that UUID as `thread_id` with the same `device_id`.
+3. New conversation: drop the stored thread id and omit `thread_id` again.
+
+History is capped server-side (20 messages / 8,192 estimated tokens). Clients never replay prior turns.
+
+## Status codes
+
+| Status | `error` code | When |
+|--------|--------------|------|
+| `400` | `invalid_json`, `invalid_query`, `query_too_long`, `invalid_device`, `invalid_thread`, `invalid_context` | Body or field validation failed. |
+| `403` | `untrusted_client` | Missing Cloudflare `cf-connecting-ip`. The API is only reachable through Cloudflare. |
+| `404` | `thread_not_found` | `thread_id` does not exist for this `device_id` (unknown thread **or** ownership mismatch). |
+| `409` | `thread_busy` | Another request is already running on this thread. Retry after the in-flight turn finishes. |
+| `413` | `body_too_large` | Declared or actual body exceeds 16 KB. |
+| `429` | `rate_limited` | Per-IP hourly token budget exhausted. See rate-limit headers and `Retry-After`. |
+| `502` | `thread_error` | Thread store unavailable. |
+
+Error bodies are JSON:
+
+```json
+{
+  "error": "thread_not_found",
+  "message": "Thread not found for this device."
+}
+```
+
+`429` also includes `resetAt` (Unix seconds).
+
+## Rate limits
+
+Budget is keyed on the Cloudflare-injected client IP (`cf-connecting-ip` only; `X-Forwarded-For` is ignored).
+
+- **50,000 tokens per hour** per IP.
+- Each request reserves estimated input (query + system prompt + server history) plus 4,096 output tokens, then settles actual usage when the stream finishes.
+- If the provider reports no usage, the full reservation is charged.
+
+Clients should read `X-RateLimit-Remaining` / `X-RateLimit-Reset` and back off on `429`.
+
+## Client storage
+
+The official docs chat widget persists:
+
+| `localStorage` key | Value |
+|--------------------|-------|
+| `bedrock-chat-device-id` | Stable UUID generated once per origin / profile. Sent as `device_id`. |
+| `bedrock-chat-thread-id` | Last `X-Thread-Id`. Sent as `thread_id` on follow-ups. Cleared when the user starts a new thread. |
+
+Custom clients should use the same keys if they share the docs origin, so the built-in widget and a custom caller stay on the same device and thread.
+
+## Example
+
+```ts
+const DEVICE_KEY = "bedrock-chat-device-id";
+const THREAD_KEY = "bedrock-chat-thread-id";
+
+function deviceId(): string {
+  let id = localStorage.getItem(DEVICE_KEY);
+  if (!id) {
+    id = crypto.randomUUID();
+    localStorage.setItem(DEVICE_KEY, id);
+  }
+  return id;
+}
+
+const res = await fetch("/api/chat", {
+  method: "POST",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify({
+    query: "How do I configure Redis cache?",
+    thread_id: localStorage.getItem(THREAD_KEY),
+    device_id: deviceId(),
+    context: { location: "/docs/guides/cache" },
+  }),
+});
+
+if (res.status === 404 || res.status === 409 || res.status === 429) {
+  // thread_not_found / thread_busy / rate_limited — see Status codes
+}
+
+const threadId = res.headers.get("X-Thread-Id");
+if (threadId) localStorage.setItem(THREAD_KEY, threadId);
+```

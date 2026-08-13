@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-08-13
+
+### Breaking changes
+
+- **`/api/chat` contract** (docs-web): the endpoint now accepts
+  `{ query, thread_id?, device_id, context? }` instead of a full `messages`
+  array. Conversation history is managed server-side per thread; clients must
+  send `device_id` (a client-generated ownership key — not an auth boundary)
+  and store the server-issued `X-Thread-Id` response header for follow-ups.
+- **Query limit** (`bedrock.database.service`): `limit=0` (previously the
+  "unlimited" sentinel with `show_all=True`) now raises `InvalidQueryLimitError`;
+  `limit` must be an integer in `1..1000` (M-6).
+- **Redis cache `clear()`** (`bedrock.contrib.cache.backends.redis`): with an
+  empty `CACHE_REDIS_KEY_PREFIX`, `clear()`/`aclear()` now raise
+  `CacheClearRequiresPrefixError` instead of calling `flushdb()`; an explicit
+  `prefix` argument is now honored even without a configured key prefix (M-5).
+- **Cache backend registration** (`bedrock.contrib.cache`): `register_backend`
+  and `list_backends` are no longer exported from `bedrock.contrib.cache.base`;
+  use the package root (`bedrock.contrib.cache`) exports, which are unchanged
+  (L-8).
+
+### Fixes
+
+- `DatabaseManager` no longer raises `AttributeError` on `_database_url` before
+  `init()` (H-1).
+- `bedrock-cli init` no longer crashes with a `ValueError` traceback when the
+  output directory is a symlink, e.g. `/tmp`/`/var` on macOS (M-1).
+- docs-web token budget now charges straddling reservations to the new window
+  (L-1) and charges the full reservation when the provider omits usage (L-3).
+- docs-web markdown sanitizer rejects protocol-relative URLs (L-5).
+
 ## [0.1.2] - 2026-05-23
 
 ### Fixed
