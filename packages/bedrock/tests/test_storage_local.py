@@ -39,6 +39,14 @@ def test_backslash_key_escaping_root_raises_on_windows(tmp_path: Path) -> None:
         backend.upload("..\\win", b"x")
 
 
+@pytest.mark.parametrize("prefix", ["../", "/etc/"])
+def test_list_escaping_prefix_raises(tmp_path: Path, prefix: str) -> None:
+    """A prefix resolving outside the root raises StorageKeyError (backend-level guard)."""
+    backend = LocalBackend(settings=LocalStorageSettings(base_dir=str(tmp_path)))
+    with pytest.raises(StorageKeyError):
+        backend.list(prefix)
+
+
 def test_upload_download_roundtrip_bytes(svc: StorageService) -> None:
     """Bytes upload is retrievable via download."""
     result = svc.upload("a/b.txt", b"hello world")
@@ -165,6 +173,17 @@ def test_provider_metadata_follows_move_and_copy(svc: StorageService) -> None:
     assert svc.head("mid.txt").provider_metadata == {"owner": "alice"}  # type: ignore[union-attr]
     svc.copy("mid.txt", "dst.txt")
     assert svc.head("dst.txt").provider_metadata == {"owner": "alice"}  # type: ignore[union-attr]
+
+
+def test_move_and_copy_clear_stale_destination_metadata(svc: StorageService) -> None:
+    """move()/copy() drop a stale destination sidecar when the source has none."""
+    svc.upload("dest.txt", b"stale", provider_metadata={"owner": "alice"})
+    svc.upload("plain.txt", b"fresh")
+    svc.copy("plain.txt", "dest.txt")
+    assert svc.head("dest.txt").provider_metadata == {}  # type: ignore[union-attr]
+    svc.upload("dest2.txt", b"stale", provider_metadata={"owner": "alice"})
+    svc.move("plain.txt", "dest2.txt")
+    assert svc.head("dest2.txt").provider_metadata == {}  # type: ignore[union-attr]
 
 
 def test_delete_removes_sidecar(svc: StorageService, tmp_path: Path) -> None:

@@ -3,6 +3,7 @@
 import mimetypes
 import os
 import shutil
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import BinaryIO, Iterable
@@ -15,6 +16,7 @@ from ..exc import (
     StorageDownloadError,
     StorageKeyError,
     StorageObjectNotFoundError,
+    StoragePermissionError,
     StorageUploadError,
     StorageUrlUnsupportedError,
 )
@@ -98,7 +100,7 @@ class LocalBackend:
         dest = self._path(storage_key)
         try:
             dest.parent.mkdir(parents=True, exist_ok=True)
-            tmp = dest.parent / f".{dest.name}.tmp-{os.getpid()}"
+            tmp = dest.parent / f".{dest.name}.tmp-{uuid.uuid4().hex}"
             with tmp.open("wb") as fh:
                 if isinstance(data, bytes):
                     fh.write(data)
@@ -151,7 +153,10 @@ class LocalBackend:
             raise StorageObjectNotFoundError(msg=f"Object {storage_key!r} does not exist.") from exc
         except OSError as exc:
             raise StorageUploadError(msg=f"Failed to move {storage_key!r} to {dest_storage_key!r}: {exc}") from exc
-        self._move_sidecar(storage_key, dest_storage_key)
+        try:
+            self._move_sidecar(storage_key, dest_storage_key)
+        except OSError as exc:
+            raise StorageUploadError(msg=f"Failed to move metadata for {storage_key!r}: {exc}") from exc
 
     def copy(self, storage_key: str, dest_storage_key: str) -> None:
         """Copy an object (and its metadata sidecar) to a new key."""
@@ -164,7 +169,10 @@ class LocalBackend:
             raise StorageObjectNotFoundError(msg=f"Object {storage_key!r} does not exist.") from exc
         except OSError as exc:
             raise StorageUploadError(msg=f"Failed to copy {storage_key!r} to {dest_storage_key!r}: {exc}") from exc
-        self._copy_sidecar(storage_key, dest_storage_key)
+        try:
+            self._copy_sidecar(storage_key, dest_storage_key)
+        except OSError as exc:
+            raise StorageUploadError(msg=f"Failed to copy metadata for {storage_key!r}: {exc}") from exc
 
     def list(
         self,
@@ -185,28 +193,35 @@ class LocalBackend:
         prefix = prefix or ""
         if prefix and not prefix.endswith("/"):
             prefix += "/"
-        scan_dir = self._root / prefix if prefix else self._root
+        scan_dir = self._root if not prefix else self._path(prefix)
         if not scan_dir.is_dir():
             return StorageListResult(items=[])
         entries: list[StorageListEntry] = []
-        for child in scan_dir.iterdir():
-            name = child.name
-            if name.endswith(_METADATA_SUFFIX) or self._is_temp_file(name):
-                continue
-            if child.is_dir():
-                entries.append(StorageListEntry(storage_key=f"{prefix}{name}/", is_dir=True))
-            else:
-                try:
-                    stat_result = child.stat()
-                except OSError:
-                    continue  # object vanished between scan and stat
-                entries.append(
-                    StorageListEntry(
-                        storage_key=f"{prefix}{name}",
-                        size=stat_result.st_size,
-                        last_modified=datetime.fromtimestamp(stat_result.st_mtime, tz=timezone.utc),
+        try:
+            for child in scan_dir.iterdir():
+                name = child.name
+                if name.endswith(_METADATA_SUFFIX):
+                    continue
+                if child.is_dir():
+                    entries.append(StorageListEntry(storage_key=f"{prefix}{name}/", is_dir=True))
+                else:
+                    try:
+                        stat_result = child.stat()
+                    except FileNotFoundError:
+                        continue  # object vanished between scan and stat
+                    except OSError as exc:
+                        raise StoragePermissionError(
+                            msg=f"Failed to stat {name!r} while listing {prefix!r}: {exc}"
+                        ) from exc
+                    entries.append(
+                        StorageListEntry(
+                            storage_key=f"{prefix}{name}",
+                            size=stat_result.st_size,
+                            last_modified=datetime.fromtimestamp(stat_result.st_mtime, tz=timezone.utc),
+                        )
                     )
-                )
+        except OSError as exc:
+            raise StoragePermissionError(msg=f"Failed to list {prefix!r}: {exc}") from exc
         entries.sort(key=lambda entry: entry.storage_key)
         if continuation_token:
             entries = [entry for entry in entries if entry.storage_key > continuation_token]
@@ -225,6 +240,8 @@ class LocalBackend:
             stat_result = path.stat()
         except FileNotFoundError:
             return None
+        except OSError as exc:
+            raise StoragePermissionError(msg=f"Failed to access {storage_key!r}: {exc}") from exc
         meta = self._read_meta(storage_key)
         mime_type = (meta or {}).get("mime_type") or mimetypes.guess_type(storage_key)[0]
         return StorageObject(
@@ -248,7 +265,12 @@ class LocalBackend:
             return False
         except IsADirectoryError:
             return False
-        self._delete_sidecar(storage_key)
+        except OSError as exc:
+            raise StoragePermissionError(msg=f"Failed to delete {storage_key!r}: {exc}") from exc
+        try:
+            self._delete_sidecar(storage_key)
+        except OSError as exc:
+            raise StoragePermissionError(msg=f"Failed to delete metadata for {storage_key!r}: {exc}") from exc
         return True
 
     def get_signed_url(self, storage_key: str, method: str = "GET", expires_in: int = 3600) -> str:
@@ -266,24 +288,25 @@ class LocalBackend:
     def close(self) -> None:
         """Release backend resources (none for the local filesystem)."""
 
-    @staticmethod
-    def _is_temp_file(name: str) -> bool:
-        """Return ``True`` for transient atomic-write tmp files (``.{name}.tmp-{pid}``)."""
-        return name.startswith(".") and ".tmp-" in name and name.rsplit(".tmp-", 1)[1].isdigit()
-
     def _move_sidecar(self, storage_key: str, dest_storage_key: str) -> None:
+        """Move the metadata sidecar, clearing any stale destination sidecar."""
         src_meta = self._meta_path(storage_key)
+        dest_meta = self._meta_path(dest_storage_key)
         if src_meta.exists():
-            dest_meta = self._meta_path(dest_storage_key)
             dest_meta.parent.mkdir(parents=True, exist_ok=True)
             os.replace(src_meta, dest_meta)
+        else:
+            dest_meta.unlink(missing_ok=True)
 
     def _copy_sidecar(self, storage_key: str, dest_storage_key: str) -> None:
+        """Copy the metadata sidecar, clearing any stale destination sidecar."""
         src_meta = self._meta_path(storage_key)
+        dest_meta = self._meta_path(dest_storage_key)
         if src_meta.exists():
-            dest_meta = self._meta_path(dest_storage_key)
             dest_meta.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(src_meta, dest_meta)
+        else:
+            dest_meta.unlink(missing_ok=True)
 
     def _delete_sidecar(self, storage_key: str) -> None:
         self._meta_path(storage_key).unlink(missing_ok=True)
