@@ -82,7 +82,7 @@ export function parseAndValidateChatRequest(rawBody: string): ChatRequestValidat
   }
 
   let threadId: string | null = null;
-  if (b.thread_id != null) {
+  if ("thread_id" in b) {
     if (typeof b.thread_id !== "string" || !UUID_RE.test(b.thread_id)) {
       return { ok: false, status: 400, code: "invalid_thread", message: "`thread_id` must be a UUID." };
     }

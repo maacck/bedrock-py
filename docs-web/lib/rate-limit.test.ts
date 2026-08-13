@@ -160,6 +160,20 @@ describe("parseAndValidateChatRequest", () => {
     expect(bad).toMatchObject({ ok: false, code: "invalid_thread" });
   });
 
+  it("rejects an explicit null thread_id as invalid_thread", () => {
+    const r = parseAndValidateChatRequest(
+      JSON.stringify({ query: "hi", device_id: "123e4567-e89b-12d3-a456-426614174000", thread_id: null }),
+    );
+    expect(r).toMatchObject({ ok: false, status: 400, code: "invalid_thread" });
+  });
+
+  it("treats an omitted thread_id as a new conversation", () => {
+    const r = parseAndValidateChatRequest(
+      JSON.stringify({ query: "hi", device_id: "123e4567-e89b-12d3-a456-426614174000" }),
+    );
+    expect(r).toMatchObject({ ok: true, threadId: null });
+  });
+
   it("validates context.location and ignores unknown context keys", () => {
     const ok = parseAndValidateChatRequest(JSON.stringify({ query: "hi", device_id: "123e4567-e89b-12d3-a456-426614174000", context: { location: "Shanghai", other: "ignored" } }));
     expect(ok).toMatchObject({ ok: true, location: "Shanghai" });

@@ -21,7 +21,7 @@ export function buildChatRequest(
 ): Record<string, unknown> {
   return {
     query,
-    thread_id: threadId,
+    ...(threadId ? { thread_id: threadId } : {}),
     device_id: deviceId,
     context: location ? { location } : null,
   };

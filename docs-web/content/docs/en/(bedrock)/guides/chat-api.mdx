@@ -26,7 +26,7 @@ Content-Type: application/json
 | Field | Required | Type | Notes |
 |-------|----------|------|-------|
 | `query` | yes | non-empty string | Trimmed. Maximum 2,000 characters. |
-| `thread_id` | no | UUID string | Omit or `null` to start a new thread. Must be a UUID when present. An explicit unknown UUID is `404` and does not create a thread. |
+| `thread_id` | no | UUID string | Omit the key to start a new thread. Must be a UUID when present. A present `null` is `400` `invalid_thread`. An unknown UUID is `404` and does not create a thread. |
 | `device_id` | yes | UUID string | Client-generated ownership key. See [Device ownership](#device-ownership). |
 | `context` | no | object or `null` | Optional. Only `context.location` is used (string, max 256 characters). Other keys on `context` are ignored. |
 
@@ -61,7 +61,7 @@ Generate a UUID once per browser profile and reuse it. The official docs client 
 
 ## Thread lifecycle
 
-1. First turn: omit `thread_id` (or send `null`). After a successful reservation the server mints a UUID, creates the thread, and returns it in `X-Thread-Id`.
+1. First turn: omit the `thread_id` key. After a successful reservation the server mints a UUID, creates the thread, and returns it in `X-Thread-Id`. Sending `thread_id: null` is rejected (`400`).
 2. Follow-ups: send that UUID as `thread_id` with the same `device_id`.
 3. New conversation: drop the stored thread id and omit `thread_id` again. Do not invent a UUID client-side — unknown explicit ids 404.
 

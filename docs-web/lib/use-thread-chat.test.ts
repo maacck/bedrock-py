@@ -18,12 +18,13 @@ function textMessage(id: string, role: "user" | "assistant", text: string): UIMe
 }
 
 it("builds the chat request body", () => {
-  expect(buildChatRequest("hi", null, UUID)).toEqual({
+  const unset = buildChatRequest("hi", null, UUID);
+  expect(unset).toEqual({
     query: "hi",
-    thread_id: null,
     device_id: UUID,
     context: null,
   });
+  expect(unset).not.toHaveProperty("thread_id");
   expect(buildChatRequest("hi", "t", UUID, "Shanghai")).toMatchObject({
     thread_id: "t",
     context: { location: "Shanghai" },
