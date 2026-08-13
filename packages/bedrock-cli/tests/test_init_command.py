@@ -77,8 +77,8 @@ def test_init_succeeds_when_output_dir_is_a_symlink(tmp_path) -> None:
     link = tmp_path / "link"
     link.symlink_to(real, target_is_directory=True)
 
-    from typer.testing import CliRunner
     from bedrock_cli.main import app
+    from typer.testing import CliRunner
 
     result = CliRunner().invoke(app, ["init", "myapp", "-o", str(link)])
     assert result.exit_code == 0, result.output
