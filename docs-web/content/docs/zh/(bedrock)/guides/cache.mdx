@@ -344,11 +344,11 @@ cache.configure("redis")
 | 设置 | 默认值 | 说明 |
 |---------|---------|-------------|
 | `REDIS_URL` | `"redis://localhost:6379"` | Redis 连接 URL |
-| `CACHE_REDIS_KEY_PREFIX` | `""` | 调用 `clear()` 或 `aclear()` 前必须配置为非空的键前缀 |
+| `CACHE_REDIS_KEY_PREFIX` | `""` | 默认键命名空间。`clear()`/`aclear()` 需要此项 **或** 显式 `prefix=` 参数 |
 | `REDIS_MAX_CONNECTIONS` | `10` | 连接池大小 |
 
 <Callout type="warning">
-Redis 的 `clear()` 与 `aclear()` 永远不会执行全库清理。调用前请将 `CACHE_REDIS_KEY_PREFIX` 配置为专用且非空的命名空间；两个方法只会扫描并删除该命名空间中的键。原先依赖无前缀清理的应用，必须先选择并迁移到专用前缀。
+Redis 的 `clear()` 与 `aclear()` 永远不会执行全库清理。它们只会扫描并删除某个前缀下的键。可传入显式 `prefix=` 参数，或将 `CACHE_REDIS_KEY_PREFIX` 配置为专用且非空的命名空间。仅当**配置前缀与显式参数均为空**时清理才会失败。原先依赖无前缀 `flushdb()` 的应用，必须先选择专用前缀。
 </Callout>
 
 ## 异常层级
@@ -360,7 +360,7 @@ CacheError
 ├── CacheConnectionError      — Backend connection failure
 ├── CacheSerializationError   — Serialization/deserialization failure
 ├── BackendNotConfiguredError — Backend not available
-├── CacheClearRequiresPrefixError — Redis clear 缺少已配置的键前缀
+├── CacheClearRequiresPrefixError — Redis clear 既无配置前缀也无显式 prefix
 └── CacheLockError
     ├── CacheLockAcquisitionError — Lock acquisition failure
     └── CacheLockOwnershipError   — Lock ownership violation

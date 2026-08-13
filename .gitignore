@@ -213,7 +213,7 @@ opencode.jsonc
 skills-lock.json
 .sisyphus/
 .worktrees/
-
+.omo/
 packages/bedrock-example/
 
 # Cloudflare

@@ -396,3 +396,11 @@ class TestDatabaseManagerReinitialization:
 
         old_engine.dispose.assert_not_called()
         assert manager.engine is old_engine
+
+
+def test_database_url_attribute_exists_before_init() -> None:
+    """A fresh DatabaseManager must expose _database_url=None so CLI helpers can probe it."""
+    from bedrock.database.manager import DatabaseManager
+
+    manager = DatabaseManager()
+    assert manager._database_url is None

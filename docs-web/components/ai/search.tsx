@@ -22,18 +22,18 @@ import {
 } from "lucide-react";
 import { cn } from "../../lib/cn";
 import { buttonVariants } from "../ui/button";
-import { useChat, type UseChatHelpers } from "@ai-sdk/react";
-import { DefaultChatTransport, type Tool, type UIToolInvocation } from "ai";
+import { type Tool, type UIMessage, type UIToolInvocation } from "ai";
 import { Markdown } from "../markdown";
 import { Presence } from "@radix-ui/react-presence";
-import type { ChatUIMessage, SearchTool } from "../../app/api/chat/route";
+import type { SearchTool } from "../../app/api/chat/route";
+import { useThreadChat } from "@/lib/use-thread-chat";
 import { Suggestion, Suggestions } from "./suggestion";
 import type { SearchTexts } from "../../i18n/search";
 
 const Context = createContext<{
   open: boolean;
   setOpen: (open: boolean) => void;
-  chat: UseChatHelpers<ChatUIMessage>;
+  chat: ReturnType<typeof useThreadChat>;
   texts: SearchTexts;
 } | null>(null);
 
@@ -77,7 +77,7 @@ export function AISearchPanelHeader({
 }
 
 export function AISearchInputActions() {
-  const { messages, status, setMessages, regenerate } = useChatContext();
+  const { messages, status, send, startNewThread } = useChatContext();
   const { texts } = useAISearchContext();
   const isLoading = status === "streaming";
 
@@ -95,7 +95,13 @@ export function AISearchInputActions() {
               className: "rounded-full gap-1.5",
             }),
           )}
-          onClick={() => regenerate()}
+          onClick={() => {
+            const last = messages.filter((m) => m.role === "user").at(-1);
+            if (last) {
+              const text = last.parts.find((p) => p.type === "text")?.text ?? "";
+              if (text) void send(text);
+            }
+          }}
         >
           <RefreshCw className="size-4" />
           {texts.retry}
@@ -110,7 +116,7 @@ export function AISearchInputActions() {
             className: "rounded-full",
           }),
         )}
-        onClick={() => setMessages([])}
+        onClick={() => startNewThread()}
       >
         {texts.clearChat}
       </button>
@@ -120,32 +126,18 @@ export function AISearchInputActions() {
 
 const StorageKeyInput = "__ai_search_input";
 export function AISearchInput(props: ComponentProps<"form">) {
-  const { status, sendMessage, stop } = useChatContext();
+  const { status, send, stop } = useChatContext();
   const { texts } = useAISearchContext();
   const [input, setInput] = useState(
     () => localStorage.getItem(StorageKeyInput) ?? "",
   );
-  const isLoading = status === "streaming" || status === "submitted";
+  const isLoading = status === "streaming";
   const onStart = (e?: SyntheticEvent) => {
     e?.preventDefault();
     const message = input.trim();
     if (message.length === 0) return;
 
-    void sendMessage({
-      role: "user",
-      parts: [
-        {
-          type: "data-client",
-          data: {
-            location: location.href,
-          },
-        },
-        {
-          type: "text",
-          text: message,
-        },
-      ],
-    });
+    void send(message, location.href);
     setInput("");
     localStorage.removeItem(StorageKeyInput);
   };
@@ -165,7 +157,7 @@ export function AISearchInput(props: ComponentProps<"form">) {
         placeholder={isLoading ? texts.answeringPlaceholder : texts.askPlaceholder}
         autoFocus
         className="p-3"
-        disabled={status === "streaming" || status === "submitted"}
+        disabled={status === "streaming"}
         onChange={(e) => {
           setInput(e.target.value);
           localStorage.setItem(StorageKeyInput, e.target.value);
@@ -282,7 +274,7 @@ const roleName: Record<string, string> = {
 function Message({
   message,
   ...props
-}: { message: ChatUIMessage } & ComponentProps<"div">) {
+}: { message: UIMessage } & ComponentProps<"div">) {
   const { texts } = useAISearchContext();
   let markdown = "";
   const searchCalls: UIToolInvocation<SearchTool>[] = [];
@@ -343,12 +335,7 @@ function Message({
 
 export function AISearch({ children, texts }: { children: ReactNode; texts: SearchTexts }) {
   const [open, setOpen] = useState(false);
-  const chat = useChat<ChatUIMessage>({
-    id: "search",
-    transport: new DefaultChatTransport({
-      api: "/api/chat",
-    }),
-  });
+  const chat = useThreadChat();
 
   return (
     <Context value={useMemo(() => ({ chat, open, setOpen, texts }), [chat, open, texts])}>
@@ -435,23 +422,7 @@ export function AISearchPanel() {
                 {texts.suggestions.map((suggestion) => (
                   <Suggestion
                     key={suggestion}
-                    onClick={() =>
-                      chat.sendMessage({
-                        role: "user",
-                        parts: [
-                          {
-                            type: "data-client",
-                            data: {
-                              location: location.href,
-                            },
-                          },
-                          {
-                            type: "text",
-                            text: suggestion,
-                          },
-                        ],
-                      })
-                    }
+                    onClick={() => void chat.send(suggestion, location.href)}
                     suggestion={suggestion}
                   />
                 ))}
@@ -496,7 +467,7 @@ export function AISearchPanelList({
         </div>
       ) : (
         <div className="flex flex-col px-3 gap-4">
-          {chat.error && <RateLimitError error={chat.error} texts={texts} />}
+          {chat.error && <RateLimitError error={new Error(chat.error)} texts={texts} />}
           {messages.map((item) => (
             <Message key={item.id} message={item} />
           ))}

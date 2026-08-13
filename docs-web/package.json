@@ -59,6 +59,7 @@
     "@types/react-dom": "^19.2.3",
     "eslint": "^9.0.0",
     "eslint-config-next": "16.2.12",
+    "jsdom": "^30.0.1",
     "postcss": "^8.5.18",
     "tailwindcss": "^4.2.4",
     "typescript": "^6.0.3",

@@ -130,3 +130,24 @@ class TestRedisClear:
         assert async_client.scan_calls == [(b"app:users:*", 100)]
         async_client.delete.assert_awaited_once_with(b"app:users:1", b"app:users:2")
         async_client.flushdb.assert_not_awaited()
+
+    def test_clear_with_explicit_prefix_works_without_configured_key_prefix(self) -> None:
+        """An explicit prefix must still scope deletion when CACHE_REDIS_KEY_PREFIX is empty (regression)."""
+        client = Mock()
+        client.scan_iter.return_value = iter([])
+        backend = _redis_backend("", client=client)
+
+        assert backend.clear(prefix="users:") == 0
+
+        client.scan_iter.assert_called_once_with(match=b"users:*", count=100)
+        client.flushdb.assert_not_called()
+
+    def test_aclear_with_explicit_prefix_works_without_configured_key_prefix(self) -> None:
+        async_client = _AsyncRedisClient([])
+        backend = _redis_backend("", async_client=async_client)
+
+        asyncio.run(backend.aclear(prefix="users:"))
+
+        assert async_client.scan_calls == [(b"users:*", 100)]
+        async_client.delete.assert_not_awaited()
+        async_client.flushdb.assert_not_awaited()

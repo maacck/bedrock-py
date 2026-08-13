@@ -275,11 +275,15 @@ def info(
 
 def _bootstrap_migrations_manager():
     """Build a MigrationsManager from the current settings."""
+    from bedrock.database import db
     from bedrock.database.config import DbSettings
     from bedrock.database.migrations_manager import MigrationsManager
     from bedrock.module import apps
 
     database_url = DbSettings().SQLALCHEMY_DATABASE_URI
+
+    if db._database_url is not None:
+        database_url = db._database_url
     return MigrationsManager(registry=apps, database_url=database_url)
 
 
