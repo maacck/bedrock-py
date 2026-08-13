@@ -133,4 +133,22 @@ describe("TokenBudgetWindow", () => {
     budget.settle("r1", 9_000);
     expect(budget.committed).toBe(9_000);
   });
+
+  it("still charges a straddling reservation after a new-window reserve", () => {
+    let now = 3_599_000;
+    let seq = 0;
+    const budget = new TokenBudgetWindow(() => now, () => `r-${++seq}`);
+    const straddling = budget.reserve(10_000);
+    expect(straddling.reservationId).toBe("r-1");
+
+    now = 3_601_000;
+    const next = budget.reserve(5_000);
+    expect(next.allowed).toBe(true);
+    expect(next.reservationId).toBe("r-2");
+    // Old reserved amount must not consume the new window; only the new reserve is committed.
+    expect(budget.committed).toBe(5_000);
+
+    budget.settle("r-1", 9_000);
+    expect(budget.committed).toBe(14_000);
+  });
 });
