@@ -40,6 +40,7 @@ Documentation = "https://bedrock-py.com"
 
 [project.optional-dependencies]
 cache-redis = ["redis>=4.2.0"]
+storage-s3 = ["boto3>=1.34.0"]
 
 [project.scripts]
 bedrock = "bedrock.cli.main:entrypoint"
@@ -59,4 +60,7 @@ dev = [
     "coverage>=7.13.5",
     "pytest-cov>=7.1.0",
     "redis>=4.2.0",
+    "moto>=5.0.0",
+    "flask>=3.0.0",
+    "flask-cors>=4.0.0",
 ]
