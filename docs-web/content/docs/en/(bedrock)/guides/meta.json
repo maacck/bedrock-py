@@ -6,7 +6,6 @@
     "module-hierarchy",
     "playbooks",
     "cli",
-    "chat-api",
     "database",
     "cache",
     "signals",
