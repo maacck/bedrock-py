@@ -29,7 +29,7 @@ storage.exists("media/avatar/a1.png")  # True
 ### 后端选择
 
 ```python
-from bedrock.contrib.storage import storage
+from bedrock.contrib.storage import storage, S3StorageSettings
 
 # 本地文件系统后端
 storage.configure("local")
@@ -157,7 +157,7 @@ S3 可以提供三种 URL：
 - `get_preview_url()`——内联预览 URL（浏览器安全，`ResponseContentDisposition=inline`），用于 `<img>`/`<video>` 等嵌入场景。
 - `get_signed_url()`——针对特定方法的原始预签名 URL。
 
-访问/预览助手上的 `acl` 开关决定 URL 是否签名：显式 `acl=` 参数，否则使用桶级别的 `STORAGE_S3_DEFAULT_ACL`，否则不签名。只有解析为公开 ACL（`public-read`、`public-read-write`）时才生成未签名 URL；其他一切情况（包括 `private`）都生成预签名 URL。
+访问/预览助手上的 `acl` 开关决定 URL 是否签名：显式 `acl=` 参数，否则使用桶级别的 `STORAGE_S3_DEFAULT_ACL`，否则不解析 ACL。只有解析为公开 ACL（`public-read`、`public-read-write`）时才生成未签名 URL；其他一切情况（包括 `private`）都生成预签名 URL。
 
 <Callout type="warning">
 只有对真正公开的对象才向 URL 助手传入公开 `acl`——生成的 URL 未签名，可被匿名读取。

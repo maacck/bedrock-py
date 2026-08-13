@@ -29,7 +29,7 @@ The storage service uses a dynamic backend registry. The local backend is always
 ### Backend Selection
 
 ```python
-from bedrock.contrib.storage import storage
+from bedrock.contrib.storage import storage, S3StorageSettings
 
 # Local filesystem backend
 storage.configure("local")
@@ -105,7 +105,7 @@ storage.configure("custom")
 
 ## StorageService API Reference
 
-The `storage` singleton is a `StorageService` instance. All access goes through this object. Operations take already-normalized `storage_key` values and never configure a backend implicitly.
+The `storage` singleton is a `StorageService` instance. All access goes through this object. Every operation normalizes and validates its `storage_key` before delegating to the backend (see [Storage Keys](#storage-keys) below) and never configures a backend implicitly.
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
