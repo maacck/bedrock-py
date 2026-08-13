@@ -23,6 +23,7 @@ class DatabaseManager:
         self._engine: Engine | None = None
         self._session_factory: SessionFactory | None = None
         self._settings: DbSettings | None = None
+        self._database_url: str | None = None
 
     def init(self, url: str | None = None, settings: DbSettings | None = None) -> None:
         """Initialize or safely replace the database engine and session factory.
