@@ -56,6 +56,10 @@ it("open creates a thread and marks it in-flight", () => {
   }
 });
 
+it("open rejects a missing thread when create is disabled", () => {
+  expect(openThreadState(null, "d1", 1_000, { create: false })).toEqual({ status: 404 });
+});
+
 it("open rejects device mismatch with 404", () => {
   expect(openThreadState(snap(), "other-device", 1_000)).toEqual({ status: 404 });
 });

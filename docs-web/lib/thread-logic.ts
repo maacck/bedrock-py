@@ -55,8 +55,10 @@ export function openThreadState(
   thread: ThreadSnapshot | null,
   deviceId: string,
   now: number,
+  options?: { create?: boolean },
 ): OpenThreadResult {
   if (!thread) {
+    if (options?.create === false) return { status: 404 };
     return {
       status: 200,
       thread: { deviceId, messages: [], inFlight: true, createdAt: now, updatedAt: now },

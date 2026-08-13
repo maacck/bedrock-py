@@ -22,6 +22,16 @@ it("maps 200 /open to ok with messages", async () => {
   expect(r).toEqual({ ok: true, thread: { messages: [{ role: "user", content: "hi" }] } });
 });
 
+it("forwards create:false on /open", async () => {
+  let seen: unknown;
+  const ns = fakeNamespace(async (_path, body) => {
+    seen = body;
+    return Response.json({ error: "thread_not_found" }, { status: 404 });
+  });
+  await openThread(ns, "t1", "d1", { create: false });
+  expect(seen).toEqual({ deviceId: "d1", create: false });
+});
+
 it("maps 404 and 409 /open to not-found and busy", async () => {
   const ns404 = fakeNamespace(async () => Response.json({ error: "thread_not_found" }, { status: 404 }));
   expect(await openThread(ns404, "t1", "d1")).toEqual({ ok: false, status: 404 });

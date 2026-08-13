@@ -33,9 +33,13 @@ export async function openThread(
   ns: ThreadStoreNamespace,
   threadId: string,
   deviceId: string,
+  options?: { create?: boolean },
 ): Promise<OpenThreadResult> {
   try {
-    const res = await call(getStub(ns, threadId), "/open", { deviceId });
+    const res = await call(getStub(ns, threadId), "/open", {
+      deviceId,
+      create: options?.create !== false,
+    });
     if (res.status === 200) {
       const body = (await res.json()) as { thread: { messages: ThreadMessage[] } };
       return { ok: true, thread: body.thread };

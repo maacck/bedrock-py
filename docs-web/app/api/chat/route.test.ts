@@ -149,9 +149,66 @@ describe("POST /api/chat", () => {
     const res = await post(JSON.stringify({ query: "hi", device_id: UUID }));
     expect(res.status).toBe(429);
     expect(await res.json()).toMatchObject({ error: "rate_limited" });
+    expect(res.headers.get("X-Thread-Id")).toBeNull();
     expect(openThread).not.toHaveBeenCalled();
     expect(abortThread).not.toHaveBeenCalled();
     expect(reserveBudget).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns 404 for an explicit unknown thread_id without reserving", async () => {
+    parseAndValidateChatRequest.mockReturnValue({
+      ok: true,
+      query: "hi",
+      threadId: UUID,
+      deviceId: UUID,
+      location: null,
+    });
+    openThread.mockResolvedValue({ ok: false, status: 404 });
+    const res = await post(JSON.stringify({ query: "hi", device_id: UUID, thread_id: UUID }));
+    expect(res.status).toBe(404);
+    expect(openThread).toHaveBeenCalledWith(expect.anything(), UUID, UUID, { create: false });
+    expect(reserveBudget).not.toHaveBeenCalled();
+  });
+
+  it("releases the reservation when new-thread open fails after reserve", async () => {
+    openThread.mockResolvedValue({ ok: false, status: 502 });
+    const res = await post(JSON.stringify({ query: "hi", device_id: UUID }));
+    expect(res.status).toBe(502);
+    expect(releaseBudget).toHaveBeenCalledTimes(1);
+    expect(abortThread).not.toHaveBeenCalled();
+  });
+
+  it("forfeits the reservation and aborts the lock on onAbort", async () => {
+    streamText.mockReturnValue({ toUIMessageStreamResponse });
+    const res = await post(JSON.stringify({ query: "hi", device_id: UUID }));
+    expect(res.status).toBe(200);
+    const { onAbort } = streamText.mock.calls[0][0] as { onAbort: () => Promise<void> };
+    await onAbort();
+    expect(abortThread).toHaveBeenCalledTimes(1);
+    expect(forfeitBudget).toHaveBeenCalledTimes(1);
+    expect(releaseBudget).not.toHaveBeenCalled();
+  });
+
+  it("forfeits the reservation and aborts the lock on onError", async () => {
+    streamText.mockReturnValue({ toUIMessageStreamResponse });
+    const res = await post(JSON.stringify({ query: "hi", device_id: UUID }));
+    expect(res.status).toBe(200);
+    const { onError } = streamText.mock.calls[0][0] as { onError: (e: unknown) => Promise<void> };
+    await onError(new Error("provider"));
+    expect(abortThread).toHaveBeenCalledTimes(1);
+    expect(forfeitBudget).toHaveBeenCalledTimes(1);
+  });
+
+  it("settles the full reservation when the provider reports no usage", async () => {
+    streamText.mockReturnValue({ toUIMessageStreamResponse });
+    const res = await post(JSON.stringify({ query: "hi", device_id: UUID }));
+    expect(res.status).toBe(200);
+    const { onFinish } = streamText.mock.calls[0][0] as {
+      onFinish: (r: unknown) => Promise<void>;
+    };
+    await onFinish({ text: "answer", totalUsage: {} });
+    const charged = settleBudget.mock.calls[0][3] as number;
+    expect(charged).toBeGreaterThan(4_096);
   });
 
   it("streams with X-Thread-Id and reserves query + history + system + output", async () => {
@@ -173,7 +230,7 @@ describe("POST /api/chat", () => {
     expect(reserveBudget).toHaveBeenCalledTimes(1);
     const tokens = reserveBudget.mock.calls[0][2] as number;
     expect(tokens).toBeGreaterThan(4_096); // history (25) + query + system + output reservation
-    expect(openThread).toHaveBeenCalledWith(expect.anything(), UUID, UUID);
+    expect(openThread).toHaveBeenCalledWith(expect.anything(), UUID, UUID, { create: false });
     expect(streamText).toHaveBeenCalledTimes(1);
   });
 

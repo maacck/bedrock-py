@@ -31,7 +31,9 @@ export class ThreadStore extends DurableObject<CloudflareEnv> {
 
     switch (url.pathname) {
       case "/open": {
-        const result = openThreadState(thread, deviceId, Date.now());
+        const result = openThreadState(thread, deviceId, Date.now(), {
+          create: payload.create !== false,
+        });
         if (result.status === 404) return Response.json({ error: "thread_not_found" }, { status: 404 });
         if (result.status === 409) return Response.json({ error: "thread_busy" }, { status: 409 });
         await this.ctx.storage.put(STORAGE_KEY, result.thread);
