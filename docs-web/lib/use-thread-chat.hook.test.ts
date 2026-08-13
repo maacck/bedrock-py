@@ -42,9 +42,12 @@ afterEach(() => {
 it("ignores a settled fetch after startNewThread clears the in-flight turn", async () => {
   // Given: a deferred /api/chat fetch that we settle after the user clears
   let resolveFetch!: (value: Response) => void;
-  const fetchStarted = Promise.withResolvers<RequestInit | undefined>();
+  let resolveFetchStarted!: (init: RequestInit | undefined) => void;
+  const fetchStarted = new Promise<RequestInit | undefined>((resolve) => {
+    resolveFetchStarted = resolve;
+  });
   const fetchMock = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
-    fetchStarted.resolve(init);
+    resolveFetchStarted(init);
     return new Promise<Response>((resolve) => {
       resolveFetch = resolve;
     });
@@ -57,7 +60,7 @@ it("ignores a settled fetch after startNewThread clears the in-flight turn", asy
   await act(async () => {
     void latestRef.current.send("hi");
   });
-  const init = await fetchStarted.promise;
+  const init = await fetchStarted;
   expect(latestRef.current.status).toBe("streaming");
   expect(latestRef.current.messages).toHaveLength(1);
 
