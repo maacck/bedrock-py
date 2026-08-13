@@ -1,6 +1,6 @@
 [project]
 name = "bedrock-core"
-version = "0.1.2"
+version = "0.2.0"
 description = "A modular Python application framework with manifest-driven module loading, lifecycle management, and contrib modules."
 readme = "README.md"
 license = "MIT"
