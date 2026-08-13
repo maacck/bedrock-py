@@ -9,6 +9,7 @@ from bedrock.contrib.storage import (
     LocalStorageSettings,
     StorageKeyError,
     StorageObjectNotFoundError,
+    StorageUploadError,
     StorageUrlUnsupportedError,
 )
 from bedrock.contrib.storage.backends.local import LocalBackend
@@ -207,6 +208,28 @@ def test_exists(svc: StorageService) -> None:
     svc.upload("e.txt", b"x")
     assert svc.exists("e.txt") is True
     assert svc.exists("missing.txt") is False
+
+
+class _FailingReader:
+    """File-like source that raises OSError partway through reads."""
+
+    def __init__(self, payload: bytes) -> None:
+        self._payload = payload
+        self._sent = False
+
+    def read(self, size: int = -1) -> bytes:
+        if self._sent:
+            raise OSError("simulated read failure")
+        self._sent = True
+        return self._payload
+
+
+def test_failed_upload_cleans_up_tmp_file(svc: StorageService, tmp_path: Path) -> None:
+    """A failed upload leaves no partial tmp object behind in list()."""
+    with pytest.raises(StorageUploadError):
+        svc.upload("broken.bin", _FailingReader(b"partial"))
+    assert list(tmp_path.iterdir()) == []
+    assert svc.list().items == []
 
 
 def test_upload_accepts_acl(svc: StorageService) -> None:

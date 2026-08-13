@@ -98,6 +98,7 @@ class LocalBackend:
         filesystem.
         """
         dest = self._path(storage_key)
+        tmp: Path | None = None
         try:
             dest.parent.mkdir(parents=True, exist_ok=True)
             tmp = dest.parent / f".{dest.name}.tmp-{uuid.uuid4().hex}"
@@ -114,6 +115,11 @@ class LocalBackend:
         except StorageKeyError:
             raise
         except OSError as exc:
+            if tmp is not None:
+                try:
+                    tmp.unlink(missing_ok=True)  # best-effort cleanup of the partial write
+                except OSError:
+                    pass  # the original failure is authoritative
             raise StorageUploadError(msg=f"Failed to upload {storage_key!r}: {exc}") from exc
         return StorageUploadResult(storage_key=storage_key, size=dest.stat().st_size)
 
