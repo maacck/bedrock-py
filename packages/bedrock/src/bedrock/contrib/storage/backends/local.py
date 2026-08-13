@@ -4,9 +4,10 @@ import mimetypes
 import os
 import shutil
 import uuid
-from datetime import datetime, timezone
+from collections.abc import Iterable
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import BinaryIO, Iterable
+from typing import BinaryIO
 
 import orjson
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -58,9 +59,7 @@ class LocalBackend:
         root = self._root.resolve()
         resolved = (self._root / storage_key).resolve()
         if not resolved.is_relative_to(root):
-            raise StorageKeyError(
-                msg=f"storage_key {storage_key!r} resolves outside the backend root {str(root)!r}."
-            )
+            raise StorageKeyError(msg=f"storage_key {storage_key!r} resolves outside the backend root {str(root)!r}.")
         return resolved
 
     def _meta_path(self, storage_key: str) -> Path:
@@ -223,7 +222,7 @@ class LocalBackend:
                         StorageListEntry(
                             storage_key=f"{prefix}{name}",
                             size=stat_result.st_size,
-                            last_modified=datetime.fromtimestamp(stat_result.st_mtime, tz=timezone.utc),
+                            last_modified=datetime.fromtimestamp(stat_result.st_mtime, tz=UTC),
                         )
                     )
         except OSError as exc:
@@ -253,7 +252,7 @@ class LocalBackend:
         return StorageObject(
             storage_key=storage_key,
             size=stat_result.st_size,
-            last_modified=datetime.fromtimestamp(stat_result.st_mtime, tz=timezone.utc),
+            last_modified=datetime.fromtimestamp(stat_result.st_mtime, tz=UTC),
             mime_type=mime_type,
             provider_metadata=dict((meta or {}).get("provider_metadata") or {}),
         )

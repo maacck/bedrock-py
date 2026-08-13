@@ -1,9 +1,8 @@
 """Tests for StorageService: key normalization, backend configuration, registry."""
 
-from typing import Iterable
+from collections.abc import Iterable
 
 import pytest
-
 from bedrock.contrib.storage import (
     StorageBackendNotConfiguredError,
     StorageError,

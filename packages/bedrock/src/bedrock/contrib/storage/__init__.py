@@ -17,26 +17,31 @@ from .exc import (
 from .service import StorageService, list_backends, normalize_storage_key, register_backend, storage
 
 __all__ = [
-    "LocalBackend",
-    "LocalStorageSettings",
-    "S3Backend",
-    "S3StorageSettings",
+    # Exceptions
     "StorageBackendNotConfiguredError",
     "StorageConnectionError",
     "StorageDownloadError",
     "StorageError",
     "StorageKeyError",
+    "StorageObjectNotFoundError",
+    "StoragePermissionError",
+    "StorageUploadError",
+    "StorageUrlUnsupportedError",
+    # Entities
     "StorageListEntry",
     "StorageListResult",
     "StorageObject",
-    "StorageObjectNotFoundError",
-    "StoragePermissionError",
-    "StorageService",
-    "StorageUploadError",
     "StorageUploadResult",
-    "StorageUrlUnsupportedError",
+    # Settings and backends
+    "LocalBackend",
+    "LocalStorageSettings",
+    "S3Backend",
+    "S3StorageSettings",
+    # Service and helpers
+    "StorageService",
     "list_backends",
     "normalize_storage_key",
     "register_backend",
+    # Singleton
     "storage",
 ]

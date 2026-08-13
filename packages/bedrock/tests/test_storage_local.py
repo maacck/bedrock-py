@@ -4,7 +4,6 @@ import os
 from pathlib import Path
 
 import pytest
-
 from bedrock.contrib.storage import (
     LocalStorageSettings,
     StorageKeyError,

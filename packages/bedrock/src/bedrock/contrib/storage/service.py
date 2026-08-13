@@ -1,7 +1,8 @@
 """Storage service: singleton facade over pluggable backends."""
 
+from collections.abc import Iterable
 from pathlib import Path
-from typing import BinaryIO, Iterable
+from typing import BinaryIO
 from urllib.parse import urlparse, urlunparse
 
 from pydantic_settings import BaseSettings
@@ -160,9 +161,7 @@ class StorageService:
         others ignore it.
         """
         key = normalize_storage_key(storage_key)
-        return self.get_backend().upload(
-            key, data, mime_type=mime_type, provider_metadata=provider_metadata, acl=acl
-        )
+        return self.get_backend().upload(key, data, mime_type=mime_type, provider_metadata=provider_metadata, acl=acl)
 
     def download(self, storage_key: str) -> bytes:
         """Return the full object content as bytes."""

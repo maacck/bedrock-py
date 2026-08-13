@@ -12,12 +12,11 @@ import socket
 import subprocess
 import sys
 import time
+from collections.abc import Iterable, Iterator
 from pathlib import Path
-from typing import Iterable, Iterator
 
 import pytest
 import requests
-
 from bedrock.contrib.storage import (
     S3StorageSettings,
     StorageError,

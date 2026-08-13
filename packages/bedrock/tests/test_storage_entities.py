@@ -1,6 +1,6 @@
 """Tests for storage domain entities."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from bedrock.contrib.storage.entities import (
     StorageListEntry,
@@ -23,7 +23,7 @@ def test_storage_object_defaults() -> None:
 
 def test_storage_object_full_fields() -> None:
     """All StorageObject fields round-trip."""
-    modified = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    modified = datetime(2026, 1, 1, tzinfo=UTC)
     obj = StorageObject(
         storage_key="a/b.txt",
         size=42,

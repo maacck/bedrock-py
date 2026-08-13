@@ -1,7 +1,8 @@
 """Storage backend protocol (sync-only in v1)."""
 
+from collections.abc import Iterable
 from pathlib import Path
-from typing import BinaryIO, Iterable, Protocol
+from typing import BinaryIO, Protocol
 
 from .entities import StorageListResult, StorageObject, StorageUploadResult
 

@@ -1,8 +1,9 @@
 """S3-compatible storage backend."""
 
 import mimetypes
+from collections.abc import Iterable
 from pathlib import Path
-from typing import BinaryIO, Iterable
+from typing import BinaryIO
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
