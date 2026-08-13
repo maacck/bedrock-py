@@ -39,6 +39,7 @@ def init(
     Bedrock layout: pyproject.toml, .python-version, README.md, and a
     source package with manifest, models, bootstrap, installation, and exc.
     """
+    output_dir = output_dir.resolve()
     try:
         package_base = _slugify(name)
     except ValueError as exc:
