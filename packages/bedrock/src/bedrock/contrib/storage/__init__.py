@@ -12,6 +12,7 @@ from .exc import (
     StorageUploadError,
     StorageUrlUnsupportedError,
 )
+from .service import StorageService, list_backends, normalize_storage_key, register_backend, storage
 
 __all__ = [
     "StorageBackendNotConfiguredError",
@@ -24,7 +25,12 @@ __all__ = [
     "StorageObject",
     "StorageObjectNotFoundError",
     "StoragePermissionError",
+    "StorageService",
     "StorageUploadError",
     "StorageUploadResult",
     "StorageUrlUnsupportedError",
+    "list_backends",
+    "normalize_storage_key",
+    "register_backend",
+    "storage",
 ]
