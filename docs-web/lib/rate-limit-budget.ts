@@ -118,9 +118,9 @@ export class TokenBudgetWindow {
    * can never be refunded twice or driven negative.
    */
   settle(reservationId: string, actualTokens: number): void {
-    this.rollWindow();
     const reserved = this.outstanding.get(reservationId);
-    if (reserved === undefined) return;
+    this.rollWindow(); // may clear outstanding, incl. this reservation (window rollover)
+    if (reserved === undefined) return; // unknown id → no-op (never refund twice)
     this.outstanding.delete(reservationId);
     // Fail conservative on non-finite input: charge the full reservation
     // rather than letting NaN poison the settled balance.

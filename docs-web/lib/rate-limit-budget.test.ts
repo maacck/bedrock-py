@@ -124,4 +124,13 @@ describe("TokenBudgetWindow", () => {
     budget.settle(reservationId!, NaN);
     expect(budget.committed).toBe(8_000);
   });
+
+  it("charges usage to the new window when a reservation straddles the boundary", () => {
+    let now = 3_599_000; // 1s before the hourly boundary
+    const budget = new TokenBudgetWindow(() => now, () => "r1");
+    budget.reserve(10_000);
+    now = 3_601_000; // rolled into the next window
+    budget.settle("r1", 9_000);
+    expect(budget.committed).toBe(9_000);
+  });
 });
