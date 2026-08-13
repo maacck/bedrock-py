@@ -253,8 +253,8 @@ class StorageService:
 
     @staticmethod
     def _validate_expires_in(expires_in: int) -> None:
-        """Reject non-positive or non-int ``expires_in`` values before delegation."""
-        if not isinstance(expires_in, int) or expires_in <= 0:
+        """Reject non-positive, non-int, or bool ``expires_in`` values before delegation."""
+        if not isinstance(expires_in, int) or isinstance(expires_in, bool) or expires_in <= 0:
             raise StorageError(msg=f"expires_in must be a positive integer, got {expires_in!r}.")
 
     def _rewrite_with_cdn(self, url: str) -> str:

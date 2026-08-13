@@ -199,7 +199,7 @@ def test_cdn_rewrites_access_and_preview_urls() -> None:
 
 
 @pytest.mark.parametrize("method_name", ["get_signed_url", "get_access_url", "get_preview_url"])
-@pytest.mark.parametrize("expires_in", [0, -1, "60"])
+@pytest.mark.parametrize("expires_in", [0, -1, "60", True])
 def test_url_methods_reject_invalid_expires_in(svc: StorageService, method_name: str, expires_in: object) -> None:
     """expires_in must be a positive integer; invalid values raise StorageError before delegation."""
     with pytest.raises(StorageError, match="expires_in"):
