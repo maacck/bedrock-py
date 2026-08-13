@@ -1,6 +1,6 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
-  "main": ".open-next/worker.js",
+  "main": "worker.ts",
   "name": "bedrock-docs-web",
   // Set this to today's date
   "compatibility_date": "2026-05-07",
@@ -12,11 +12,26 @@
   "ai": {
     "binding": "AI",
   },
-  "kv_namespaces": [
-    {
-      "binding": "RATE_LIMIT_KV",
-      "id": "ebf3c555a4b344a0aa8d9b43628dfe43",
-      "remote": true,
+  "durable_objects": {
+    "bindings": [
+        {
+          "name": "RATE_LIMITER",
+          "class_name": "RateLimiter",
+        },
+        {
+          "name": "THREAD_STORE",
+          "class_name": "ThreadStore",
+        },
+      ],
     },
-  ],
+    "migrations": [
+      {
+        "tag": "v1",
+        "new_sqlite_classes": ["RateLimiter"],
+      },
+      {
+        "tag": "v2",
+        "new_sqlite_classes": ["ThreadStore"],
+      },
+    ],
 }

@@ -39,8 +39,8 @@ uv run ruff format .
 uv run pytest packages/bedrock/tests/
 
 # Docs
-cd starlight-docs && npm run dev    # Dev server with live sync
-cd starlight-docs && npm run build  # Production build
+cd docs-web && npm run dev    # Dev server with live sync
+cd docs-web && npm run build  # Production build
 ```
 
 ## Architecture
@@ -99,16 +99,3 @@ cd starlight-docs && npm run build  # Production build
 - Pytest: dev dependency, 4 test files, no conftest.py
 - No CI/CD pipelines, no Docker, no deployment scripts
 
-## Agent skills
-
-### Issue tracker
-
-GitHub Issues. See `docs/agents/issue-tracker.md`.
-
-### Triage labels
-
-5 canonical roles mapped to GitHub labels. See `docs/agents/triage-labels.md`.
-
-### Domain docs
-
-Single-context: `CONTEXT.md` + `docs/adr/` at repo root. See `docs/agents/domain.md`.

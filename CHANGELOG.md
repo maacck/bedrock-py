@@ -5,6 +5,44 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-08-13
+
+### Breaking changes
+
+- **`/api/chat` contract** (docs-web): the endpoint now accepts
+  `{ query, thread_id?, device_id, context? }` instead of a full `messages`
+  array. Conversation history is managed server-side per thread; clients must
+  send `device_id` (a client-generated ownership key — not an auth boundary)
+  and store the server-issued `X-Thread-Id` response header for follow-ups.
+  Body cap is **16 KiB** (was 64 KiB). `query` is at most 2,000 characters.
+  `thread_id` must be a UUID when present; an unknown explicit id is `404`
+  (`thread_not_found`) and does not mint a Durable Object. A concurrent
+  request on the same thread is `409` (`thread_busy`).
+- **Query limit** (`bedrock.database.service`): `build_query()` and
+  `search_filter_sort_paginate()` now reject `limit=0` (previously the
+  "unlimited" sentinel with `show_all=True`), booleans, and other non-integers
+  with `InvalidQueryLimitError`. `limit` must be an integer in `1..1000` (M-6).
+- **Redis cache `clear()`** (`bedrock.contrib.cache.backends.redis`):
+  `clear()`/`aclear()` raise `CacheClearRequiresPrefixError` only when **both**
+  the configured key prefix and the explicit `prefix` argument are empty
+  (instead of calling `flushdb()`). An explicit `prefix` is honored even
+  without a configured `CACHE_REDIS_KEY_PREFIX` (M-5).
+- **Cache backend registration** (`bedrock.contrib.cache`): `register_backend`
+  and `list_backends` are no longer exported from `bedrock.contrib.cache.base`.
+  The package root (`bedrock.contrib.cache`) still exports `register_backend`
+  only; list registered names via `cache.list_backends()` on the `CacheService`
+  singleton (L-8).
+
+### Fixes
+
+- `DatabaseManager` no longer raises `AttributeError` on `_database_url` before
+  `init()` (H-1).
+- `bedrock-cli init` no longer crashes with a `ValueError` traceback when the
+  output directory is a symlink, e.g. `/tmp`/`/var` on macOS (M-1).
+- docs-web token budget now charges straddling reservations to the new window
+  (L-1) and charges the full reservation when the provider omits usage (L-3).
+- docs-web markdown sanitizer rejects protocol-relative URLs (L-5).
+
 ## [0.1.2] - 2026-05-23
 
 ### Fixed

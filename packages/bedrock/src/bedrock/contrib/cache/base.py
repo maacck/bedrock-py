@@ -7,8 +7,6 @@ from typing import Protocol
 
 from pydantic_settings import BaseSettings
 
-_BACKEND_REGISTRY: dict[str, tuple[type[BaseSettings], str]] = {}
-
 
 class CacheBackend(Protocol):
     """Protocol that all cache backends must implement.
@@ -26,11 +24,19 @@ class CacheBackend(Protocol):
     def get(self, key: str, default: bytes | None = None) -> bytes | None: ...
     async def aget(self, key: str, default: bytes | None = None) -> bytes | None: ...
 
-    def set(self, key: str, value: bytes, ex: int | None = None, ea: float | None = None) -> None: ...
-    async def aset(self, key: str, value: bytes, ex: int | None = None, ea: float | None = None) -> None: ...
+    def set(
+        self, key: str, value: bytes, ex: int | None = None, px: int | None = None, ea: float | None = None
+    ) -> None: ...
+    async def aset(
+        self, key: str, value: bytes, ex: int | None = None, px: int | None = None, ea: float | None = None
+    ) -> None: ...
 
-    def add(self, key: str, value: bytes, ex: int | None = None, ea: float | None = None) -> bool: ...
-    async def aadd(self, key: str, value: bytes, ex: int | None = None, ea: float | None = None) -> bool: ...
+    def add(
+        self, key: str, value: bytes, ex: int | None = None, px: int | None = None, ea: float | None = None
+    ) -> bool: ...
+    async def aadd(
+        self, key: str, value: bytes, ex: int | None = None, px: int | None = None, ea: float | None = None
+    ) -> bool: ...
 
     def delete(self, key: str) -> bool: ...
     async def adelete(self, key: str) -> bool: ...
@@ -50,14 +56,19 @@ class CacheBackend(Protocol):
     def get_many(self, keys: list[str]) -> dict[str, bytes]: ...
     async def aget_many(self, keys: list[str]) -> dict[str, bytes]: ...
 
-    def set_many(self, mapping: dict[str, bytes], ex: int | None = None, ea: float | None = None) -> None: ...
-    async def aset_many(self, mapping: dict[str, bytes], ex: int | None = None, ea: float | None = None) -> None: ...
+    def set_many(
+        self, mapping: dict[str, bytes], ex: int | None = None, px: int | None = None, ea: float | None = None
+    ) -> None: ...
+    async def aset_many(
+        self, mapping: dict[str, bytes], ex: int | None = None, px: int | None = None, ea: float | None = None
+    ) -> None: ...
 
     def get_or_set(
         self,
         key: str,
         default_provider: Callable[[], bytes] | bytes,
         ex: int | None = None,
+        px: int | None = None,
         ea: float | None = None,
     ) -> bytes | None: ...
     async def aget_or_set(
@@ -65,6 +76,7 @@ class CacheBackend(Protocol):
         key: str,
         default_provider: Callable[[], bytes] | bytes | Callable[[], Awaitable[bytes]],
         ex: int | None = None,
+        px: int | None = None,
         ea: float | None = None,
     ) -> bytes | None: ...
 
@@ -79,19 +91,3 @@ class CacheBackend(Protocol):
 
     def close(self) -> None: ...
     async def aclose(self) -> None: ...
-
-
-def register_backend(name: str, settings_cls: type[BaseSettings], import_path: str) -> None:
-    """Register a cache backend.
-
-    Args:
-        name: Unique backend identifier (e.g. ``"redis"``).
-        settings_cls: Pydantic ``BaseSettings`` subclass.
-        import_path: Colon-delimited path, e.g. ``"pkg.mod:ClassName"``.
-    """
-    _BACKEND_REGISTRY[name] = settings_cls, import_path
-
-
-def list_backends() -> list[str]:
-    """Return all registered backend names."""
-    return sorted(_BACKEND_REGISTRY.keys())

@@ -9,9 +9,16 @@ from pathlib import Path
 from typing import Any
 
 import typer
+from jinja2 import TemplateNotFound, TemplateSyntaxError
 
 from bedrock_cli import console
-from bedrock_cli.scaffolding import RenderedFile, ScaffoldOverwriteError, render_files
+from bedrock_cli.scaffolding import (
+    RenderedFile,
+    ScaffoldOverwriteError,
+    normalize_module_identifier,
+    render_files,
+    validate_template_name,
+)
 from bedrock_cli.template_env import build_template_environment
 
 _COLUMN_TYPE_MAP: dict[str, str] = {
@@ -46,7 +53,7 @@ _BUILTIN_TEMPLATES: dict[str, str] = {
 
 
 def _slugify(name: str) -> str:
-    return name.lower().replace("-", "_").replace(" ", "_")
+    return normalize_module_identifier(name)
 
 
 def _sqlalchemy_type_to_python(column: Any) -> str:
@@ -158,8 +165,11 @@ def _resolve_template_name(template: str) -> str:
     try:
         env.get_template(direct_name)
         return direct_name
-    except Exception:
+    except TemplateNotFound:
         pass
+    except TemplateSyntaxError as exc:
+        console.error(f"Template '{direct_name}' contains invalid Jinja syntax: {exc}")
+        raise typer.Exit(code=1) from exc
 
     # Fall back to built-in mapping
     if template in _BUILTIN_TEMPLATES:
@@ -187,8 +197,12 @@ def gen(
     Built-in templates: entity, service.
     Custom templates: place <name>.py.j2 in _bedrock_gen/ at your project root.
     """
-    _, class_name = _parse_model_ref(model_ref)
-    module_slug = _slugify(name) if name else _slugify(class_name)
+    try:
+        template = validate_template_name(template)
+        _, class_name = _parse_model_ref(model_ref)
+        module_slug = _slugify(name) if name else _slugify(class_name)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
 
     template_path = _resolve_template_name(template)
 

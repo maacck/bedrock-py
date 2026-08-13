@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 _BACKEND_REGISTRY = ClassRegistry(
     {
         "memory": "bedrock.contrib.cache.backends.memory:InMemoryBackend",
+        "redis": "bedrock.contrib.cache.backends.redis:RedisBackend",
     }
 )
 
@@ -179,6 +180,7 @@ class CacheService:
         key: str,
         value: Any,
         ex: int | None = None,
+        px: int | None = None,
         ea: float | None = None,
         coder: type[CacheCoder[Any]] | None = None,
     ) -> None:
@@ -187,16 +189,18 @@ class CacheService:
         Args:
             key: Cache key.
             value: Value to store.
-            ex: Expiration time in seconds. Mutually exclusive with ``ea``. If both are ``None``, never expires.
-            ea: Absolute Unix timestamp for expiration. Mutually exclusive with ``ex``.
+            ex: Expiration time in seconds. Mutually exclusive with ``px`` and ``ea``.
+            px: Expiration time in milliseconds. Mutually exclusive with ``ex`` and ``ea``.
+            ea: Absolute Unix timestamp for expiration. Mutually exclusive with ``ex`` and ``px``.
         """
-        self.get_backend().set(key, self._encode_value(value, coder=coder), ex=ex, ea=ea)
+        self.get_backend().set(key, self._encode_value(value, coder=coder), ex=ex, px=px, ea=ea)
 
     async def aset(
         self,
         key: str,
         value: Any,
         ex: int | None = None,
+        px: int | None = None,
         ea: float | None = None,
         coder: type[CacheCoder[Any]] | None = None,
     ) -> None:
@@ -205,13 +209,15 @@ class CacheService:
         Args:
             key: Cache key.
             value: Value to store.
-            ex: Expiration time in seconds. If both ``ex`` and ``ea`` are ``None``, never expires.
+            ex: Expiration time in seconds. Mutually exclusive with ``px`` and ``ea``.
+            px: Expiration time in milliseconds. Mutually exclusive with ``ex`` and ``ea``.
             ea: Absolute Unix timestamp for expiration.
         """
         await self.get_backend().aset(
             key,
             self._encode_value(value, coder=coder),
             ex=ex,
+            px=px,
             ea=ea,
         )
 
@@ -253,23 +259,25 @@ class CacheService:
         self,
         mapping: dict[str, Any],
         ex: int | None = None,
+        px: int | None = None,
         ea: float | None = None,
         coder: type[CacheCoder[Any]] | None = None,
     ) -> None:
         """Store multiple key-value pairs in one call."""
         encoded_mapping = {key: self._encode_value(value, coder=coder) for key, value in mapping.items()}
-        self.get_backend().set_many(encoded_mapping, ex=ex, ea=ea)
+        self.get_backend().set_many(encoded_mapping, ex=ex, px=px, ea=ea)
 
     async def aset_many(
         self,
         mapping: dict[str, Any],
         ex: int | None = None,
+        px: int | None = None,
         ea: float | None = None,
         coder: type[CacheCoder[Any]] | None = None,
     ) -> None:
         """Asynchronous variant of :meth:`set_many`."""
         encoded_mapping = {key: self._encode_value(value, coder=coder) for key, value in mapping.items()}
-        await self.get_backend().aset_many(encoded_mapping, ex=ex, ea=ea)
+        await self.get_backend().aset_many(encoded_mapping, ex=ex, px=px, ea=ea)
 
     def list(self, prefix: str, limit: int = 100) -> list[str]:
         """List cache keys matching a prefix."""

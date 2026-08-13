@@ -8,7 +8,7 @@ from typing import Any
 import typer
 
 from bedrock_cli import console
-from bedrock_cli.scaffolding import RenderedFile, ScaffoldExistsError, render_files
+from bedrock_cli.scaffolding import RenderedFile, ScaffoldExistsError, normalize_module_identifier, render_files
 
 
 def _slugify(name: str) -> str:
@@ -20,7 +20,7 @@ def _slugify(name: str) -> str:
     Returns:
         Lowercased, hyphen/space-replaced-with-underscore identifier.
     """
-    return name.lower().replace("-", "_").replace(" ", "_")
+    return normalize_module_identifier(name)
 
 
 def init(
@@ -39,7 +39,11 @@ def init(
     Bedrock layout: pyproject.toml, .python-version, README.md, and a
     source package with manifest, models, bootstrap, installation, and exc.
     """
-    package_base = _slugify(name)
+    output_dir = output_dir.resolve()
+    try:
+        package_base = _slugify(name)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
     destination = output_dir / name
 
     console.info(f"Creating project [bold]{name}[/bold] at {destination}")

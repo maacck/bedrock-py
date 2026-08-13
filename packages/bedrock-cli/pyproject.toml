@@ -1,10 +1,11 @@
 [project]
 name = "bedrock-cli"
-version = "0.1.2"
+version = "0.2.0"
 description = "Scaffold and inspect Bedrock modular applications."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "click>=8.3.3",
     "jinja2>=3.1.6",
     "rich>=14.3.4",
     "typer>=0.24.1",
@@ -37,4 +38,3 @@ build-backend = "uv_build"
 [tool.uv.build-backend]
 module-root = "src"
 module-name = "bedrock_cli"
-

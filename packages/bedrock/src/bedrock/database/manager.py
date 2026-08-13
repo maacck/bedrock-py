@@ -23,9 +23,15 @@ class DatabaseManager:
         self._engine: Engine | None = None
         self._session_factory: SessionFactory | None = None
         self._settings: DbSettings | None = None
+        self._database_url: str | None = None
 
     def init(self, url: str | None = None, settings: DbSettings | None = None) -> None:
-        """Initialize the database engine and session factory."""
+        """Initialize or safely replace the database engine and session factory.
+
+        Replacement is supported. The new engine is constructed before the
+        existing engine is disposed, so a failed initialization leaves the
+        current database configuration usable.
+        """
 
         resolved_settings = settings or DbSettings()
         resolved_url = url or resolved_settings.SQLALCHEMY_DATABASE_URI
@@ -34,9 +40,17 @@ class DatabaseManager:
             database_url=resolved_url,
         )
 
+        previous_engine = self._engine
+        previous_session_factory = self._session_factory
+        if previous_session_factory is not None:
+            previous_session_factory.clear_session()
+        if previous_engine is not None:
+            previous_engine.dispose()
+
         self._engine = engine
         self._session_factory = SessionFactory(session_local)
         self._settings = resolved_settings
+        self._database_url = resolved_url
 
     @property
     def engine(self) -> Engine:

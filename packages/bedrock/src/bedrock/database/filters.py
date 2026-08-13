@@ -15,18 +15,23 @@ from sqlalchemy import (
     inspect,
     or_,
 )
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.associationproxy import AssociationProxyExtensionType
 from sqlalchemy.ext.hybrid import HybridExtensionType
 from sqlalchemy.orm import InstrumentedAttribute, RelationshipProperty
 from sqlalchemy.sql.type_api import TypeEngine
 
-from bedrock.exc import BadFilterFormatError
+from bedrock.exc import BadFilterFormatError, FilterDepthExceededError
 
 BooleanFunction = namedtuple("BooleanFunction", ("key", "sqlalchemy_fn", "only_one_arg"))
 BOOLEAN_FUNCTIONS = [
     BooleanFunction("or", or_, False),
     BooleanFunction("and", and_, False),
 ]
+
+# Keep untrusted filter trees well below Python's recursion limit while allowing
+# useful nested boolean expressions.
+MAX_FILTER_DEPTH = 50
 
 
 def get_model_relationship(model: type[Any], field: str) -> RelationshipProperty:
@@ -240,8 +245,11 @@ class Operator:
         Raises:
             BadFilterFormatError: If *operator* is not a recognised key.
         """
-        if not operator:
+        if operator is None:
             operator = "=="
+
+        if not isinstance(operator, str):
+            raise BadFilterFormatError("Filter operator must be a string.")
 
         if operator not in self.OPERATORS:
             raise BadFilterFormatError(f"Operator `{operator}` not valid.")
@@ -275,7 +283,7 @@ class Filter:
         - Negation via a leading ``"!"`` on the field name.
     """
 
-    def __init__(self, filter_spec: dict[str, Any], strategy: str = "auto") -> None:
+    def __init__(self, filter_spec: Any, strategy: str = "auto", _depth: int = 0) -> None:
         """Parse a filter specification dictionary.
 
         Args:
@@ -288,6 +296,11 @@ class Filter:
             BadFilterFormatError: If required keys are missing or the spec
                 is not a dictionary.
         """
+        if _depth > MAX_FILTER_DEPTH:
+            raise FilterDepthExceededError(f"Filter tree exceeds the maximum depth of {MAX_FILTER_DEPTH}.")
+        if not isinstance(filter_spec, dict):
+            raise BadFilterFormatError(f"Filter spec `{filter_spec}` should be a dictionary.")
+
         self.filter_spec = filter_spec
         # when nested_strategy is auto, it will automatically decide to use any() or has()
         self.strategy = strategy
@@ -295,10 +308,10 @@ class Filter:
             filter_spec["field"]
         except KeyError as err:
             raise BadFilterFormatError("`field` is a mandatory filter attribute.") from err
-        except TypeError as err:
-            raise BadFilterFormatError(f"Filter spec `{filter_spec}` should be a dictionary.") from err
         self.negate = False
         field_name = filter_spec["field"]
+        if not isinstance(field_name, str) or not field_name:
+            raise BadFilterFormatError("`field` must be a non-empty string.")
         if field_name.startswith("!"):
             field_name = field_name[1:]
             self.negate = True
@@ -314,7 +327,7 @@ class Filter:
         # 1. rel_field:rel_field:text_field (colon) -> use any() or has()
         # 2. rel_field.rel_field.text_field (dot) -> join the relationship model
         if isinstance(self.value, dict) and "op" in self.value:
-            self.value = Filter(self.value)
+            self.value = Filter(self.value, _depth=_depth + 1)
         if "." in field_name:
             self.strategy = "join"
 
@@ -328,7 +341,8 @@ class Filter:
                     "op": filter_spec.get("op", "eq"),
                     "field": ":".join(field_parts[1:]),
                     "value": filter_spec.get("value"),
-                }
+                },
+                _depth=_depth + 1,
             )
 
     def get_named_models(self) -> set[Any]:
@@ -378,16 +392,13 @@ class Filter:
 
     def _format_text_search(self, default_model: type[Any]) -> Any:
         """Handle text_search operator by wrapping in any()/has() based on relationship type."""
-        field = Field(default_model, self.field)
+        if not isinstance(self.value, str):
+            raise BadFilterFormatError("`text_search` value must be a string.")
         relationship = get_model_relationship(default_model, self.field)
-        if relationship.uselist:
-            wrapper = Operator("any", negate=self.negate)
-        else:
-            wrapper = Operator("has", negate=self.negate)
-        return wrapper.function(
-            field.get_sqlalchemy_field(),
-            self.operator.function(relationship.mapper.class_, self.value),
-        )
+        relationship_field = getattr(default_model, self.field)
+        text_clause = relationship.mapper.class_.text_search(self.value)
+        clause = relationship_field.any(text_clause) if relationship.uselist else relationship_field.has(text_clause)
+        return ~clause if self.negate else clause
 
     def format_for_sqlalchemy(self, default_model: type[Any]) -> Any:
         """Translate this filter into a SQLAlchemy clause element.
@@ -405,37 +416,47 @@ class Filter:
         Raises:
             BadFilterFormatError: If the operator arity is unexpected.
         """
-        operator = self.operator
-        value = self.value
+        try:
+            operator = self.operator
+            value = self.value
 
-        if str(self.operator) == "text_search":
-            return self._format_text_search(default_model)
+            if operator is not None and operator.operator == "text_search":
+                return self._format_text_search(default_model)
 
-        # auto determine if it is any or has
-        if isinstance(value, Filter) and self.strategy == "auto":
-            relationship = get_model_relationship(default_model, self.field)
-            format_model = relationship.mapper.class_
+            if operator is not None and operator.operator == "fuzzy_search" and not isinstance(value, str):
+                raise BadFilterFormatError("`fuzzy_search` value must be a string.")
+
+            # auto determine if it is any or has
+            if isinstance(value, Filter) and self.strategy == "auto":
+                relationship = get_model_relationship(default_model, self.field)
+                format_model = relationship.mapper.class_
+                if operator is None:
+                    if relationship.uselist:
+                        operator = Operator("any", negate=self.negate)
+                    else:
+                        operator = Operator("has", negate=self.negate)
+                value = value.format_for_sqlalchemy(format_model)
+
             if operator is None:
-                if relationship.uselist:
-                    operator = Operator("any", negate=self.negate)
-                else:
-                    operator = Operator("has", negate=self.negate)
-            value = value.format_for_sqlalchemy(format_model)
+                raise BadFilterFormatError("Filter operator is required.")
+            function = operator.function
+            arity = operator.arity
+            field = Field(default_model, self.field)
+            value = self._format_value(field.get_sql_type(), value)
 
-        function = operator.function
-        arity = operator.arity
-        field = Field(default_model, self.field)
-        value = self._format_value(field.get_sql_type(), value)
+            sqlalchemy_field = field.get_sqlalchemy_field()
 
-        sqlalchemy_field = field.get_sqlalchemy_field()
+            if arity == 1:
+                return function(sqlalchemy_field)
 
-        if arity == 1:
-            return function(sqlalchemy_field)
+            if arity == 2:
+                return function(sqlalchemy_field, value)
 
-        if arity == 2:
-            return function(sqlalchemy_field, value)
-
-        raise BadFilterFormatError(f"Operator `{operator}` has unexpected arity {arity}.")
+            raise BadFilterFormatError(f"Operator `{operator}` has unexpected arity {arity}.")
+        except BadFilterFormatError:
+            raise
+        except (AttributeError, OSError, OverflowError, TypeError, ValueError, SQLAlchemyError) as err:
+            raise BadFilterFormatError("Invalid filter specification.") from err
 
 
 FilterableValueBase = str | int | float | bool | datetime
@@ -499,7 +520,7 @@ def _is_iterable_filter(filter_spec: Any) -> bool:
     return isinstance(filter_spec, Iterable) and not isinstance(filter_spec, str | dict)
 
 
-def init_filters(model: type[Any], filter_spec: Any) -> list[Filter | BooleanFilter]:
+def init_filters(model: type[Any], filter_spec: Any, _depth: int = 0) -> list[Filter | BooleanFilter]:
     """Parse one or more filter specs into :class:`Filter` / :class:`BooleanFilter` objects.
 
     Handles nested boolean functions (``"or"`` / ``"and"``), lists of
@@ -515,8 +536,11 @@ def init_filters(model: type[Any], filter_spec: Any) -> list[Filter | BooleanFil
     Raises:
         BadFilterFormatError: If a boolean function's arguments are invalid.
     """
+    if _depth > MAX_FILTER_DEPTH:
+        raise FilterDepthExceededError(f"Filter tree exceeds the maximum depth of {MAX_FILTER_DEPTH}.")
+
     if _is_iterable_filter(filter_spec):
-        return list(chain.from_iterable(init_filters(model, item) for item in filter_spec))
+        return list(chain.from_iterable(init_filters(model, item, _depth=_depth + 1) for item in filter_spec))
 
     if isinstance(filter_spec, dict):
         # Check if filter spec defines a boolean function.
@@ -530,10 +554,16 @@ def init_filters(model: type[Any], filter_spec: Any) -> list[Filter | BooleanFil
                     raise BadFilterFormatError(
                         f"`{boolean_function.key}` value must be an iterable across the function arguments"
                     )
+                fn_args = list(fn_args)
                 if boolean_function.only_one_arg and len(fn_args) != 1:
                     raise BadFilterFormatError(f"`{boolean_function.key}` must have one argument")
                 if not boolean_function.only_one_arg and len(fn_args) < 1:
                     raise BadFilterFormatError(f"`{boolean_function.key}` must have one or more arguments")
-                return [BooleanFilter(boolean_function.sqlalchemy_fn, *init_filters(model, fn_args))]
+                return [
+                    BooleanFilter(
+                        boolean_function.sqlalchemy_fn,
+                        *init_filters(model, fn_args, _depth=_depth + 1),
+                    )
+                ]
 
-    return [Filter(filter_spec)]
+    return [Filter(filter_spec, _depth=_depth)]

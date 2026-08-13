@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import pytest
 from bedrock.database.base import BedrockModel
-from bedrock.database.service import search_filter_sort_paginate
-from sqlalchemy import Boolean, Column, Integer, String, create_engine
-from sqlalchemy.orm import DeclarativeBase, sessionmaker
+from bedrock.database.filters import MAX_FILTER_DEPTH, init_filters
+from bedrock.database.service import MAX_QUERY_LIMIT, search_filter_sort_paginate
+from bedrock.exc import BadFilterFormatError, FilterDepthExceededError, InvalidQueryLimitError
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, create_engine
+from sqlalchemy.orm import DeclarativeBase, relationship, sessionmaker
 
 
 class Base(DeclarativeBase):
@@ -23,6 +25,7 @@ class InventoryItem(Base):
     category = Column(String(50), nullable=False)
     quantity = Column(Integer, nullable=False)
     is_active = Column(Boolean, nullable=False)
+    created_at = Column(DateTime, nullable=True)
 
 
 @pytest.fixture
@@ -173,6 +176,21 @@ class UnsearchableItem(BedrockModel):
     value = Column(String(100), nullable=False)
 
 
+class SearchTag(BedrockModel):
+    """Related searchable model used to exercise relationship text search."""
+
+    __tablename__ = "search_tags"
+    __searchable_columns__ = ["label"]
+    __search_op__ = "like"
+
+    id = Column(Integer, primary_key=True)
+    item_id = Column(Integer, ForeignKey("searchable_items.id"), nullable=False)
+    label = Column(String(100), nullable=False)
+
+
+SearchableItem.tags = relationship("SearchTag", backref="item")
+
+
 @pytest.fixture
 def search_engine():
     engine = create_engine("sqlite:///:memory:")
@@ -195,6 +213,10 @@ def search_session(search_engine):
             UnsearchableItem(value="something"),
         ]
     )
+    session.commit()
+    alpha = session.query(SearchableItem).filter_by(name="Alpha Widget").one()
+    beta = session.query(SearchableItem).filter_by(name="Beta Gadget").one()
+    session.add_all([SearchTag(item=alpha, label="featured widget"), SearchTag(item=beta, label="gadget")])
     session.commit()
     try:
         yield session
@@ -259,3 +281,94 @@ class TestTextSearch:
         )
         assert result["total"] == 0
         assert result["items"] == []
+
+    def test_relationship_text_search_supports_positive_and_negative_filters(self, search_session):
+        """Relationship text search must retain its special handling under negation."""
+        positive = search_filter_sort_paginate(
+            db_session=search_session,
+            model=SearchableItem,
+            filter_specs={"field": "tags", "op": "text_search", "value": "widget"},
+            sort_key="name",
+            limit=10,
+            count_pk="id",
+        )
+        negative = search_filter_sort_paginate(
+            db_session=search_session,
+            model=SearchableItem,
+            filter_specs={"field": "!tags", "op": "text_search", "value": "widget"},
+            sort_key="name",
+            limit=10,
+            count_pk="id",
+        )
+
+        assert [item.name for item in positive["items"]] == ["Alpha Widget"]
+        assert [item.name for item in negative["items"]] == ["Beta Gadget", "Gamma Tool"]
+
+
+class TestFilterInputValidation:
+    """Verify untrusted filter and pagination inputs raise public errors."""
+
+    @pytest.mark.parametrize(
+        "filter_specs",
+        [
+            {"field": 1, "op": "eq", "value": "fruit"},
+            {"field": "name", "op": "fuzzy_search", "value": 1},
+            {"field": "created_at", "op": "eq", "value": "not-a-date"},
+            {"field": "created_at", "op": "eq", "value": 10**18},
+        ],
+    )
+    def test_malformed_filter_values_are_normalized(self, db_session, filter_specs):
+        with pytest.raises(BadFilterFormatError):
+            search_filter_sort_paginate(
+                db_session=db_session,
+                model=InventoryItem,
+                filter_specs=filter_specs,
+                limit=10,
+                count_pk="id",
+            )
+
+    def test_text_search_requires_string_value(self, search_session):
+        with pytest.raises(BadFilterFormatError):
+            search_filter_sort_paginate(
+                db_session=search_session,
+                model=SearchableItem,
+                filter_specs={"field": "tags", "op": "text_search", "value": 1},
+                limit=10,
+                count_pk="id",
+            )
+
+    def test_filter_tree_depth_is_bounded(self):
+        filter_spec = {"field": "name", "op": "eq", "value": "alpha"}
+        for _ in range(MAX_FILTER_DEPTH + 10):
+            filter_spec = {"and": [filter_spec]}
+
+        with pytest.raises(FilterDepthExceededError):
+            init_filters(InventoryItem, filter_spec)
+
+    def test_filter_tree_list_nesting_is_bounded(self):
+        filter_spec: object = {"field": "name", "op": "eq", "value": "alpha"}
+        for _ in range(MAX_FILTER_DEPTH + 10):
+            filter_spec = [filter_spec]
+
+        with pytest.raises(FilterDepthExceededError):
+            init_filters(InventoryItem, filter_spec)
+
+    @pytest.mark.parametrize("limit", [-1, 0, True, "10", MAX_QUERY_LIMIT + 1])
+    def test_limit_must_be_a_bounded_positive_integer(self, db_session, limit):
+        with pytest.raises(InvalidQueryLimitError):
+            search_filter_sort_paginate(
+                db_session=db_session,
+                model=InventoryItem,
+                limit=limit,
+                count_pk="id",
+            )
+
+    def test_maximum_limit_is_accepted(self, db_session):
+        result = search_filter_sort_paginate(
+            db_session=db_session,
+            model=InventoryItem,
+            limit=MAX_QUERY_LIMIT,
+            count_pk="id",
+        )
+
+        assert result["page_info"]["limit"] == MAX_QUERY_LIMIT

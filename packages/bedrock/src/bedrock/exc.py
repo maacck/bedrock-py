@@ -33,6 +33,12 @@ class BadFilterFormatError(FilterError):
 
 
 class FilterDepthExceededError(FilterError):
-    """Raised when the recursive depth of a filter tree exceeds BEDROCK_MAX_FILTER_DEPTH."""
+    """Raised when the recursive depth of a filter tree exceeds MAX_FILTER_DEPTH."""
 
     detail: str = "Filter depth exceeded."
+
+
+class InvalidQueryLimitError(BedrockExc):
+    """Raised when a query limit is not within the supported safe range."""
+
+    detail: str = "Query limit must be a positive integer within the maximum allowed range."
