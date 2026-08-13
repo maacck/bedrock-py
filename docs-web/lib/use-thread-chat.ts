@@ -41,6 +41,36 @@ export function mergeStreamMessage(messages: UIMessage[], incoming: UIMessage): 
   return next;
 }
 
+type MutableRef<T> = { current: T };
+
+/** Safe on the server: localStorage is a browser-only ownership store. */
+export function readStoredThreadId(): string | null {
+  if (typeof window === "undefined") return null;
+  return localStorage.getItem(THREAD_KEY);
+}
+
+export function isCurrentGeneration(started: number, current: number): boolean {
+  return started === current;
+}
+
+/**
+ * Abort the in-flight request, invalidate its generation, and drop the stored
+ * thread id so a later X-Thread-Id / setMessages cannot revive the old turn.
+ */
+export function beginNewThread(
+  threadIdRef: MutableRef<string | null>,
+  abortRef: MutableRef<AbortController | null>,
+  generationRef: MutableRef<number>,
+): void {
+  generationRef.current += 1;
+  abortRef.current?.abort();
+  abortRef.current = null;
+  threadIdRef.current = null;
+  if (typeof window !== "undefined") {
+    localStorage.removeItem(THREAD_KEY);
+  }
+}
+
 function getDeviceId(): string {
   let id = localStorage.getItem(DEVICE_KEY);
   if (!id) {
@@ -59,24 +89,32 @@ export function useThreadChat() {
   const [messages, setMessages] = useState<UIMessage[]>([]);
   const [status, setStatus] = useState<ChatStatus>("idle");
   const [error, setError] = useState<string | null>(null);
-  const threadIdRef = useRef<string | null>(localStorage.getItem(THREAD_KEY));
+  const threadIdRef = useRef<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const statusRef = useRef<ChatStatus>("idle");
+  const generationRef = useRef(0);
+
+  useEffect(() => {
+    threadIdRef.current = readStoredThreadId();
+  }, []);
 
   useEffect(() => {
     statusRef.current = status;
   }, [status]);
 
   const startNewThread = useCallback(() => {
-    threadIdRef.current = null;
-    localStorage.removeItem(THREAD_KEY);
+    beginNewThread(threadIdRef, abortRef, generationRef);
     setMessages([]);
     setError(null);
+    setStatus("idle");
   }, []);
 
   const send = useCallback(async (query: string, location?: string) => {
     const trimmed = query.trim();
     if (!trimmed || statusRef.current === "streaming") return;
+
+    const generation = generationRef.current;
+    const stillCurrent = (): boolean => isCurrentGeneration(generation, generationRef.current);
 
     const userMessage: UIMessage = {
       id: crypto.randomUUID(),
@@ -98,16 +136,20 @@ export function useThreadChat() {
         body: JSON.stringify(buildChatRequest(trimmed, threadIdRef.current, getDeviceId(), location)),
       });
 
+      if (!stillCurrent()) return;
+
       if (!res.ok) {
         const body = (await res.json().catch(() => null)) as { message?: string } | null;
         throw new Error(body?.message ?? `Request failed (${res.status})`);
       }
 
       const threadId = res.headers.get("X-Thread-Id");
-      if (threadId) {
+      if (threadId && stillCurrent()) {
         threadIdRef.current = threadId;
         localStorage.setItem(THREAD_KEY, threadId);
       }
+
+      if (!stillCurrent()) return;
 
       setMessages((prev) => [
         ...prev,
@@ -137,15 +179,19 @@ export function useThreadChat() {
       for await (const message of readUIMessageStream({
         stream: chunkStream,
       })) {
+        if (!stillCurrent()) return;
         setMessages((prev) => mergeStreamMessage(prev, message));
       }
+      if (!stillCurrent()) return;
       setStatus("idle");
     } catch (err) {
-      if ((err as Error).name === "AbortError") {
+      if (!stillCurrent()) return;
+      if (err instanceof Error && err.name === "AbortError") {
         setStatus("idle");
         return;
       }
-      setError((err as Error).message);
+      const message = err instanceof Error ? err.message : "Request failed";
+      setError(message);
       setStatus("error");
     }
   }, []);

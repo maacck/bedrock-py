@@ -1,5 +1,14 @@
+import { createElement } from "react";
+import { renderToString } from "react-dom/server";
 import { expect, it } from "vitest";
-import { buildChatRequest, mergeStreamMessage } from "@/lib/use-thread-chat";
+import {
+  beginNewThread,
+  buildChatRequest,
+  isCurrentGeneration,
+  mergeStreamMessage,
+  readStoredThreadId,
+  useThreadChat,
+} from "@/lib/use-thread-chat";
 import type { UIMessage } from "ai";
 
 const UUID = "123e4567-e89b-12d3-a456-426614174000";
@@ -49,4 +58,32 @@ it("appends when no assistant placeholder exists", () => {
   const out = mergeStreamMessage([textMessage("u1", "user", "hi")], textMessage("a1", "assistant", "answer"));
   expect(out).toHaveLength(2);
   expect(out[1].id).toBe("a1");
+});
+
+function Probe() {
+  useThreadChat();
+  return null;
+}
+
+it("does not read localStorage when the hook is constructed on the server", () => {
+  expect(() => renderToString(createElement(Probe))).not.toThrow();
+});
+
+it("returns no stored thread id when localStorage is unavailable", () => {
+  expect(readStoredThreadId()).toBeNull();
+});
+
+it("aborts the in-flight request and bumps generation when starting a new thread", () => {
+  const controller = new AbortController();
+  const abortRef = { current: controller };
+  const generationRef = { current: 3 };
+  const threadIdRef = { current: "old-thread" as string | null };
+
+  beginNewThread(threadIdRef, abortRef, generationRef);
+
+  expect(controller.signal.aborted).toBe(true);
+  expect(generationRef.current).toBe(4);
+  expect(threadIdRef.current).toBeNull();
+  expect(isCurrentGeneration(3, generationRef.current)).toBe(false);
+  expect(isCurrentGeneration(4, generationRef.current)).toBe(true);
 });
