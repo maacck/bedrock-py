@@ -170,8 +170,7 @@ describe("parseAndValidateChatRequest", () => {
   });
 
   it("rejects bodies over MAX_BODY_BYTES", () => {
-    // ~70 KB body — exceeds the 64 KB cap still in place during Task 6 (the
-    // cap only drops to 16 KB in Task 9), so the body check fires BEFORE the
+    // ~70 KB body — exceeds the 16 KB cap, so the body check fires BEFORE the
     // query-length check and must return body_too_large.
     const big = JSON.stringify({ query: "x".repeat(70_000), device_id: "123e4567-e89b-12d3-a456-426614174000" });
     expect(parseAndValidateChatRequest(big)).toMatchObject({ ok: false, code: "body_too_large" });

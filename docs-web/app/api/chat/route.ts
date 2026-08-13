@@ -132,17 +132,21 @@ export async function POST(req: Request) {
 
   const { env } = getCloudflareContext();
 
+  const contextLine = parsed.location ? `\n[Client Context: location: ${parsed.location}]` : "";
+  const userText = parsed.query + contextLine;
+
   // Server-generated thread id when the client starts a new conversation.
   const threadId = parsed.threadId ?? crypto.randomUUID();
-  const opened = await openThread(env.THREAD_STORE, threadId, parsed.deviceId);
-  if (!opened.ok) {
-    if (opened.status === 404) {
+  const isNewThread = parsed.threadId === null;
+
+  function threadOpenError(status: 404 | 409 | 502): Response {
+    if (status === 404) {
       return Response.json(
         { error: "thread_not_found", message: "Thread not found for this device." },
         { status: 404 },
       );
     }
-    if (opened.status === 409) {
+    if (status === 409) {
       return Response.json(
         { error: "thread_busy", message: "Another request is already running on this thread." },
         { status: 409 },
@@ -150,22 +154,10 @@ export async function POST(req: Request) {
     }
     return Response.json({ error: "thread_error", message: "Thread store unavailable." }, { status: 502 });
   }
-  // From here on, EVERY exit path must release the thread lock via abortThread.
 
-  const history = opened.thread.messages;
-  const historyTokens = history.reduce((sum, m) => sum + estimateTokens(m.content), 0);
-  const contextLine = parsed.location ? `\n[Client Context: location: ${parsed.location}]` : "";
-  const userText = parsed.query + contextLine;
-
-  const reservationTokens =
-    estimateTokens(userText) +
-    historyTokens +
-    estimateTokens(systemPrompt) +
-    RATE_LIMIT.RESERVED_OUTPUT_TOKENS;
-
-  const reservation = await reserveBudget(env.RATE_LIMITER, ip, reservationTokens);
-  if (!reservation.allowed || !reservation.reservationId) {
-    await abortThread(env.THREAD_STORE, threadId, parsed.deviceId);
+  function rateLimitedResponse(
+    reservation: { used: number; remaining: number; resetAt: number },
+  ): Response {
     return Response.json(
       {
         error: "rate_limited",
@@ -183,6 +175,42 @@ export async function POST(req: Request) {
         },
       },
     );
+  }
+
+  let history: { role: "user" | "assistant"; content: string }[] = [];
+  let reservationTokens =
+    estimateTokens(userText) +
+    estimateTokens(systemPrompt) +
+    RATE_LIMIT.RESERVED_OUTPUT_TOKENS;
+
+  // New threads reserve first so a denied budget never mints a Durable Object.
+  // Existing threads must open first to read history into the reservation.
+  let reservation;
+  if (isNewThread) {
+    reservation = await reserveBudget(env.RATE_LIMITER, ip, reservationTokens);
+    if (!reservation.allowed || !reservation.reservationId) {
+      return rateLimitedResponse(reservation);
+    }
+    const opened = await openThread(env.THREAD_STORE, threadId, parsed.deviceId);
+    if (!opened.ok) {
+      await releaseBudget(env.RATE_LIMITER, ip, reservation.reservationId);
+      return threadOpenError(opened.status);
+    }
+    history = opened.thread.messages;
+  } else {
+    const opened = await openThread(env.THREAD_STORE, threadId, parsed.deviceId);
+    if (!opened.ok) {
+      return threadOpenError(opened.status);
+    }
+    // From here on, EVERY exit path must release the thread lock via abortThread.
+    history = opened.thread.messages;
+    const historyTokens = history.reduce((sum, m) => sum + estimateTokens(m.content), 0);
+    reservationTokens += historyTokens;
+    reservation = await reserveBudget(env.RATE_LIMITER, ip, reservationTokens);
+    if (!reservation.allowed || !reservation.reservationId) {
+      await abortThread(env.THREAD_STORE, threadId, parsed.deviceId);
+      return rateLimitedResponse(reservation);
+    }
   }
 
   const reservationId = reservation.reservationId;

@@ -97,6 +97,13 @@ describe("POST /api/chat", () => {
   });
 
   it("maps thread ownership failure to 404 and never reserves", async () => {
+    parseAndValidateChatRequest.mockReturnValue({
+      ok: true,
+      query: "hi",
+      threadId: UUID,
+      deviceId: UUID,
+      location: null,
+    });
     openThread.mockResolvedValue({ ok: false, status: 404 });
     const res = await post(JSON.stringify({ query: "hi", device_id: UUID, thread_id: UUID }));
     expect(res.status).toBe(404);
@@ -104,17 +111,47 @@ describe("POST /api/chat", () => {
   });
 
   it("maps in-flight conflict to 409", async () => {
+    parseAndValidateChatRequest.mockReturnValue({
+      ok: true,
+      query: "hi",
+      threadId: UUID,
+      deviceId: UUID,
+      location: null,
+    });
     openThread.mockResolvedValue({ ok: false, status: 409 });
     const res = await post(JSON.stringify({ query: "hi", device_id: UUID, thread_id: UUID }));
     expect(res.status).toBe(409);
   });
 
   it("aborts the thread lock and returns 429 with X-Thread-Id when rate limited", async () => {
+    parseAndValidateChatRequest.mockReturnValue({
+      ok: true,
+      query: "hi",
+      threadId: UUID,
+      deviceId: UUID,
+      location: null,
+    });
     reserveBudget.mockResolvedValue({ allowed: false, reservationId: null, used: 50_000, remaining: 0, resetAt: 1_000_000 });
-    const res = await post(JSON.stringify({ query: "hi", device_id: UUID }));
+    const res = await post(JSON.stringify({ query: "hi", device_id: UUID, thread_id: UUID }));
     expect(res.status).toBe(429);
     expect(abortThread).toHaveBeenCalledTimes(1);
-    expect(res.headers.get("X-Thread-Id")).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
+    expect(res.headers.get("X-Thread-Id")).toBe(UUID);
+  });
+
+  it("rate-limits a new thread without minting a ThreadStore DO", async () => {
+    reserveBudget.mockResolvedValue({
+      allowed: false,
+      reservationId: null,
+      used: 50_000,
+      remaining: 0,
+      resetAt: 1_000_000,
+    });
+    const res = await post(JSON.stringify({ query: "hi", device_id: UUID }));
+    expect(res.status).toBe(429);
+    expect(await res.json()).toMatchObject({ error: "rate_limited" });
+    expect(openThread).not.toHaveBeenCalled();
+    expect(abortThread).not.toHaveBeenCalled();
+    expect(reserveBudget).toHaveBeenCalledTimes(1);
   });
 
   it("streams with X-Thread-Id and reserves query + history + system + output", async () => {
