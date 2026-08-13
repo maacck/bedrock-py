@@ -58,6 +58,10 @@ export function parseAndValidateChatRequest(rawBody: string): ChatRequestValidat
     return { ok: false, status: 400, code: "invalid_json", message: "Request body must be valid JSON." };
   }
 
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    return { ok: false, status: 400, code: "invalid_json", message: "Request body must be a JSON object." };
+  }
+
   const b = body as { query?: unknown; thread_id?: unknown; device_id?: unknown; context?: unknown };
 
   if (typeof b.query !== "string" || b.query.trim().length === 0) {

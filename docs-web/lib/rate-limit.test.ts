@@ -179,4 +179,14 @@ describe("parseAndValidateChatRequest", () => {
   it("rejects invalid JSON", () => {
     expect(parseAndValidateChatRequest("{not json")).toMatchObject({ ok: false, code: "invalid_json" });
   });
+
+  it("rejects a non-object top-level JSON body", () => {
+    for (const raw of ["null", "[]", "\"hi\"", "1", "true"]) {
+      expect(parseAndValidateChatRequest(raw)).toMatchObject({
+        ok: false,
+        status: 400,
+        code: "invalid_json",
+      });
+    }
+  });
 });
