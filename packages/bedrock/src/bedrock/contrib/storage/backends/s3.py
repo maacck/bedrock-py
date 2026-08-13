@@ -31,7 +31,7 @@ _S3_CANNED_ACLS = frozenset(
 #: ACLs whose objects are anonymously readable — the only ones that yield unsigned URLs.
 _PUBLIC_ACLS = frozenset({"public-read", "public-read-write"})
 
-_METHOD_TO_CLIENT = {"GET": "get_object", "PUT": "put_object", "POST": "post_object"}
+_METHOD_TO_CLIENT = {"GET": "get_object", "PUT": "put_object"}
 
 
 class S3StorageSettings(BaseSettings):
@@ -241,17 +241,22 @@ class S3Backend:
         return True
 
     def get_signed_url(self, storage_key: str, method: str = "GET", expires_in: int = 3600) -> str:
-        """Return a presigned URL for ``method`` (``GET``/``PUT``/``POST``).
+        """Return a presigned URL for ``method`` (``GET`` or ``PUT`` only).
 
-        ``POST`` maps to ``post_object`` (amendment A14), but boto3 exposes no
+        Presigned POST uploads are unsupported here: boto3 exposes no
         ``post_object`` client method — presigned POST uploads use the multipart
-        form protocol (``generate_presigned_post``), which cannot be expressed as
-        a single URL. Generation is attempted and the underlying client error is
-        surfaced as :class:`StorageError`.
+        form protocol (``generate_presigned_post`` returns ``{url, fields}``),
+        which a single-URL API cannot express. Use :meth:`upload` instead, or a
+        future presigned-post API.
         """
         client_method = _METHOD_TO_CLIENT.get(method.upper())
         if client_method is None:
-            raise StorageError(msg=f"Unsupported signed URL method '{method}'. Supported: GET, PUT, POST.")
+            raise StorageError(
+                msg=f"Unsupported signed URL method '{method}'. Supported: GET, PUT. "
+                "Presigned POST uploads need the form protocol (url + fields) which "
+                "get_signed_url cannot express in v1; use upload() instead, or a "
+                "future presigned-post API."
+            )
         try:
             return self._client.generate_presigned_url(
                 client_method,

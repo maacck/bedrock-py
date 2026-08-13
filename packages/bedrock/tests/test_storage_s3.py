@@ -228,7 +228,7 @@ def test_get_signed_url(svc: StorageService, moto_server: str) -> None:
 
 
 def test_get_signed_url_methods(svc: StorageService, moto_server: str) -> None:
-    """GET/PUT presign and execute over real HTTP; POST keeps its mapping but raises (A14)."""
+    """GET/PUT presign and execute over real HTTP; POST/DELETE are rejected (A14 ruling)."""
     svc.upload("s.txt", b"x")
 
     get_url = svc.get_signed_url("s.txt", method="GET", expires_in=300)
@@ -245,12 +245,13 @@ def test_get_signed_url_methods(svc: StorageService, moto_server: str) -> None:
     assert put_response.status_code == 200
     assert svc.download("s.txt") == b"updated via presigned PUT"
 
-    # A14: the POST -> post_object mapping is kept, but boto3 has no client method
-    # "post_object", so URL generation itself raises StorageError (evidence in
-    # task-5-report.md; real presigned POST is covered by test_presigned_post_form_executes).
-    with pytest.raises(StorageError, match="POST"):
+    # A14 ruling: POST presigning is unsupported (boto3 has no post_object client
+    # method; presigned POST is form-based and a str-returning API cannot express
+    # it). Both POST and DELETE are rejected up front with StorageError; real
+    # form-protocol POST is covered by test_presigned_post_form_executes.
+    with pytest.raises(StorageError, match="Unsupported signed URL method 'POST'"):
         svc.get_signed_url("s.txt", method="POST", expires_in=300)
-    with pytest.raises(StorageError):
+    with pytest.raises(StorageError, match="Unsupported signed URL method 'DELETE'"):
         svc.get_signed_url("s.txt", method="DELETE")
 
 
