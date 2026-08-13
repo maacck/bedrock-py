@@ -126,14 +126,14 @@ function deviceId(): string {
   return id;
 }
 
-const threadId = localStorage.getItem(THREAD_KEY);
+const storedThreadId = localStorage.getItem(THREAD_KEY);
 const res = await fetch("/api/chat", {
   method: "POST",
   headers: { "content-type": "application/json" },
   body: JSON.stringify({
     query: "How do I configure Redis cache?",
     device_id: deviceId(),
-    ...(threadId ? { thread_id: threadId } : {}),
+    ...(storedThreadId ? { thread_id: storedThreadId } : {}),
     context: { location: "/docs/guides/cache" },
   }),
 });
