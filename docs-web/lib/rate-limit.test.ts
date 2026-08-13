@@ -4,7 +4,6 @@ import {
   estimateTokens,
   getClientIp,
   isDeclaredBodyTooLarge,
-  parseAndValidateChatBody,
   parseAndValidateChatRequest,
   releaseBudget,
   reserveBudget,
@@ -39,66 +38,6 @@ describe("getClientIp", () => {
         }),
       ),
     ).toBe("198.51.100.9");
-  });
-});
-
-describe("parseAndValidateChatBody", () => {
-  const validBody = JSON.stringify({
-    messages: [
-      { role: "user", parts: [{ type: "text", text: "How do I use signals?" }] },
-    ],
-  });
-
-  it("accepts a valid chat body and estimates input tokens", () => {
-    const result = parseAndValidateChatBody(validBody);
-    expect(result.ok).toBe(true);
-    if (result.ok) {
-      expect(result.estimatedInputTokens).toBeGreaterThan(0);
-      expect(result.messages).toHaveLength(1);
-    }
-  });
-
-  it("rejects invalid JSON with a stable error code", () => {
-    const result = parseAndValidateChatBody("{not json");
-    expect(result).toMatchObject({ ok: false, status: 400, code: "invalid_json" });
-  });
-
-  it("rejects missing or empty messages", () => {
-    expect(parseAndValidateChatBody("{}")).toMatchObject({
-      ok: false,
-      code: "invalid_messages",
-    });
-    expect(parseAndValidateChatBody('{"messages":[]}')).toMatchObject({
-      ok: false,
-      code: "invalid_messages",
-    });
-  });
-
-  it("rejects more messages than the cap", () => {
-    const messages = Array.from(
-      { length: RATE_LIMIT.MAX_MESSAGES + 1 },
-      () => ({ role: "user", parts: [{ type: "text", text: "hi" }] }),
-    );
-    const result = parseAndValidateChatBody(JSON.stringify({ messages }));
-    expect(result).toMatchObject({ ok: false, status: 400, code: "too_many_messages" });
-  });
-
-  it("rejects input beyond the estimated token cap before any model call", () => {
-    const big = "x".repeat(RATE_LIMIT.MAX_INPUT_TOKENS * 4 + 4);
-    const result = parseAndValidateChatBody(
-      JSON.stringify({
-        messages: [{ role: "user", parts: [{ type: "text", text: big }] }],
-      }),
-    );
-    expect(result).toMatchObject({ ok: false, status: 400, code: "input_too_large" });
-  });
-
-  it("rejects bodies beyond the byte cap", () => {
-    const padding = "y".repeat(RATE_LIMIT.MAX_BODY_BYTES);
-    const result = parseAndValidateChatBody(
-      `{"messages":[{"role":"user","content":"${padding}"}]}`,
-    );
-    expect(result).toMatchObject({ ok: false, status: 413, code: "body_too_large" });
   });
 });
 

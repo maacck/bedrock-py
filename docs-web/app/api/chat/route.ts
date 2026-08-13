@@ -1,5 +1,4 @@
 import {
-  convertToModelMessages,
   stepCountIs,
   streamText,
   tool,
@@ -16,11 +15,12 @@ import {
   forfeitBudget,
   getClientIp,
   isDeclaredBodyTooLarge,
-  parseAndValidateChatBody,
+  parseAndValidateChatRequest,
   releaseBudget,
   reserveBudget,
   settleBudget,
 } from "@/lib/rate-limit";
+import { abortThread, appendThread, openThread } from "@/lib/thread-client";
 
 interface CustomDocument extends DocumentData {
   url: string;
@@ -125,29 +125,47 @@ export async function POST(req: Request) {
     );
   }
 
-  const parsed = parseAndValidateChatBody(await req.text());
+  const parsed = parseAndValidateChatRequest(await req.text());
   if (!parsed.ok) {
-    return Response.json(
-      { error: parsed.code, message: parsed.message },
-      { status: parsed.status },
-    );
+    return Response.json({ error: parsed.code, message: parsed.message }, { status: parsed.status });
   }
 
   const { env } = getCloudflareContext();
 
-  // Atomically reserve budget before the model is called. The reservation
-  // covers the estimated input plus a fixed output allowance; the unused
-  // portion is refunded when the stream settles.
+  // Server-generated thread id when the client starts a new conversation.
+  const threadId = parsed.threadId ?? crypto.randomUUID();
+  const opened = await openThread(env.THREAD_STORE, threadId, parsed.deviceId);
+  if (!opened.ok) {
+    if (opened.status === 404) {
+      return Response.json(
+        { error: "thread_not_found", message: "Thread not found for this device." },
+        { status: 404 },
+      );
+    }
+    if (opened.status === 409) {
+      return Response.json(
+        { error: "thread_busy", message: "Another request is already running on this thread." },
+        { status: 409 },
+      );
+    }
+    return Response.json({ error: "thread_error", message: "Thread store unavailable." }, { status: 502 });
+  }
+  // From here on, EVERY exit path must release the thread lock via abortThread.
+
+  const history = opened.thread.messages;
+  const historyTokens = history.reduce((sum, m) => sum + estimateTokens(m.content), 0);
+  const contextLine = parsed.location ? `\n[Client Context: location: ${parsed.location}]` : "";
+  const userText = parsed.query + contextLine;
+
   const reservationTokens =
-    parsed.estimatedInputTokens +
+    estimateTokens(userText) +
+    historyTokens +
     estimateTokens(systemPrompt) +
     RATE_LIMIT.RESERVED_OUTPUT_TOKENS;
-  const reservation = await reserveBudget(
-    env.RATE_LIMITER,
-    ip,
-    reservationTokens,
-  );
+
+  const reservation = await reserveBudget(env.RATE_LIMITER, ip, reservationTokens);
   if (!reservation.allowed || !reservation.reservationId) {
+    await abortThread(env.THREAD_STORE, threadId, parsed.deviceId);
     return Response.json(
       {
         error: "rate_limited",
@@ -159,8 +177,9 @@ export async function POST(req: Request) {
         headers: {
           ...rateLimitHeaders(reservation.remaining, reservation.resetAt),
           "Retry-After": String(
-            reservation.resetAt - Math.floor(Date.now() / 1000),
+            Math.max(0, reservation.resetAt - Math.floor(Date.now() / 1000)),
           ),
+          "X-Thread-Id": threadId,
         },
       },
     );
@@ -168,9 +187,7 @@ export async function POST(req: Request) {
 
   const reservationId = reservation.reservationId;
   let finalized = false;
-  const finalize = async (
-    action: () => Promise<void>,
-  ): Promise<void> => {
+  const finalize = async (action: () => Promise<void>): Promise<void> => {
     if (finalized) return;
     finalized = true;
     await action();
@@ -180,56 +197,72 @@ export async function POST(req: Request) {
 
   try {
     const result = streamText({
-      model: workersai(
-        process.env.WORKER_AI_MODEL ?? "@cf/moonshotai/kimi-k2.5",
-      ),
+      model: workersai(process.env.WORKER_AI_MODEL ?? "@cf/moonshotai/kimi-k2.5"),
       stopWhen: stepCountIs(5),
       abortSignal: req.signal,
       tools: {
         search: searchTool,
       },
+      system: systemPrompt,
+      // Server-owned history (plain text user/assistant turns) + this turn's query.
+      // The client never supplies roles or tool parts — the M-2/M-3 injection
+      // surface is closed by the contract.
       messages: [
-        { role: "system", content: systemPrompt },
-        //@ts-ignore
-        ...(await convertToModelMessages<ChatUIMessage>(parsed.messages, {
-          convertDataPart(part) {
-            if (part.type === "data-client")
-              return {
-                type: "text",
-                text: `[Client Context: ${JSON.stringify(part.data)}]`,
-              };
-          },
-        })),
+        ...history.map((m) => ({ role: m.role, content: m.content })),
+        { role: "user", content: userText },
       ],
       toolChoice: "auto",
-      onFinish: async ({ totalUsage }) => {
-        await finalize(() =>
-          settleBudget(
+      onFinish: async ({ text, totalUsage }) => {
+        await finalize(async () => {
+          await appendThread(
+            env.THREAD_STORE,
+            threadId,
+            parsed.deviceId,
+            userText,
+            text ?? "",
+          );
+          const actual =
+            (totalUsage.inputTokens ?? 0) + (totalUsage.outputTokens ?? 0);
+          // L-3: when the provider reports no usage, charge the full reservation
+          // (fail conservative) instead of settling zero.
+          await settleBudget(
             env.RATE_LIMITER,
             ip,
             reservationId,
-            (totalUsage.inputTokens ?? 0) + (totalUsage.outputTokens ?? 0),
-          ),
-        );
+            actual > 0 ? actual : reservationTokens,
+          );
+        });
       },
-      // Aborted or errored streams forfeit the full reservation: the model
-      // may already have consumed tokens, and refunding on abort would let
-      // clients bypass the budget by cancelling streams.
+      // Aborted or errored streams forfeit the full reservation and release the
+      // thread lock: refunding on abort would let clients bypass the budget.
       onAbort: async () => {
-        await finalize(() => forfeitBudget(env.RATE_LIMITER, ip, reservationId));
+        await finalize(async () => {
+          await abortThread(env.THREAD_STORE, threadId, parsed.deviceId);
+          await forfeitBudget(env.RATE_LIMITER, ip, reservationId);
+        });
       },
       onError: async (error) => {
         console.error(error);
-        await finalize(() => forfeitBudget(env.RATE_LIMITER, ip, reservationId));
+        await finalize(async () => {
+          await abortThread(env.THREAD_STORE, threadId, parsed.deviceId);
+          await forfeitBudget(env.RATE_LIMITER, ip, reservationId);
+        });
       },
     });
 
     return result.toUIMessageStreamResponse({
-      headers: rateLimitHeaders(reservation.remaining, reservation.resetAt),
+      headers: {
+        ...rateLimitHeaders(reservation.remaining, reservation.resetAt),
+        "X-Thread-Id": threadId,
+      },
     });
   } catch (error) {
-    // The model call never started: return the reservation in full.
-    await finalize(() => releaseBudget(env.RATE_LIMITER, ip, reservationId));
+    // The model call never started: release the reservation in full and the
+    // thread lock, then surface the error.
+    await finalize(async () => {
+      await abortThread(env.THREAD_STORE, threadId, parsed.deviceId);
+      await releaseBudget(env.RATE_LIMITER, ip, reservationId);
+    });
     throw error;
   }
 }

@@ -19,108 +19,14 @@ export function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4);
 }
 
-interface MessageLike {
-  role?: unknown;
-  content?: unknown;
-  parts?: unknown;
-}
-
-function messageText(message: MessageLike): string {
-  if (typeof message.content === "string") return message.content;
-  if (!Array.isArray(message.parts)) return "";
-  let text = "";
-  for (const part of message.parts) {
-    if (
-      part &&
-      typeof part === "object" &&
-      (part as { type?: unknown }).type === "text" &&
-      typeof (part as { text?: unknown }).text === "string"
-    ) {
-      text += (part as { text: string }).text;
-    }
-  }
-  return text;
-}
-
-export type ChatBodyValidation =
-  | { ok: true; messages: MessageLike[]; estimatedInputTokens: number }
-  | { ok: false; status: number; code: string; message: string };
-
 /**
  * Early rejection based on the declared content-length, before the body
  * is read. The header can be forged, so the post-read check in
- * parseAndValidateChatBody remains the authoritative bound.
+ * parseAndValidateChatRequest remains the authoritative bound.
  */
 export function isDeclaredBodyTooLarge(req: Request): boolean {
   const declared = Number(req.headers.get("content-length"));
   return Number.isFinite(declared) && declared > RATE_LIMIT.MAX_BODY_BYTES;
-}
-
-/**
- * Validate and bound the chat request body before any model call:
- * request size, message count and estimated input tokens are all capped.
- */
-export function parseAndValidateChatBody(rawBody: string): ChatBodyValidation {
-  if (new TextEncoder().encode(rawBody).length > RATE_LIMIT.MAX_BODY_BYTES) {
-    return {
-      ok: false,
-      status: 413,
-      code: "body_too_large",
-      message: `Request body exceeds the ${RATE_LIMIT.MAX_BODY_BYTES} byte limit.`,
-    };
-  }
-
-  let body: unknown;
-  try {
-    body = JSON.parse(rawBody);
-  } catch {
-    return {
-      ok: false,
-      status: 400,
-      code: "invalid_json",
-      message: "Request body must be valid JSON.",
-    };
-  }
-
-  const messages = (body as { messages?: unknown })?.messages;
-  if (
-    !Array.isArray(messages) ||
-    messages.length === 0 ||
-    messages.some(
-      (m) => !m || typeof m !== "object" || typeof m.role !== "string",
-    )
-  ) {
-    return {
-      ok: false,
-      status: 400,
-      code: "invalid_messages",
-      message: "`messages` must be a non-empty array of chat messages.",
-    };
-  }
-
-  if (messages.length > RATE_LIMIT.MAX_MESSAGES) {
-    return {
-      ok: false,
-      status: 400,
-      code: "too_many_messages",
-      message: `At most ${RATE_LIMIT.MAX_MESSAGES} messages are allowed per request.`,
-    };
-  }
-
-  const estimatedInputTokens = messages.reduce(
-    (sum, m) => sum + estimateTokens(messageText(m as MessageLike)),
-    0,
-  );
-  if (estimatedInputTokens > RATE_LIMIT.MAX_INPUT_TOKENS) {
-    return {
-      ok: false,
-      status: 400,
-      code: "input_too_large",
-      message: `Estimated input of ${estimatedInputTokens} tokens exceeds the ${RATE_LIMIT.MAX_INPUT_TOKENS} token limit.`,
-    };
-  }
-
-  return { ok: true, messages: messages as MessageLike[], estimatedInputTokens };
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;

@@ -12,8 +12,7 @@ export const RATE_LIMIT = {
   /** Single source of truth for the per-IP hourly token budget. */
   TOKENS_PER_WINDOW: 50_000,
   WINDOW_SECONDS: 3_600,
-  MAX_MESSAGES: 50, // legacy message-array cap — removed in Task 9
-  MAX_BODY_BYTES: 64 * 1_024, // lowered to 16 KB in Task 9
+  MAX_BODY_BYTES: 16 * 1_024,
   /** Maximum characters accepted for a single user query. */
   MAX_QUERY_CHARS: 2_000,
   /** Maximum estimated user input tokens accepted per request. */
