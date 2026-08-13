@@ -49,6 +49,7 @@ class DatabaseManager:
         self._engine = engine
         self._session_factory = SessionFactory(session_local)
         self._settings = resolved_settings
+        self._database_url = resolved_url
 
     @property
     def engine(self) -> Engine:
