@@ -14,17 +14,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   array. Conversation history is managed server-side per thread; clients must
   send `device_id` (a client-generated ownership key — not an auth boundary)
   and store the server-issued `X-Thread-Id` response header for follow-ups.
-- **Query limit** (`bedrock.database.service`): `limit=0` (previously the
-  "unlimited" sentinel with `show_all=True`) now raises `InvalidQueryLimitError`;
-  `limit` must be an integer in `1..1000` (M-6).
-- **Redis cache `clear()`** (`bedrock.contrib.cache.backends.redis`): with an
-  empty `CACHE_REDIS_KEY_PREFIX`, `clear()`/`aclear()` now raise
-  `CacheClearRequiresPrefixError` instead of calling `flushdb()`; an explicit
-  `prefix` argument is now honored even without a configured key prefix (M-5).
+  Body cap is **16 KiB** (was 64 KiB). `query` is at most 2,000 characters.
+  `thread_id` must be a UUID when present; an unknown explicit id is `404`
+  (`thread_not_found`) and does not mint a Durable Object. A concurrent
+  request on the same thread is `409` (`thread_busy`).
+- **Query limit** (`bedrock.database.service`): `build_query()` and
+  `search_filter_sort_paginate()` now reject `limit=0` (previously the
+  "unlimited" sentinel with `show_all=True`), booleans, and other non-integers
+  with `InvalidQueryLimitError`. `limit` must be an integer in `1..1000` (M-6).
+- **Redis cache `clear()`** (`bedrock.contrib.cache.backends.redis`):
+  `clear()`/`aclear()` raise `CacheClearRequiresPrefixError` only when **both**
+  the configured key prefix and the explicit `prefix` argument are empty
+  (instead of calling `flushdb()`). An explicit `prefix` is honored even
+  without a configured `CACHE_REDIS_KEY_PREFIX` (M-5).
 - **Cache backend registration** (`bedrock.contrib.cache`): `register_backend`
-  and `list_backends` are no longer exported from `bedrock.contrib.cache.base`;
-  use the package root (`bedrock.contrib.cache`) exports, which are unchanged
-  (L-8).
+  and `list_backends` are no longer exported from `bedrock.contrib.cache.base`.
+  The package root (`bedrock.contrib.cache`) still exports `register_backend`
+  only; list registered names via `cache.list_backends()` on the `CacheService`
+  singleton (L-8).
 
 ### Fixes
 
