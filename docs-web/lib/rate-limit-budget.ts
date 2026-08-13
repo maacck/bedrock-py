@@ -12,12 +12,17 @@ export const RATE_LIMIT = {
   /** Single source of truth for the per-IP hourly token budget. */
   TOKENS_PER_WINDOW: 50_000,
   WINDOW_SECONDS: 3_600,
-  MAX_MESSAGES: 50,
-  MAX_BODY_BYTES: 64 * 1_024,
+  MAX_MESSAGES: 50, // legacy message-array cap — removed in Task 9
+  MAX_BODY_BYTES: 64 * 1_024, // lowered to 16 KB in Task 9
+  /** Maximum characters accepted for a single user query. */
+  MAX_QUERY_CHARS: 2_000,
   /** Maximum estimated user input tokens accepted per request. */
   MAX_INPUT_TOKENS: 16_000,
   /** Output budget reserved per request and refunded on settlement. */
   RESERVED_OUTPUT_TOKENS: 4_096,
+  /** Server-side conversation history bounds (kept in the thread store). */
+  HISTORY_MAX_TOKENS: 8_192,
+  HISTORY_MAX_MESSAGES: 20,
 } as const;
 
 export interface ReserveResult {

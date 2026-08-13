@@ -123,6 +123,84 @@ export function parseAndValidateChatBody(rawBody: string): ChatBodyValidation {
   return { ok: true, messages: messages as MessageLike[], estimatedInputTokens };
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export type ChatRequestValidation =
+  | { ok: true; query: string; threadId: string | null; deviceId: string; location: string | null }
+  | { ok: false; status: number; code: string; message: string };
+
+/**
+ * Validate the chat request: a single `query` string, an optional server-managed
+ * `thread_id`, a client-generated `device_id` (ownership check only — NOT an auth
+ * boundary), and an optional whitelisted `context`. The client no longer replays
+ * message arrays, which eliminates the system-role and tool-part injection surface.
+ */
+export function parseAndValidateChatRequest(rawBody: string): ChatRequestValidation {
+  if (new TextEncoder().encode(rawBody).length > RATE_LIMIT.MAX_BODY_BYTES) {
+    return {
+      ok: false,
+      status: 413,
+      code: "body_too_large",
+      message: `Request body exceeds the ${RATE_LIMIT.MAX_BODY_BYTES} byte limit.`,
+    };
+  }
+
+  let body: unknown;
+  try {
+    body = JSON.parse(rawBody);
+  } catch {
+    return { ok: false, status: 400, code: "invalid_json", message: "Request body must be valid JSON." };
+  }
+
+  const b = body as { query?: unknown; thread_id?: unknown; device_id?: unknown; context?: unknown };
+
+  if (typeof b.query !== "string" || b.query.trim().length === 0) {
+    return { ok: false, status: 400, code: "invalid_query", message: "`query` must be a non-empty string." };
+  }
+  const query = b.query.trim();
+  if (query.length > RATE_LIMIT.MAX_QUERY_CHARS) {
+    return {
+      ok: false,
+      status: 400,
+      code: "query_too_long",
+      message: `\`query\` must be at most ${RATE_LIMIT.MAX_QUERY_CHARS} characters.`,
+    };
+  }
+
+  if (typeof b.device_id !== "string" || !UUID_RE.test(b.device_id)) {
+    return { ok: false, status: 400, code: "invalid_device", message: "`device_id` must be a UUID." };
+  }
+
+  let threadId: string | null = null;
+  if (b.thread_id != null) {
+    if (typeof b.thread_id !== "string" || !UUID_RE.test(b.thread_id)) {
+      return { ok: false, status: 400, code: "invalid_thread", message: "`thread_id` must be a UUID." };
+    }
+    threadId = b.thread_id;
+  }
+
+  let location: string | null = null;
+  if (b.context != null) {
+    if (typeof b.context !== "object" || b.context === null || Array.isArray(b.context)) {
+      return { ok: false, status: 400, code: "invalid_context", message: "`context` must be an object." };
+    }
+    const ctx = b.context as { location?: unknown };
+    if (ctx.location != null) {
+      if (typeof ctx.location !== "string" || ctx.location.length > 256) {
+        return {
+          ok: false,
+          status: 400,
+          code: "invalid_context",
+          message: "`context.location` must be a short string.",
+        };
+      }
+      location = ctx.location;
+    }
+  }
+
+  return { ok: true, query, threadId, deviceId: b.device_id, location };
+}
+
 /** Minimal structural types so the client helpers stay unit-testable. */
 export interface RateLimiterStub {
   fetch(input: string, init?: RequestInit): Promise<Response>;
