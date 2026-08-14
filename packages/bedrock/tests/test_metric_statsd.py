@@ -43,6 +43,16 @@ def test_counter_preserves_fractional_delta(monkeypatch) -> None:
     provider.close()
 
 
+def test_counter_high_precision(monkeypatch) -> None:
+    """counter preserves full float precision (no six-digit rounding)."""
+    fake = FakeSocket()
+    monkeypatch.setattr(socket, "socket", lambda *a, **k: fake)
+    provider = StatsDProvider(settings=StatsDSettings())
+    provider.emit(MetricEvent(type="counter", name="c", value=1.23456789))
+    assert fake.sent[0][0] == b"c:1.23456789|c"
+    provider.close()
+
+
 def test_gauge_format(monkeypatch) -> None:
     """gauge -> name:value|g."""
     fake = FakeSocket()
@@ -50,6 +60,16 @@ def test_gauge_format(monkeypatch) -> None:
     provider = StatsDProvider(settings=StatsDSettings())
     provider.emit(MetricEvent(type="gauge", name="g", value=42.0))
     assert fake.sent[0][0] == b"g:42|g"
+    provider.close()
+
+
+def test_gauge_high_precision(monkeypatch) -> None:
+    """gauge preserves full float precision (no six-digit rounding)."""
+    fake = FakeSocket()
+    monkeypatch.setattr(socket, "socket", lambda *a, **k: fake)
+    provider = StatsDProvider(settings=StatsDSettings())
+    provider.emit(MetricEvent(type="gauge", name="g", value=3.141592653589793))
+    assert fake.sent[0][0] == b"g:3.141592653589793|g"
     provider.close()
 
 

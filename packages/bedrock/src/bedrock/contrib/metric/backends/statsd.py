@@ -7,6 +7,20 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from ..events import MetricEvent
 
 
+def _format_value(value: float) -> str:
+    """Serialize a float losslessly, dropping a trailing ``.0``.
+
+    ``repr`` yields the shortest round-trip representation (full float
+    precision, e.g. ``1.23456789`` stays intact), unlike ``:g`` which rounds
+    to six significant digits by default. Integer-valued floats still render
+    without the ``.0`` suffix (``2.0`` -> ``2``).
+    """
+    text = repr(value)
+    if text.endswith(".0"):
+        return text[:-2]
+    return text
+
+
 class StatsDSettings(BaseSettings):
     """Settings for the StatsD UDP backend."""
 
@@ -41,9 +55,9 @@ class StatsDProvider:
         """Serialize ``event`` to the StatsD wire format and send it."""
         name = f"{self._settings.prefix}{event.name}" if self._settings.prefix else event.name
         if event.type == "counter":
-            body = f"{name}:{event.value:g}|c"
+            body = f"{name}:{_format_value(event.value)}|c"
         elif event.type == "gauge":
-            body = f"{name}:{event.value:g}|g"
+            body = f"{name}:{_format_value(event.value)}|g"
         else:  # timer
             body = f"{name}:{int(round(event.value * 1000))}|ms"
         if event.tags:
