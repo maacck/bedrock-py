@@ -5,7 +5,7 @@ from typing import Any
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from ..events import MetricEvent
+from ..events import MetricEvent, MetricType
 from ..exc import MetricConfigurationError, MetricProviderError
 
 
@@ -54,8 +54,8 @@ class PrometheusPushProvider:
             ) from exc
         self._client: Any = prometheus_client
         self._registry: Any = prometheus_client.CollectorRegistry()
-        # key: name -> (collector, kind, label_keys)
-        self._collectors: dict[str, tuple[Any, str, tuple[str, ...]]] = {}
+        # key: name -> (collector, kind, label_keys, metric_type)
+        self._collectors: dict[str, tuple[Any, str, tuple[str, ...], MetricType]] = {}
         self._last_push: float | None = None
 
     def _collector(self, event: MetricEvent) -> tuple[Any, str]:
@@ -68,11 +68,11 @@ class PrometheusPushProvider:
         label_keys = tuple(sorted(event.tags))
         cached = self._collectors.get(event.name)
         if cached is not None:
-            collector, kind, established_keys = cached
-            if kind != event.type:
+            collector, kind, established_keys, established_type = cached
+            if established_type != event.type:
                 raise ValueError(
-                    f"Prometheus metric {event.name!r} was first observed as a {kind} but an event "
-                    f"uses type {event.type!r}; a metric's type is fixed on first observation."
+                    f"Prometheus metric {event.name!r} was first observed as a {established_type} but "
+                    f"an event uses type {event.type!r}; a metric's type is fixed on first observation."
                 )
             if established_keys != label_keys:
                 raise ValueError(
@@ -90,7 +90,7 @@ class PrometheusPushProvider:
         else:  # timer -> histogram, seconds
             collector = self._client.Histogram(event.name, "", labelnames=label_keys, registry=self._registry)
             kind = "histogram"
-        self._collectors[event.name] = (collector, kind, label_keys)
+        self._collectors[event.name] = (collector, kind, label_keys, event.type)
         return collector, kind
 
     def emit(self, event: MetricEvent) -> None:

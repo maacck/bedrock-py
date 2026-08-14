@@ -137,8 +137,9 @@ def test_missing_gateway_url_raises_configuration_error() -> None:
 def test_counter_maps_to_counter(provider: PrometheusPushProvider) -> None:
     """counter -> Counter collector; inc receives the event value."""
     provider.emit(MetricEvent(type="counter", name="orders.total", value=2.0, tags={"c": "web"}))
-    collector, kind, label_keys = provider._collectors["orders.total"]
+    collector, kind, label_keys, metric_type = provider._collectors["orders.total"]
     assert kind == "counter"
+    assert metric_type == "counter"
     assert label_keys == ("c",)
     assert isinstance(collector, _FakeCounter)
     assert collector.labels_calls == [{"c": "web"}]
@@ -148,8 +149,9 @@ def test_counter_maps_to_counter(provider: PrometheusPushProvider) -> None:
 def test_gauge_maps_to_gauge(provider: PrometheusPushProvider) -> None:
     """gauge -> Gauge collector; set receives the event value."""
     provider.emit(MetricEvent(type="gauge", name="queue.size", value=5.0, tags={"pool": "workers"}))
-    collector, kind, label_keys = provider._collectors["queue.size"]
+    collector, kind, label_keys, metric_type = provider._collectors["queue.size"]
     assert kind == "gauge"
+    assert metric_type == "gauge"
     assert label_keys == ("pool",)
     assert isinstance(collector, _FakeGauge)
     assert collector.labels_calls == [{"pool": "workers"}]
@@ -159,12 +161,26 @@ def test_gauge_maps_to_gauge(provider: PrometheusPushProvider) -> None:
 def test_timer_maps_to_histogram_seconds(provider: PrometheusPushProvider) -> None:
     """timer -> Histogram collector; observe receives elapsed seconds."""
     provider.emit(MetricEvent(type="timer", name="job.duration", value=0.5))
-    collector, kind, label_keys = provider._collectors["job.duration"]
+    collector, kind, label_keys, metric_type = provider._collectors["job.duration"]
     assert kind == "histogram"
+    assert metric_type == "timer"
     assert label_keys == ()
     assert isinstance(collector, _FakeHistogram)
     assert collector.labels_calls == []
     assert collector.observe_values == [0.5]
+
+
+def test_repeated_timer_emits_observe_and_update(provider: PrometheusPushProvider) -> None:
+    """Repeated timer emits reuse the histogram and update normally (type vs kind mismatch bug)."""
+    provider.emit(MetricEvent(type="timer", name="dur", value=0.5))
+    provider.emit(MetricEvent(type="timer", name="dur", value=1.5))
+    collector, kind, label_keys, metric_type = provider._collectors["dur"]
+    assert kind == "histogram"
+    assert metric_type == "timer"
+    assert label_keys == ()
+    assert _FakeHistogram.instances == 1  # collector reused, never re-registered
+    assert collector.observe_values == [0.5, 1.5]
+    assert len(provider._registry.pushed) == 2  # both events pushed normally
 
 
 def test_same_label_schema_reuses_one_collector(provider: PrometheusPushProvider) -> None:
@@ -240,6 +256,19 @@ def test_push_throttled_until_interval_elapses(
     provider.emit(MetricEvent(type="counter", name="c", value=1.0))  # t=101 -> suppressed
     provider.emit(MetricEvent(type="counter", name="c", value=1.0))  # t=120 -> push
     provider.emit(MetricEvent(type="counter", name="c", value=1.0))  # t=121 -> suppressed
+    assert len(registry.pushed) == 2
+
+
+def test_push_at_exact_interval_boundary(
+    monkeypatch: pytest.MonkeyPatch, make_provider
+) -> None:
+    """elapsed == push_interval triggers a push (the >= boundary is inclusive)."""
+    ticks = iter([100.0, 110.0, 110.0])
+    monkeypatch.setattr("time.monotonic", lambda: next(ticks))
+    provider, registry = make_provider(push_interval=10.0)
+    provider.emit(MetricEvent(type="counter", name="c", value=1.0))  # t=100 -> push (first)
+    provider.emit(MetricEvent(type="counter", name="c", value=1.0))  # t=110, 10.0 == 10.0 -> push
+    provider.emit(MetricEvent(type="counter", name="c", value=1.0))  # t=110, 0.0 < 10.0 -> suppressed
     assert len(registry.pushed) == 2
 
 
