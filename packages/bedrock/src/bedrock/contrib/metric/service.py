@@ -183,6 +183,7 @@ class MetricsManager:
             except Exception as exc:
                 self._logger.warning("metric provider %s failed to close: %s", type(provider).__name__, exc)
         self._providers.clear()
+        self._warning_counts.clear()
 
 
 metrics = MetricsManager()

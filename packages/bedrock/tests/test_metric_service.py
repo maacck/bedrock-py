@@ -280,17 +280,36 @@ def test_close_calls_provider_close(manager: MetricsManager) -> None:
     assert manager.list_providers() == []
 
 
+def test_close_resets_warning_state(manager: MetricsManager, caplog: pytest.LogCaptureFixture) -> None:
+    """close() clears rate-limit state so a replacement provider starts fresh."""
+    manager.register_provider(FailingProvider())
+    counter = manager.counter("r")
+    with caplog.at_level(logging.WARNING, logger="bedrock.contrib.metric"):
+        for _ in range(100):
+            counter.inc()
+    assert manager._warning_counts != {}  # noqa: SLF001  # state accumulated
+    manager.close()
+    assert manager._warning_counts == {}  # noqa: SLF001  # state reset with provider retirement
+    caplog.clear()
+    manager.register_provider(FailingProvider())
+    with caplog.at_level(logging.WARNING, logger="bedrock.contrib.metric"):
+        counter.inc()
+    messages = [r.message for r in caplog.records if "failed in FailingProvider" in r.message]
+    assert len(messages) == 1
+    assert "(1 occurrences)" in messages[0]
+
+
 def test_module_singleton_and_helpers() -> None:
-    """The module exposes the metrics singleton and delegating helpers; state is restored exactly."""
-    # Seed non-empty prior state so restoration is observable and not assumed empty.
-    metrics.register_provider(FakeProvider())
-    metrics._warning_counts[("seeded", "m")] = 7  # noqa: SLF001
+    """The module exposes the metrics singleton and delegating helpers; only original state is restored."""
     before_providers = list(metrics._providers)  # noqa: SLF001
     before_counts = dict(metrics._warning_counts)  # noqa: SLF001
     try:
+        # Seed extra state on top of whatever existed before; assert relative changes.
+        metrics.register_provider(FakeProvider())
+        metrics._warning_counts[("seeded", "m")] = 7  # noqa: SLF001
         register_provider(FakeProvider())
         assert isinstance(metrics, MetricsManager)
-        assert list_providers() == ["FakeProvider", "FakeProvider"]
+        assert list_providers() == [type(p).__name__ for p in before_providers] + ["FakeProvider", "FakeProvider"]
     finally:
         metrics._providers.clear()  # noqa: SLF001
         metrics._providers.extend(before_providers)  # noqa: SLF001
