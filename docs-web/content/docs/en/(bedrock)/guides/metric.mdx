@@ -1,0 +1,239 @@
+---
+title: Metrics
+description: Application metrics with counter/gauge/timer, decorators, and pluggable providers — StatsD, Sentry, and Prometheus pushgateway, with hard isolation from business code
+---
+
+Bedrock ships a first-party metrics subsystem: counter/gauge/timer handles with decorators, a hardcoded logger, and pluggable providers (StatsD, Sentry, Prometheus pushgateway). Instrumentation is synchronous and **never raises** — a failing provider cannot break business code. The whole subsystem lives under `bedrock.contrib.metric`.
+
+## Quick Start
+
+The `metrics` singleton creates handles; every emit logs a line and fans out to every registered provider.
+
+```python
+from bedrock.contrib.metric import metrics
+
+# Decorator (sync or async): increments by 1 on every call
+@metrics.counter("user.login.count", tags={"realm": "cn"})
+def login(user_id: str) -> bool:
+    ...
+
+# Async timer decorator: records elapsed seconds per call
+@metrics.timer("http.request.duration")
+async def handler(request):
+    ...
+
+# Context manager timer
+with metrics.timer("db.query.duration"):
+    rows = db.query(...)
+```
+
+Every emit writes a log line to the `bedrock.contrib.metric` logger (INFO by default), so even with no providers registered you get observable output:
+
+```
+metric counter user.login.count=1.0 tags={'realm': 'cn'}
+metric timer http.request.duration=0.042 tags={}
+```
+
+That's the core loop. The rest of this page covers metric types, providers, and the isolation guarantee.
+
+## Metric Types
+
+Three handle types are created from the singleton. All handles accept `tags=None` and copy the mapping at creation time.
+
+### Counter
+
+A monotonic counter — call `inc()` or use it as a decorator. Fractional deltas are preserved.
+
+```python
+from bedrock.contrib.metric import metrics
+
+logins = metrics.counter("user.login.count", tags={"realm": "cn"})
+logins.inc()       # +1
+logins.inc(2.5)    # +2.5, fractional deltas preserved
+
+@metrics.counter("http.requests")
+def handle(request):
+    ...            # increments by 1 on every call (sync or async)
+```
+
+### Gauge
+
+A current-state gauge — `set()` only; **there is no decorator** for gauges.
+
+```python
+from bedrock.contrib.metric import metrics
+
+connections = metrics.gauge("db.connections")
+connections.set(12)
+```
+
+### Timer
+
+Elapsed seconds — three usage modes: decorator (sync or async), context manager, and explicit `observe()`.
+
+```python
+from bedrock.contrib.metric import metrics
+
+# Decorator (sync or async)
+@metrics.timer("render.duration")
+def render(...):
+    ...
+
+# Context manager
+with metrics.timer("db.query.duration"):
+    rows = db.query(...)
+
+# Manual observation, value in seconds
+timer = metrics.timer("worker.batch.duration")
+timer.observe(1.24)
+```
+
+## Providers
+
+Providers are plain objects with `emit(event)` and `close()`. Register as many as you like — every event is broadcast to **all** of them. There is no `configure()` and no default provider: you add providers, you never select one.
+
+```python
+from bedrock.contrib.metric import metrics, StatsDProvider, StatsDSettings
+from bedrock.contrib.metric import SentryProvider
+from bedrock.contrib.metric import PrometheusPushProvider, PrometheusPushSettings
+
+metrics.register_provider(StatsDProvider(settings=StatsDSettings(host="127.0.0.1")))
+metrics.register_provider(SentryProvider())
+metrics.register_provider(PrometheusPushProvider(
+    settings=PrometheusPushSettings(gateway_url="http://pushgateway:9091")))
+```
+
+### StatsD
+
+Zero-dependency UDP backend — no extra install. Wire format: `name:value|c` for counters, `name:value|g` for gauges, `name:<ms>|ms` for timers (converted from seconds). Values keep full float precision (`1.23456789` stays intact), integer-valued floats render without a trailing `.0`, and tags use Datadog syntax `|#k:v,k2:v2` with sorted keys. The UDP socket is created lazily on first emit.
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `STATSD_HOST` | `"127.0.0.1"` | UDP host |
+| `STATSD_PORT` | `"8125"` | UDP port |
+| `STATSD_PREFIX` | `""` | Prefix prepended to every metric name |
+
+### Sentry
+
+Forwards metrics to the Sentry SDK (`sentry_sdk.metrics`). Mapping: counter → `count`, gauge → `gauge`, timer → `distribution` (unit `"second"`). Tags are passed through as Sentry attributes. The Sentry SDK lifecycle is application-owned, so `close()` releases nothing.
+
+```bash
+uv add bedrock-core[metric-sentry]
+```
+
+`sentry_sdk` is imported lazily, so `bedrock.contrib.metric` imports without the dependency. Constructing `SentryProvider()` without the extra raises `MetricProviderError`.
+
+### Prometheus Pushgateway
+
+Pushes metrics to a Prometheus pushgateway via `prometheus_client`. Requires the optional `metric-prometheus` extra.
+
+```bash
+uv add bedrock-core[metric-prometheus]
+```
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `METRIC_PROMETHEUS_GATEWAY_URL` | `""` | Pushgateway URL (required; missing → `MetricConfigurationError`) |
+| `METRIC_PROMETHEUS_JOB` | `"bedrock-app"` | Pushgateway job name |
+| `METRIC_PROMETHEUS_PUSH_INTERVAL` | `"1.0"` | Minimum seconds between gateway pushes |
+
+One collector is registered per metric name; its type and label-key schema are **fixed by the first observation**. Mapping: counter → `Counter`, gauge → `Gauge`, timer → `Histogram` (elapsed seconds). A later event that changes the type or the set of tag keys raises `ValueError` — which the manager isolates, never reaching business code — instead of attempting a duplicate registry registration.
+
+The registry is pushed on the first event (even when the monotonic clock is below the interval) and then at most every `push_interval` seconds. Pushing is throttled per-emit; there is no buffering, no background push, and no bootstrap. Pull-based scraping (a `/metrics` endpoint) is planned for v2.
+
+```python
+from bedrock.contrib.metric import metrics, PrometheusPushProvider, PrometheusPushSettings
+
+metrics.register_provider(PrometheusPushProvider(
+    settings=PrometheusPushSettings(gateway_url="http://pushgateway:9091")))
+```
+
+## Hardcoded Logging
+
+The logger is built into the manager and **cannot be removed**. Every emit logs first (level configurable, default `INFO`), then broadcasts to providers. It is not a provider — with no providers registered you still get log output.
+
+```python
+import logging
+
+from bedrock.contrib.metric import metrics
+
+metrics.set_log_level(logging.DEBUG)   # verbose on hot paths
+metrics.set_log_level(logging.WARNING) # quiet production
+```
+
+Provider failures also log at `WARNING`, rate-limited to the first occurrence and every 100th occurrence per (provider, metric).
+
+## Isolation Guarantee
+
+Instrumentation never raises into business code:
+
+- `emit()` failures are caught (`except Exception`, never `BaseException`) and logged as rate-limited warnings — the caller and other providers are unaffected.
+- Failing providers are **not** auto-disabled; they keep receiving events (and keep warning at the 100-occurrence cadence).
+- Emission is synchronous — no background threads, no buffered queues, no re-entrancy.
+- Exceptions are raised only at configuration time, when constructing a provider (see [Exception Hierarchy](#exception-hierarchy)).
+
+## API Reference
+
+The `metrics` singleton is a `MetricsManager` instance; module-level `register_provider` / `list_providers` delegate to it.
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `metrics.counter()` | `counter(name, tags=None) → Counter` | Counter handle; `.inc(delta=1)` or use as `@counter` decorator (sync and async) |
+| `metrics.gauge()` | `gauge(name, tags=None) → Gauge` | Gauge handle; `.set(value)` only — no decorator |
+| `metrics.timer()` | `timer(name, tags=None) → Timer` | Timer handle; `@timer` decorator (sync and async), context manager, or `.observe(seconds)` |
+| `metrics.set_log_level()` | `set_log_level(level) → None` | Set the hardcoded logger's level (default `logging.INFO`) |
+| `register_provider()` | `register_provider(provider) → None` | Register a provider on the singleton; idempotent per instance |
+| `list_providers()` | `list_providers() → list[str]` | Registered provider class names, in registration order |
+| `metrics.close()` | `close() → None` | Release provider resources — explicit only; the framework never calls it |
+
+## Tags
+
+Tags are `dict[str, str]` passed to every provider:
+
+- **StatsD** — Datadog syntax `|#k:v,k2:v2`, keys sorted.
+- **Sentry** — passed through as attributes.
+- **Prometheus** — become labels; the label-key schema (sorted set of tag keys) is fixed at first observation and must stay consistent per metric name.
+
+```python
+metrics.counter("user.login.count", tags={"realm": "cn"}).inc()
+```
+
+## Exception Hierarchy
+
+All metrics exceptions inherit from `MetricError` (itself a `BedrockExc`):
+
+```
+MetricError
+├── MetricConfigurationError — Provider configured incorrectly (e.g. missing gateway_url)
+└── MetricProviderError       — Provider cannot be initialized (e.g. missing optional extra)
+```
+
+```python
+from bedrock.contrib.metric import (
+    MetricConfigurationError,
+    MetricError,
+    MetricProviderError,
+)
+```
+
+These are raised only at configuration time, when constructing a provider. Emission itself never raises.
+
+## Anti-Patterns
+
+**Don't wrap instrumentation in try/except.** Emits never raise — a try/except around `inc()` / `set()` / `observe()` is dead code.
+
+**Don't call `close()` in normal operation.** It is explicit by design and the framework never calls it; call it once at shutdown if you own long-lived provider resources (e.g. a StatsD socket).
+
+**Don't look for an in-memory provider.** For local debugging, use the hardcoded logger instead — `metrics.set_log_level(logging.DEBUG)` prints every event.
+
+**Don't expect Prometheus push to batch.** The pushgateway provider is throttled per-emit (at most one push per `push_interval`); there is no buffering, aggregation, or background flush.
+
+**Don't change a metric's type or tag keys on Prometheus.** Both are fixed at first observation; a mismatched event raises (isolated by the manager) and never reaches the gateway.
+
+**Don't use gauge as a decorator.** Only counter and timer are callable as decorators.
+
+## See Also
+
+- [Database](./database) — SQLAlchemy 2.0 database layer
+- [Cache](./cache) — In-memory and Redis cache with sync/async API
+- [Storage](./storage) — File storage with pluggable local/S3 backends

@@ -1,5 +1,7 @@
 """Tests for the metric event value object."""
 
+from datetime import timedelta
+
 from bedrock.contrib.metric.events import MetricEvent
 
 
@@ -11,7 +13,7 @@ def test_event_defaults() -> None:
     assert event.value == 1.0
     assert event.tags == {}
     assert event.timestamp.tzinfo is not None
-    assert event.timestamp.utcoffset() is not None
+    assert event.timestamp.utcoffset() == timedelta(0)
 
 
 def test_event_is_frozen() -> None:
