@@ -1,5 +1,6 @@
 """Bedrock Metrics — application metrics instrumentation with pluggable providers."""
 
+from .backends.prometheus_push import PrometheusPushProvider, PrometheusPushSettings
 from .backends.sentry import SentryProvider
 from .backends.statsd import StatsDProvider, StatsDSettings
 from .base import MetricProvider
@@ -17,6 +18,8 @@ __all__ = [
     "MetricProviderError",
     "MetricType",
     "MetricsManager",
+    "PrometheusPushProvider",
+    "PrometheusPushSettings",
     "SentryProvider",
     "StatsDProvider",
     "StatsDSettings",
