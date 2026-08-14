@@ -160,17 +160,17 @@ metrics.register_provider(PrometheusPushProvider(
 
 日志器内置于管理器，且**无法移除**。每次发射都会先写一条日志记录（严重级别可配置，默认 `INFO`），然后再广播给 Provider。它不是 Provider——没有注册任何 Provider 时，日志记录就是唯一的输出。
 
-`set_log_level()` **只选择日志记录的严重级别**：它不会安装 handler，也不会改变 logger 或 handler 的阈值。记录是否真的被打印取决于标准 logging 配置——记录必须通过 `bedrock.contrib.metric` logger（及其祖先）的有效级别，以及每个已挂接 handler 的阈值：
+`set_log_level()` **只改变分配给每条指标日志记录的严重级别**——仅此而已：它不会安装 handler，也不会改动 stdlib 中 logger 或 handler 的任何配置。之后的日志管线与标准 Python logging 完全一致：源 logger 的有效级别决定记录是否会被创建；一旦创建，记录便会传播，**每个接收的 handler 各自独立应用自己的级别/过滤器**（传播过程中不会重新检查祖先 logger 的级别）。
 
 ```python
 import logging
 
-logging.basicConfig(level=logging.INFO)  # root logger and handler at INFO
+logging.basicConfig(level=logging.INFO)  # root logger level; installs a default handler when none exists
 
 from bedrock.contrib.metric import metrics
 
-metrics.set_log_level(logging.DEBUG)   # records become DEBUG: skipped entirely when DEBUG is not captured
-metrics.set_log_level(logging.WARNING) # records become WARNING: still printed wherever INFO is captured
+metrics.set_log_level(logging.DEBUG)   # records become DEBUG: skipped entirely when the source logger is not configured for DEBUG
+metrics.set_log_level(logging.WARNING) # records become WARNING: visible wherever a receiving handler accepts WARNING
 ```
 
 Provider 失败时也会以 `WARNING` 记日志，按（provider, metric）对限制频率：首次出现与每第 100 次出现。
@@ -193,7 +193,7 @@ Provider 失败时也会以 `WARNING` 记日志，按（provider, metric）对�
 | `metrics.counter()` | `counter(name, tags=None) → Counter` | 计数器句柄；`.inc(delta=1)` 或用作 `@counter` 装饰器（同步与异步） |
 | `metrics.gauge()` | `gauge(name, tags=None) → Gauge` | 仪表句柄；只能 `.set(value)`——没有装饰器 |
 | `metrics.timer()` | `timer(name, tags=None) → Timer` | 计时器句柄；`@timer` 装饰器（同步与异步）、上下文管理器或 `.observe(seconds)` |
-| `metrics.set_log_level()` | `set_log_level(level) → None` | 设置硬编码日志器的级别（默认 `logging.INFO`） |
+| `metrics.set_log_level()` | `set_log_level(level) → None` | 设置分配给每条指标日志记录的严重级别（默认 `logging.INFO`） |
 | `register_provider()` | `register_provider(provider) → None` | 在单例上注册 Provider；按实例幂等 |
 | `list_providers()` | `list_providers() → list[str]` | 已注册 Provider 的类名，按注册顺序 |
 | `metrics.close()` | `close() → None` | 释放 Provider 资源——仅显式调用；框架永远不会调用它 |

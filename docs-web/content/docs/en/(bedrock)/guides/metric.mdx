@@ -160,17 +160,17 @@ metrics.register_provider(PrometheusPushProvider(
 
 The logger is built into the manager and **cannot be removed**. Every emit writes a log record first (severity configurable, default `INFO`), then broadcasts to providers. It is not a provider — with no providers registered the log record is the only output.
 
-`set_log_level()` selects the **record severity only**: it does not install handlers and does not change logger or handler thresholds. Whether a record is actually printed depends on the standard logging configuration — the record must clear the effective level of the `bedrock.contrib.metric` logger (and its ancestors) as well as the threshold of every attached handler:
+`set_log_level()` changes the **severity assigned to each metric log record** — nothing else: it does not install handlers and does not touch stdlib logger or handler configuration. The logging pipeline then works exactly like standard Python logging: the source logger's effective level decides whether the record is created at all; once created, the record propagates and **each receiving handler independently applies its own level/filter** (ancestor logger levels are not rechecked during propagation).
 
 ```python
 import logging
 
-logging.basicConfig(level=logging.INFO)  # root logger and handler at INFO
+logging.basicConfig(level=logging.INFO)  # root logger level; installs a default handler when none exists
 
 from bedrock.contrib.metric import metrics
 
-metrics.set_log_level(logging.DEBUG)   # records become DEBUG: skipped entirely when DEBUG is not captured
-metrics.set_log_level(logging.WARNING) # records become WARNING: still printed wherever INFO is captured
+metrics.set_log_level(logging.DEBUG)   # records become DEBUG: skipped entirely when the source logger is not configured for DEBUG
+metrics.set_log_level(logging.WARNING) # records become WARNING: visible wherever a receiving handler accepts WARNING
 ```
 
 Provider failures also log at `WARNING`, rate-limited to the first occurrence and every 100th occurrence per (provider, metric).
@@ -193,7 +193,7 @@ The `metrics` singleton is a `MetricsManager` instance; module-level `register_p
 | `metrics.counter()` | `counter(name, tags=None) → Counter` | Counter handle; `.inc(delta=1)` or use as `@counter` decorator (sync and async) |
 | `metrics.gauge()` | `gauge(name, tags=None) → Gauge` | Gauge handle; `.set(value)` only — no decorator |
 | `metrics.timer()` | `timer(name, tags=None) → Timer` | Timer handle; `@timer` decorator (sync and async), context manager, or `.observe(seconds)` |
-| `metrics.set_log_level()` | `set_log_level(level) → None` | Set the hardcoded logger's level (default `logging.INFO`) |
+| `metrics.set_log_level()` | `set_log_level(level) → None` | Set the severity assigned to each metric log record (default `logging.INFO`) |
 | `register_provider()` | `register_provider(provider) → None` | Register a provider on the singleton; idempotent per instance |
 | `list_providers()` | `list_providers() → list[str]` | Registered provider class names, in registration order |
 | `metrics.close()` | `close() → None` | Release provider resources — explicit only; the framework never calls it |

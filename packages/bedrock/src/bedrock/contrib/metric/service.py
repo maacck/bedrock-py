@@ -30,7 +30,11 @@ class _Handle:
 
 
 class Counter(_Handle):
-    """A monotonic counter handle; usable as ``@counter`` decorator."""
+    """A counter handle; usable as ``@counter`` decorator.
+
+    ``inc`` does not validate the delta — negative deltas are accepted, so
+    the series is not guaranteed monotonic.
+    """
 
     def inc(self, delta: int | float = 1) -> None:
         """Increment the counter by ``delta`` (default 1)."""
@@ -124,7 +128,7 @@ class MetricsManager:
         self._warning_counts: dict[tuple[int, str], int] = {}
 
     def set_log_level(self, level: int) -> None:
-        """Set the hardcoded logger's level (e.g. ``logging.DEBUG`` on hot paths)."""
+        """Set the severity assigned to each metric log record (e.g. ``logging.DEBUG`` on hot paths)."""
         self._log_level = level
 
     def register_provider(self, provider: MetricProvider) -> None:
