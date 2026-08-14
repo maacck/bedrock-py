@@ -1,5 +1,6 @@
 """Bedrock Metrics — application metrics instrumentation with pluggable providers."""
 
+from .backends.sentry import SentryProvider
 from .backends.statsd import StatsDProvider, StatsDSettings
 from .base import MetricProvider
 from .events import MetricEvent, MetricType
@@ -16,6 +17,7 @@ __all__ = [
     "MetricProviderError",
     "MetricType",
     "MetricsManager",
+    "SentryProvider",
     "StatsDProvider",
     "StatsDSettings",
     "Timer",
