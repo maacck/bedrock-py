@@ -137,7 +137,7 @@ def test_missing_gateway_url_raises_configuration_error() -> None:
 def test_counter_maps_to_counter(provider: PrometheusPushProvider) -> None:
     """counter -> Counter collector; inc receives the event value."""
     provider.emit(MetricEvent(type="counter", name="orders.total", value=2.0, tags={"c": "web"}))
-    collector, kind, label_keys = provider._collectors[("orders.total", "counter")]
+    collector, kind, label_keys = provider._collectors["orders.total"]
     assert kind == "counter"
     assert label_keys == ("c",)
     assert isinstance(collector, _FakeCounter)
@@ -148,7 +148,7 @@ def test_counter_maps_to_counter(provider: PrometheusPushProvider) -> None:
 def test_gauge_maps_to_gauge(provider: PrometheusPushProvider) -> None:
     """gauge -> Gauge collector; set receives the event value."""
     provider.emit(MetricEvent(type="gauge", name="queue.size", value=5.0, tags={"pool": "workers"}))
-    collector, kind, label_keys = provider._collectors[("queue.size", "gauge")]
+    collector, kind, label_keys = provider._collectors["queue.size"]
     assert kind == "gauge"
     assert label_keys == ("pool",)
     assert isinstance(collector, _FakeGauge)
@@ -159,7 +159,7 @@ def test_gauge_maps_to_gauge(provider: PrometheusPushProvider) -> None:
 def test_timer_maps_to_histogram_seconds(provider: PrometheusPushProvider) -> None:
     """timer -> Histogram collector; observe receives elapsed seconds."""
     provider.emit(MetricEvent(type="timer", name="job.duration", value=0.5))
-    collector, kind, label_keys = provider._collectors[("job.duration", "timer")]
+    collector, kind, label_keys = provider._collectors["job.duration"]
     assert kind == "histogram"
     assert label_keys == ()
     assert isinstance(collector, _FakeHistogram)
@@ -172,7 +172,7 @@ def test_same_label_schema_reuses_one_collector(provider: PrometheusPushProvider
     provider.emit(MetricEvent(type="counter", name="c", value=1.0, tags={"k": "v1"}))
     provider.emit(MetricEvent(type="counter", name="c", value=2.0, tags={"k": "v2"}))
     assert _FakeCounter.instances == 1  # registered exactly once, never duplicated
-    collector = provider._collectors[("c", "counter")][0]
+    collector = provider._collectors["c"][0]
     assert collector.labels_calls == [{"k": "v1"}, {"k": "v2"}]
     assert collector.inc_values == [1.0, 2.0]
 
@@ -182,7 +182,7 @@ def test_label_key_schema_is_sorted_key_based(provider: PrometheusPushProvider) 
     provider.emit(MetricEvent(type="gauge", name="g", value=1.0, tags={"b": "1", "a": "1"}))
     provider.emit(MetricEvent(type="gauge", name="g", value=2.0, tags={"a": "2", "b": "2"}))
     assert _FakeGauge.instances == 1
-    collector = provider._collectors[("g", "gauge")][0]
+    collector = provider._collectors["g"][0]
     assert collector.labels_calls == [{"b": "1", "a": "1"}, {"a": "2", "b": "2"}]
 
 
@@ -198,12 +198,35 @@ def test_mismatched_label_schema_raises_without_duplicate_registration(
     assert len(registry.pushed) == 1  # the failing event never reached the gateway
 
 
+def test_type_change_raises_without_duplicate_registration(make_provider) -> None:
+    """A different metric type for the same name raises ValueError, never re-registers."""
+    provider, registry = make_provider(push_interval=0.0)
+    provider.emit(MetricEvent(type="counter", name="c", value=1.0, tags={"a": "1"}))
+    with pytest.raises(ValueError, match="type"):
+        provider.emit(MetricEvent(type="gauge", name="c", value=2.0, tags={"a": "2"}))
+    assert _FakeCounter.instances == 1  # only the counter was ever constructed
+    assert _FakeGauge.instances == 0  # the gauge was never constructed (no duplicate registration)
+    assert len(registry.pushed) == 1  # the rejected event never reached the gateway
+
+
 def test_first_event_pushes_with_gateway_and_job(make_provider) -> None:
     """The first emit pushes to gateway_url with the configured job."""
     provider, registry = make_provider(push_interval=10.0)
     provider.emit(MetricEvent(type="counter", name="c", value=1.0))
     assert len(registry.pushed) == 1
     assert registry.pushed[0] == ("http://gw:9091", "bedrock-app", provider._registry)
+
+
+def test_first_event_pushes_even_when_monotonic_below_interval(
+    monkeypatch: pytest.MonkeyPatch, make_provider
+) -> None:
+    """A never-pushed provider always pushes the first event, even if monotonic < interval."""
+    monkeypatch.setattr("time.monotonic", lambda: 0.25)
+    provider, registry = make_provider(push_interval=1.0)
+    provider.emit(MetricEvent(type="counter", name="c", value=1.0))
+    assert len(registry.pushed) == 1  # first event is never throttled
+    provider.emit(MetricEvent(type="counter", name="c", value=1.0))
+    assert len(registry.pushed) == 1  # 0.0s elapsed < 1.0s interval -> suppressed
 
 
 def test_push_throttled_until_interval_elapses(

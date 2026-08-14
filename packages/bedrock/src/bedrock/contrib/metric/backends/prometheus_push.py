@@ -5,7 +5,7 @@ from typing import Any
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from ..events import MetricEvent, MetricType
+from ..events import MetricEvent
 from ..exc import MetricConfigurationError, MetricProviderError
 
 
@@ -22,19 +22,20 @@ class PrometheusPushSettings(BaseSettings):
 class PrometheusPushProvider:
     """Emit metrics to a Prometheus pushgateway.
 
-    One collector is registered per (metric name, metric type); its label-key
-    schema (the sorted set of tag keys) is fixed by the first observation and
-    every later event for that metric reuses the same collector, calling
-    ``labels(**tags)`` to select the child series for its values. A later
-    event that changes the label-key schema raises ``ValueError`` — the
-    manager isolates provider errors — instead of attempting a duplicate
-    registry registration. Mapping: counter → Counter, gauge → Gauge, timer
-    → Histogram (elapsed seconds). The registry is pushed to the gateway on
-    the first event and then at most every ``push_interval`` seconds; there
-    is no buffering, background push, or bootstrap. Requires the optional
-    ``metric-prometheus`` extra; ``prometheus_client`` is imported lazily in
-    ``__init__`` so this module (and ``bedrock.contrib.metric``) imports
-    without the dependency.
+    One collector is registered per metric name; its type (counter / gauge /
+    timer) and label-key schema (the sorted set of tag keys) are fixed by the
+    first observation and every later event for that name reuses the same
+    collector, calling ``labels(**tags)`` to select the child series for its
+    values. A later event that changes the type or the label-key schema
+    raises ``ValueError`` — the manager isolates provider errors — instead of
+    attempting a duplicate registry registration. Mapping: counter →
+    Counter, gauge → Gauge, timer → Histogram (elapsed seconds). The registry
+    is pushed to the gateway on the first event (even when the monotonic
+    clock is below the interval) and then at most every ``push_interval``
+    seconds; there is no buffering, background push, or bootstrap. Requires
+    the optional ``metric-prometheus`` extra; ``prometheus_client`` is
+    imported lazily in ``__init__`` so this module (and
+    ``bedrock.contrib.metric``) imports without the dependency.
     """
 
     def __init__(self, settings: PrometheusPushSettings | None = None) -> None:
@@ -53,27 +54,31 @@ class PrometheusPushProvider:
             ) from exc
         self._client: Any = prometheus_client
         self._registry: Any = prometheus_client.CollectorRegistry()
-        # key: (name, metric_type) -> (collector, kind, label_keys)
-        self._collectors: dict[tuple[str, MetricType], tuple[Any, str, tuple[str, ...]]] = {}
-        self._last_push = 0.0
+        # key: name -> (collector, kind, label_keys)
+        self._collectors: dict[str, tuple[Any, str, tuple[str, ...]]] = {}
+        self._last_push: float | None = None
 
     def _collector(self, event: MetricEvent) -> tuple[Any, str]:
         """Return the (collector, kind) for ``event``, creating it on first observation.
 
-        The label-key schema is established on first observation; a later
-        event with a different schema for the same name/type raises a clear
+        The metric type and label-key schema are established on first
+        observation; a later event that changes either raises a clear
         ``ValueError`` (never a duplicate registry registration).
         """
-        key = (event.name, event.type)
         label_keys = tuple(sorted(event.tags))
-        cached = self._collectors.get(key)
+        cached = self._collectors.get(event.name)
         if cached is not None:
-            collector, kind, established = cached
-            if established != label_keys:
+            collector, kind, established_keys = cached
+            if kind != event.type:
+                raise ValueError(
+                    f"Prometheus metric {event.name!r} was first observed as a {kind} but an event "
+                    f"uses type {event.type!r}; a metric's type is fixed on first observation."
+                )
+            if established_keys != label_keys:
                 raise ValueError(
                     f"Prometheus metric {event.name!r} ({event.type}) was first observed with label "
-                    f"keys {established!r} but an event uses {label_keys!r}; the label-key schema is "
-                    "fixed on first observation."
+                    f"keys {established_keys!r} but an event uses {label_keys!r}; the label-key "
+                    "schema is fixed on first observation."
                 )
             return collector, kind
         if event.type == "counter":
@@ -85,7 +90,7 @@ class PrometheusPushProvider:
         else:  # timer -> histogram, seconds
             collector = self._client.Histogram(event.name, "", labelnames=label_keys, registry=self._registry)
             kind = "histogram"
-        self._collectors[key] = (collector, kind, label_keys)
+        self._collectors[event.name] = (collector, kind, label_keys)
         return collector, kind
 
     def emit(self, event: MetricEvent) -> None:
@@ -99,7 +104,7 @@ class PrometheusPushProvider:
         else:
             labeled.observe(event.value)
         now = time.monotonic()
-        if now - self._last_push >= self._settings.push_interval:
+        if self._last_push is None or now - self._last_push >= self._settings.push_interval:
             self._client.push_to_gateway(
                 self._settings.gateway_url, job=self._settings.job, registry=self._registry
             )
