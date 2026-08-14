@@ -123,7 +123,7 @@ class MetricsManager:
         self._providers: list[MetricProvider] = []
         self._logger = logging.getLogger("bedrock.contrib.metric")
         self._log_level = log_level
-        self._warning_counts: dict[tuple[str, str], int] = {}
+        self._warning_counts: dict[tuple[int, str], int] = {}
 
     def set_log_level(self, level: int) -> None:
         """Set the hardcoded logger's level (e.g. ``logging.DEBUG`` on hot paths)."""
@@ -131,7 +131,7 @@ class MetricsManager:
 
     def register_provider(self, provider: MetricProvider) -> None:
         """Register a provider; every event is broadcast to all providers."""
-        if provider not in self._providers:
+        if not any(existing is provider for existing in self._providers):
             self._providers.append(provider)
 
     def list_providers(self) -> list[str]:
@@ -167,7 +167,7 @@ class MetricsManager:
                 self._warn_failure(provider, event, exc)
 
     def _warn_failure(self, provider: MetricProvider, event: MetricEvent, exc: Exception) -> None:
-        key = (type(provider).__name__, event.name)
+        key = (id(provider), event.name)
         count = self._warning_counts.get(key, 0) + 1
         self._warning_counts[key] = count
         if count == 1 or count % _WARNING_INTERVAL == 0:

@@ -42,6 +42,13 @@ class FailingProvider:
         pass
 
 
+class EqualProvider(FakeProvider):
+    """Provider whose distinct instances compare equal (identity must still win)."""
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, EqualProvider)
+
+
 @pytest.fixture
 def manager() -> MetricsManager:
     m = MetricsManager()
@@ -202,6 +209,19 @@ def test_register_is_idempotent(manager: MetricsManager) -> None:
     assert len(manager.list_providers()) == 1
 
 
+def test_register_keeps_distinct_equal_instances(manager: MetricsManager) -> None:
+    """Distinct instances that compare equal are both kept; only the same instance dedupes."""
+    p1 = EqualProvider()
+    p2 = EqualProvider()
+    assert p1 is not p2 and p1 == p2
+    manager.register_provider(p1)
+    manager.register_provider(p2)
+    manager.register_provider(p1)
+    assert len(manager.list_providers()) == 2
+    manager.counter("c").inc()
+    assert len(p1.events) == 1 and len(p2.events) == 1
+
+
 def test_provider_registered_after_handle_creation_receives(manager: MetricsManager) -> None:
     """Handles re-read the provider list at emit time."""
     counter = manager.counter("late")
@@ -234,6 +254,23 @@ def test_provider_failure_warning_is_rate_limited(manager: MetricsManager, caplo
     assert len(messages) == 3  # occurrences 1, 100, 200
 
 
+def test_provider_failure_warnings_are_per_instance(manager: MetricsManager, caplog: pytest.LogCaptureFixture) -> None:
+    """Same-class provider instances warn independently (first and every 100th each)."""
+    bad1 = FailingProvider()
+    bad2 = FailingProvider()
+    manager.register_provider(bad1)
+    counter = manager.counter("r")
+    with caplog.at_level(logging.WARNING, logger="bedrock.contrib.metric"):
+        for _ in range(100):
+            counter.inc()
+        manager.register_provider(bad2)
+        for _ in range(100):
+            counter.inc()
+    messages = [r.message for r in caplog.records if "failed in FailingProvider" in r.message]
+    # bad1: occurrences 1, 100, 200; bad2: occurrences 1, 100 — five independent warnings.
+    assert len(messages) == 5
+
+
 def test_close_calls_provider_close(manager: MetricsManager) -> None:
     """close() releases every provider."""
     fake = FakeProvider()
@@ -244,13 +281,20 @@ def test_close_calls_provider_close(manager: MetricsManager) -> None:
 
 
 def test_module_singleton_and_helpers() -> None:
-    """The module exposes the metrics singleton and delegating helpers."""
-    before = list(metrics._providers)  # noqa: SLF001 - test-only isolation
+    """The module exposes the metrics singleton and delegating helpers; state is restored exactly."""
+    # Seed non-empty prior state so restoration is observable and not assumed empty.
+    metrics.register_provider(FakeProvider())
+    metrics._warning_counts[("seeded", "m")] = 7  # noqa: SLF001
+    before_providers = list(metrics._providers)  # noqa: SLF001
+    before_counts = dict(metrics._warning_counts)  # noqa: SLF001
     try:
         register_provider(FakeProvider())
         assert isinstance(metrics, MetricsManager)
-        assert list_providers() == ["FakeProvider"]
+        assert list_providers() == ["FakeProvider", "FakeProvider"]
     finally:
         metrics._providers.clear()  # noqa: SLF001
-        metrics._providers.extend(before)  # noqa: SLF001
+        metrics._providers.extend(before_providers)  # noqa: SLF001
         metrics._warning_counts.clear()  # noqa: SLF001
+        metrics._warning_counts.update(before_counts)  # noqa: SLF001
+    assert metrics.list_providers() == [type(p).__name__ for p in before_providers]
+    assert metrics._warning_counts == before_counts
