@@ -7,7 +7,7 @@ Bedrock 内置了一套官方指标子系统：计数器/仪表/计时器句柄�
 
 ## 快速开始
 
-`metrics` 单例负责创建句柄；每次发射都会写入一条日志，并扇出（fan-out）到所有已注册的 Provider。
+`metrics` 单例负责创建句柄；每次发射都会写入一条日志记录，并扇出（fan-out）到所有已注册的 Provider。
 
 ```python
 from bedrock.contrib.metric import metrics
@@ -27,7 +27,15 @@ with metrics.timer("db.query.duration"):
     rows = db.query(...)
 ```
 
-每次发射都会向 `bedrock.contrib.metric` 日志器写入一行（默认 INFO 级别），因此即使没有注册任何 Provider，也依然可以观察到输出：
+每次发射都会向 `bedrock.contrib.metric` 日志器写入一条日志记录，默认严重级别为 `INFO`。管理器不会安装日志 handler——请先配置标准 logging 以观察输出：
+
+```python
+import logging
+
+logging.basicConfig(level=logging.INFO)
+```
+
+没有注册任何 Provider 时，日志记录就是唯一的输出：
 
 ```
 metric counter user.login.count=1.0 tags={'realm': 'cn'}
@@ -42,7 +50,7 @@ metric timer http.request.duration=0.042 tags={}
 
 ### 计数器
 
-单调递增计数器——调用 `inc()` 或用作装饰器。小数增量会被完整保留。
+计数器——调用 `inc()` 或用作装饰器。小数增量会被完整保留。`inc()` 不校验增量：为保证可移植行为，请保持增量非负，因为 Provider 可能拒绝有符号负增量（例如 Prometheus 计数器）。
 
 ```python
 from bedrock.contrib.metric import metrics
@@ -139,7 +147,7 @@ uv add bedrock-core[metric-prometheus]
 
 每个指标名称注册一个 collector；其类型与标签键模式在**首次观测时固定**。映射：counter → `Counter`、gauge → `Gauge`、timer → `Histogram`（经过秒数）。之后若某个事件改变了类型或标签键集合，会抛出 `ValueError`——由管理器隔离，绝不会到达业务代码——而不是尝试重复注册到 registry。
 
-注册表在首个事件时推送（即使单调时钟尚未达到间隔），之后至多每 `push_interval` 秒推送一次。推送按每次发射节流；没有缓冲、后台推送或 bootstrap。基于拉取模式的抓取（`/metrics` 端点）计划在 v2 提供。
+每次发射都会在节流检查**之前**更新保留的 collector 状态：计数器累加增量、仪表保存最新值、直方图累加观测值。注册表在首个事件时推送（即使单调时钟尚未达到间隔），之后至多每 `push_interval` 秒推送一次——每次符合推送条件的发射都会推送**累计**的注册表状态。不存在事件队列，也没有后台刷写：落在节流窗口内的发射只更新内存中的 collector，要等到之后某次符合条件的发射才会被推送——如果之后没有任何符合条件的发射，则永远不会推送。基于拉取模式的抓取（`/metrics` 端点）计划在 v2 提供。
 
 ```python
 from bedrock.contrib.metric import metrics, PrometheusPushProvider, PrometheusPushSettings
@@ -150,15 +158,19 @@ metrics.register_provider(PrometheusPushProvider(
 
 ## 硬编码日志
 
-日志器内置于管理器，且**无法移除**。每次发射都会先写日志（级别可配置，默认 `INFO`），然后再广播给 Provider。它不是 Provider——即使没有注册任何 Provider，也依然会有日志输出。
+日志器内置于管理器，且**无法移除**。每次发射都会先写一条日志记录（严重级别可配置，默认 `INFO`），然后再广播给 Provider。它不是 Provider——没有注册任何 Provider 时，日志记录就是唯一的输出。
+
+`set_log_level()` **只选择日志记录的严重级别**：它不会安装 handler，也不会改变 logger 或 handler 的阈值。记录是否真的被打印取决于标准 logging 配置——记录必须通过 `bedrock.contrib.metric` logger（及其祖先）的有效级别，以及每个已挂接 handler 的阈值：
 
 ```python
 import logging
 
+logging.basicConfig(level=logging.INFO)  # root logger and handler at INFO
+
 from bedrock.contrib.metric import metrics
 
-metrics.set_log_level(logging.DEBUG)   # verbose on hot paths
-metrics.set_log_level(logging.WARNING) # quiet production
+metrics.set_log_level(logging.DEBUG)   # records become DEBUG: skipped entirely when DEBUG is not captured
+metrics.set_log_level(logging.WARNING) # records become WARNING: still printed wherever INFO is captured
 ```
 
 Provider 失败时也会以 `WARNING` 记日志，按（provider, metric）对限制频率：首次出现与每第 100 次出现。
@@ -169,7 +181,7 @@ Provider 失败时也会以 `WARNING` 记日志，按（provider, metric）对�
 
 - `emit()` 失败会被捕获（`except Exception`，绝不捕获 `BaseException`），并记录为限频警告——调用方与其他 Provider 不受影响。
 - 出错的 Provider **不会被自动禁用**；它们继续接收事件（并继续按每 100 次的节奏告警）。
-- 发射是同步的——没有后台线程、缓冲队列或重入。
+- 发射是同步的——没有后台线程、缓冲队列。派发没有递归保护，因此自定义 Provider **不得**在其 `emit()` 内部向同一个管理器发射（否则会递归）。
 - 异常只会在配置阶段、构造 Provider 时抛出（见[异常层级](#异常层级)）。
 
 ## API 参考
@@ -224,11 +236,13 @@ from bedrock.contrib.metric import (
 
 **不要在正常运行时调用 `close()`。** 它按设计只应显式调用，框架永远不会调用；如果拥有长期存活的 Provider 资源（例如 StatsD socket），请在关停时调用一次。
 
-**不要寻找内存 Provider。** 本地调试请改用硬编码日志器——`metrics.set_log_level(logging.DEBUG)` 会打印每个事件。
+**不要寻找内存 Provider。** 本地调试请改用硬编码日志器——在 logging 配置为 `DEBUG` 的情况下，`metrics.set_log_level(logging.DEBUG)` 会打印每个事件。
 
-**不要期待 Prometheus 推送会批量聚合。** pushgateway Provider 按每次发射节流（至多每 `push_interval` 推送一次）；没有缓冲、聚合或后台刷写。
+**不要期待 Prometheus 推送会批量聚合事件。** pushgateway Provider 按每次发射节流（至多每 `push_interval` 推送一次）；落在节流窗口内的更新只保留在内存 collector 中，要等之后某次符合条件的发射才会推送——不存在事件队列或后台刷写。
 
 **不要在 Prometheus 上改变指标的类型或标签键。** 两者都在首次观测时固定；不匹配的事件会抛出异常（由管理器隔离），且永远不会到达网关。
+
+**不要给 `inc()` 传负增量。** 增量不被校验；Provider 可能拒绝有符号负更新（例如 Prometheus 计数器），失败会被吞掉并记录为限频的 Provider 警告。
 
 **不要把仪表当作装饰器。** 只有 counter 与 timer 可作为装饰器调用。
 

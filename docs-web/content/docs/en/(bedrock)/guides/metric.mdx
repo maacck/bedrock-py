@@ -7,7 +7,7 @@ Bedrock ships a first-party metrics subsystem: counter/gauge/timer handles with 
 
 ## Quick Start
 
-The `metrics` singleton creates handles; every emit logs a line and fans out to every registered provider.
+The `metrics` singleton creates handles; every emit writes a log record and fans out to every registered provider.
 
 ```python
 from bedrock.contrib.metric import metrics
@@ -27,7 +27,15 @@ with metrics.timer("db.query.duration"):
     rows = db.query(...)
 ```
 
-Every emit writes a log line to the `bedrock.contrib.metric` logger (INFO by default), so even with no providers registered you get observable output:
+Every emit writes a log record to the `bedrock.contrib.metric` logger with `INFO` severity by default. The manager does not install logging handlers — configure standard logging first to see output:
+
+```python
+import logging
+
+logging.basicConfig(level=logging.INFO)
+```
+
+With no providers registered, the log record is the only output:
 
 ```
 metric counter user.login.count=1.0 tags={'realm': 'cn'}
@@ -42,7 +50,7 @@ Three handle types are created from the singleton. All handles accept `tags=None
 
 ### Counter
 
-A monotonic counter — call `inc()` or use it as a decorator. Fractional deltas are preserved.
+A counter — call `inc()` or use it as a decorator. Fractional deltas are preserved. `inc()` does not validate the delta: keep deltas non-negative for portable behavior, because a provider may reject a signed negative update (e.g. a Prometheus counter).
 
 ```python
 from bedrock.contrib.metric import metrics
@@ -139,7 +147,7 @@ uv add bedrock-core[metric-prometheus]
 
 One collector is registered per metric name; its type and label-key schema are **fixed by the first observation**. Mapping: counter → `Counter`, gauge → `Gauge`, timer → `Histogram` (elapsed seconds). A later event that changes the type or the set of tag keys raises `ValueError` — which the manager isolates, never reaching business code — instead of attempting a duplicate registry registration.
 
-The registry is pushed on the first event (even when the monotonic clock is below the interval) and then at most every `push_interval` seconds. Pushing is throttled per-emit; there is no buffering, no background push, and no bootstrap. Pull-based scraping (a `/metrics` endpoint) is planned for v2.
+Every emit updates the retained collector state **before** the throttle check: counters accumulate their increments, gauges hold the latest value, and histograms accumulate observations. The registry is pushed on the first event (even when the monotonic clock is below the interval) and then at most every `push_interval` seconds — each qualifying emit pushes the **cumulative** registry state. There is no event queue and no background flush: an emit that falls inside the throttle window updates the collector in memory but is only pushed by a later qualifying emit — and never if no later emit qualifies. Pull-based scraping (a `/metrics` endpoint) is planned for v2.
 
 ```python
 from bedrock.contrib.metric import metrics, PrometheusPushProvider, PrometheusPushSettings
@@ -150,15 +158,19 @@ metrics.register_provider(PrometheusPushProvider(
 
 ## Hardcoded Logging
 
-The logger is built into the manager and **cannot be removed**. Every emit logs first (level configurable, default `INFO`), then broadcasts to providers. It is not a provider — with no providers registered you still get log output.
+The logger is built into the manager and **cannot be removed**. Every emit writes a log record first (severity configurable, default `INFO`), then broadcasts to providers. It is not a provider — with no providers registered the log record is the only output.
+
+`set_log_level()` selects the **record severity only**: it does not install handlers and does not change logger or handler thresholds. Whether a record is actually printed depends on the standard logging configuration — the record must clear the effective level of the `bedrock.contrib.metric` logger (and its ancestors) as well as the threshold of every attached handler:
 
 ```python
 import logging
 
+logging.basicConfig(level=logging.INFO)  # root logger and handler at INFO
+
 from bedrock.contrib.metric import metrics
 
-metrics.set_log_level(logging.DEBUG)   # verbose on hot paths
-metrics.set_log_level(logging.WARNING) # quiet production
+metrics.set_log_level(logging.DEBUG)   # records become DEBUG: skipped entirely when DEBUG is not captured
+metrics.set_log_level(logging.WARNING) # records become WARNING: still printed wherever INFO is captured
 ```
 
 Provider failures also log at `WARNING`, rate-limited to the first occurrence and every 100th occurrence per (provider, metric).
@@ -169,7 +181,7 @@ Instrumentation never raises into business code:
 
 - `emit()` failures are caught (`except Exception`, never `BaseException`) and logged as rate-limited warnings — the caller and other providers are unaffected.
 - Failing providers are **not** auto-disabled; they keep receiving events (and keep warning at the 100-occurrence cadence).
-- Emission is synchronous — no background threads, no buffered queues, no re-entrancy.
+- Emission is synchronous — no background threads, no buffered queues. Dispatch has no recursion guard, so a custom provider must **not** emit into the same manager from inside its `emit()` (it would recurse).
 - Exceptions are raised only at configuration time, when constructing a provider (see [Exception Hierarchy](#exception-hierarchy)).
 
 ## API Reference
@@ -224,11 +236,13 @@ These are raised only at configuration time, when constructing a provider. Emiss
 
 **Don't call `close()` in normal operation.** It is explicit by design and the framework never calls it; call it once at shutdown if you own long-lived provider resources (e.g. a StatsD socket).
 
-**Don't look for an in-memory provider.** For local debugging, use the hardcoded logger instead — `metrics.set_log_level(logging.DEBUG)` prints every event.
+**Don't look for an in-memory provider.** For local debugging, use the hardcoded logger instead — with logging configured at `DEBUG`, `metrics.set_log_level(logging.DEBUG)` prints every event.
 
-**Don't expect Prometheus push to batch.** The pushgateway provider is throttled per-emit (at most one push per `push_interval`); there is no buffering, aggregation, or background flush.
+**Don't expect Prometheus push to batch events.** The pushgateway provider is throttled per-emit (at most one push per `push_interval`); an update inside the throttle window stays in the in-memory collector and is pushed only by a later qualifying emit — there is no event queue or background flush.
 
 **Don't change a metric's type or tag keys on Prometheus.** Both are fixed at first observation; a mismatched event raises (isolated by the manager) and never reaches the gateway.
+
+**Don't pass negative deltas to `inc()`.** The delta is not validated; providers may reject signed negative updates (e.g. Prometheus counters), and the failure is swallowed as a rate-limited provider warning.
 
 **Don't use gauge as a decorator.** Only counter and timer are callable as decorators.
 
