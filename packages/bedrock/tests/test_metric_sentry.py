@@ -5,7 +5,6 @@ import sys
 import types
 
 import pytest
-
 from bedrock.contrib.metric.backends.sentry import SentryProvider
 from bedrock.contrib.metric.events import MetricEvent
 from bedrock.contrib.metric.exc import MetricProviderError
@@ -23,9 +22,7 @@ class FakeSentryMetrics:
     def gauge(self, key: str, value: float, attributes: dict | None = None) -> None:
         self.calls.append(("gauge", [key, value], {"attributes": attributes or {}}))
 
-    def distribution(
-        self, key: str, value: float, unit: str | None = None, attributes: dict | None = None
-    ) -> None:
+    def distribution(self, key: str, value: float, unit: str | None = None, attributes: dict | None = None) -> None:
         self.calls.append(("distribution", [key, value], {"unit": unit, "attributes": attributes or {}}))
 
 
@@ -55,9 +52,7 @@ def test_counter_preserves_float_value(provider: SentryProvider) -> None:
 def test_gauge_maps_to_gauge(provider: SentryProvider) -> None:
     """gauge -> metrics.gauge with attributes passed through."""
     provider.emit(MetricEvent(type="gauge", name="queue.size", value=42.0, tags={"pool": "workers"}))
-    assert provider._sentry.metrics.calls[0] == (
-        "gauge", ["queue.size", 42.0], {"attributes": {"pool": "workers"}}
-    )
+    assert provider._sentry.metrics.calls[0] == ("gauge", ["queue.size", 42.0], {"attributes": {"pool": "workers"}})
 
 
 def test_gauge_preserves_float_value(provider: SentryProvider) -> None:
@@ -70,7 +65,9 @@ def test_timer_maps_to_distribution_seconds(provider: SentryProvider) -> None:
     """timer -> metrics.distribution with unit='second'."""
     provider.emit(MetricEvent(type="timer", name="job.duration", value=1.5, tags={"op": "run"}))
     assert provider._sentry.metrics.calls[0] == (
-        "distribution", ["job.duration", 1.5], {"unit": "second", "attributes": {"op": "run"}}
+        "distribution",
+        ["job.duration", 1.5],
+        {"unit": "second", "attributes": {"op": "run"}},
     )
 
 

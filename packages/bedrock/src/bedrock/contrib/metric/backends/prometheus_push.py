@@ -42,8 +42,7 @@ class PrometheusPushProvider:
         self._settings = settings or PrometheusPushSettings()
         if not self._settings.gateway_url:
             raise MetricConfigurationError(
-                "PrometheusPushProvider requires gateway_url (set METRIC_PROMETHEUS_GATEWAY_URL "
-                "or pass settings)."
+                "PrometheusPushProvider requires gateway_url (set METRIC_PROMETHEUS_GATEWAY_URL or pass settings)."
             )
         try:
             import prometheus_client  # deferred: optional dependency
@@ -105,9 +104,7 @@ class PrometheusPushProvider:
             labeled.observe(event.value)
         now = time.monotonic()
         if self._last_push is None or now - self._last_push >= self._settings.push_interval:
-            self._client.push_to_gateway(
-                self._settings.gateway_url, job=self._settings.job, registry=self._registry
-            )
+            self._client.push_to_gateway(self._settings.gateway_url, job=self._settings.job, registry=self._registry)
             self._last_push = now
 
     def close(self) -> None:

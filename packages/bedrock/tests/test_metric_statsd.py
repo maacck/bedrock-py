@@ -27,7 +27,7 @@ def test_counter_format(monkeypatch) -> None:
     monkeypatch.setattr(socket, "socket", lambda *a, **k: fake)
     provider = StatsDProvider(settings=StatsDSettings(host="h", port=8125))
     provider.emit(MetricEvent(type="counter", name="a.b", value=2.0))
-    (data, addr), = fake.sent
+    ((data, addr),) = fake.sent
     assert data == b"a.b:2|c"
     assert addr == ("h", 8125)
     provider.close()

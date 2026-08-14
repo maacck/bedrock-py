@@ -4,16 +4,11 @@ import asyncio
 import logging
 
 import pytest
-
 from bedrock.contrib.metric import (
-    Counter,
-    Gauge,
-    Timer,
     list_providers,
     metrics,
     register_provider,
 )
-from bedrock.contrib.metric.base import MetricProvider
 from bedrock.contrib.metric.events import MetricEvent
 from bedrock.contrib.metric.service import MetricsManager
 

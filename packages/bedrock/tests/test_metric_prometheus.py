@@ -5,7 +5,6 @@ import sys
 import types
 
 import pytest
-
 from bedrock.contrib.metric.backends.prometheus_push import PrometheusPushProvider, PrometheusPushSettings
 from bedrock.contrib.metric.events import MetricEvent
 from bedrock.contrib.metric.exc import MetricConfigurationError, MetricProviderError
@@ -233,9 +232,7 @@ def test_first_event_pushes_with_gateway_and_job(make_provider) -> None:
     assert registry.pushed[0] == ("http://gw:9091", "bedrock-app", provider._registry)
 
 
-def test_first_event_pushes_even_when_monotonic_below_interval(
-    monkeypatch: pytest.MonkeyPatch, make_provider
-) -> None:
+def test_first_event_pushes_even_when_monotonic_below_interval(monkeypatch: pytest.MonkeyPatch, make_provider) -> None:
     """A never-pushed provider always pushes the first event, even if monotonic < interval."""
     monkeypatch.setattr("time.monotonic", lambda: 0.25)
     provider, registry = make_provider(push_interval=1.0)
@@ -245,9 +242,7 @@ def test_first_event_pushes_even_when_monotonic_below_interval(
     assert len(registry.pushed) == 1  # 0.0s elapsed < 1.0s interval -> suppressed
 
 
-def test_push_throttled_until_interval_elapses(
-    monkeypatch: pytest.MonkeyPatch, make_provider
-) -> None:
+def test_push_throttled_until_interval_elapses(monkeypatch: pytest.MonkeyPatch, make_provider) -> None:
     """Later pushes are suppressed until push_interval has elapsed since the last push."""
     ticks = iter([100.0, 101.0, 120.0, 121.0])
     monkeypatch.setattr("time.monotonic", lambda: next(ticks))
@@ -259,9 +254,7 @@ def test_push_throttled_until_interval_elapses(
     assert len(registry.pushed) == 2
 
 
-def test_push_at_exact_interval_boundary(
-    monkeypatch: pytest.MonkeyPatch, make_provider
-) -> None:
+def test_push_at_exact_interval_boundary(monkeypatch: pytest.MonkeyPatch, make_provider) -> None:
     """elapsed == push_interval triggers a push (the >= boundary is inclusive)."""
     ticks = iter([100.0, 110.0, 110.0])
     monkeypatch.setattr("time.monotonic", lambda: next(ticks))

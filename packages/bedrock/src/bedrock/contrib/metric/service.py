@@ -26,9 +26,7 @@ class _Handle:
         self._tags = tags
 
     def _emit(self, value: float) -> None:
-        self._manager._emit(
-            MetricEvent(type=self._metric_type, name=self._name, value=value, tags=self._tags)
-        )
+        self._manager._emit(MetricEvent(type=self._metric_type, name=self._name, value=value, tags=self._tags))
 
 
 class Counter(_Handle):
