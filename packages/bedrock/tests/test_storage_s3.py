@@ -98,8 +98,8 @@ def _configured_service(
             region_name=_REGION,
             endpoint_url=endpoint_url,
             default_acl=default_acl,
+            cdn_base_url=cdn_base_url,
         ),
-        cdn_base_url=cdn_base_url,
     )
     return service
 

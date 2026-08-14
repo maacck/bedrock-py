@@ -84,6 +84,7 @@ storage.upload(
 | `STORAGE_S3_SESSION_TOKEN` | unset | Session token |
 | `STORAGE_S3_ENDPOINT_URL` | unset | Custom endpoint (MinIO, etc.) |
 | `STORAGE_S3_DEFAULT_ACL` | unset | Bucket-level default canned ACL |
+| `STORAGE_S3_CDN_BASE_URL` | unset | CDN origin for access/preview URL host rewriting |
 
 Supported canned ACLs: `private`, `public-read`, `public-read-write`, `authenticated-read`, `aws-exec-read`, `bucket-owner-read`, `bucket-owner-full-control`.
 
@@ -163,13 +164,12 @@ The `acl` switch on the access/preview helpers decides whether the URL is signed
 Pass a public `acl` to the URL helpers only for objects that are actually public — the resulting URL is unsigned and anonymously readable.
 </Callout>
 
-When a CDN is configured, the hosts of `get_access_url()` / `get_preview_url()` results are rewritten to it — signed or unsigned — with the query string preserved. `get_signed_url()` is **never** rewritten.
+The CDN origin is configured on the S3 backend's settings — `S3StorageSettings(cdn_base_url=...)` or the `STORAGE_S3_CDN_BASE_URL` env var — not as a `configure()` argument. Rewriting is a service-level behavior that reads the CDN origin from the active backend's settings: when set, the hosts of `get_access_url()` / `get_preview_url()` results are rewritten to it — signed or unsigned — with the query string preserved. `get_signed_url()` is **never** rewritten.
 
 ```python
 storage.configure(
     "s3",
-    settings=S3StorageSettings(bucket_name="my-bucket"),
-    cdn_base_url="https://cdn.example.com",
+    settings=S3StorageSettings(bucket_name="my-bucket", cdn_base_url="https://cdn.example.com"),
 )
 
 storage.get_access_url("media/avatar/a1.png", acl="public-read")

@@ -1,6 +1,7 @@
 """Tests for StorageService: key normalization, backend configuration, registry."""
 
 from collections.abc import Iterable
+from types import SimpleNamespace
 
 import pytest
 from bedrock.contrib.storage import (
@@ -15,6 +16,7 @@ from bedrock.contrib.storage import (
 )
 from bedrock.contrib.storage.entities import StorageListEntry, StorageListResult
 from bedrock.contrib.storage.service import StorageService
+from pydantic_settings import BaseSettings
 
 
 class StubBackend:
@@ -23,6 +25,12 @@ class StubBackend:
     def __init__(self, settings=None) -> None:
         self.objects: dict[str, bytes] = {}
         self.seen_keys: list[str] = []
+        self._settings = settings or SimpleNamespace()
+
+    @property
+    def settings(self) -> BaseSettings:
+        """Return the settings used to configure this backend."""
+        return self._settings
 
     def upload(self, storage_key: str, data, mime_type=None, provider_metadata=None, acl=None) -> StorageUploadResult:
         self.seen_keys.append(storage_key)
@@ -180,10 +188,10 @@ def test_upload_passes_acl(svc: StorageService) -> None:
 
 
 def test_cdn_rewrites_access_and_preview_urls() -> None:
-    """configured cdn_base_url rewrites the host of access/preview URLs only, preserving query params."""
+    """A settings-level cdn_base_url rewrites the host of access/preview URLs only, preserving query params."""
     service = StorageService()
     register_backend("stub", StubBackend)
-    service.configure("stub", cdn_base_url="https://cdn.example.com")
+    service.configure("stub", settings=SimpleNamespace(cdn_base_url="https://cdn.example.com"))
     try:
         access = service.get_access_url("a/b.txt")
         assert access.startswith("https://cdn.example.com/a/b.txt")

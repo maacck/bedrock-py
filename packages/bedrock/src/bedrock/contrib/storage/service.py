@@ -79,27 +79,26 @@ class StorageService:
     """
 
     _backend: StorageBackend | None
-    _cdn_base_url: str | None
 
     def __init__(self) -> None:
         self._backend = None
-        self._cdn_base_url = None
 
     def configure(
         self,
         backend_name: str = "local",
         settings: BaseSettings | None = None,
-        cdn_base_url: str | None = None,
     ) -> StorageBackend:
         """Configure the storage service with a specific backend.
 
         Args:
             backend_name: Backend identifier (``"local"``, ``"s3"``).
             settings: Optional settings instance. If ``None``, the backend's
-                default settings (env-driven) are used.
-            cdn_base_url: Optional CDN origin (e.g. ``"https://cdn.example.com"``).
-                When set, the hosts of URLs from :meth:`get_access_url` and
-                :meth:`get_preview_url` are rewritten to it (query params kept).
+                default settings (env-driven) are used. When the active
+                backend's settings carry a CDN origin (``cdn_base_url``, e.g.
+                on :class:`~bedrock.contrib.storage.S3StorageSettings`), the
+                hosts of URLs from :meth:`get_access_url` and
+                :meth:`get_preview_url` are rewritten to it (query params
+                kept); :meth:`get_signed_url` is never rewritten.
 
         Returns:
             The newly configured backend instance.
@@ -120,7 +119,6 @@ class StorageService:
             raise StorageBackendNotConfiguredError(f"Failed to load backend '{backend_name}'.")
 
         self._backend = backend_cls(settings=settings)
-        self._cdn_base_url = cdn_base_url
         return self._backend
 
     def get_backend(self) -> StorageBackend:
@@ -141,11 +139,10 @@ class StorageService:
         return sorted(_BACKEND_REGISTRY.keys())
 
     def close(self) -> None:
-        """Close backend connections and clear the CDN configuration."""
+        """Close backend connections and reset the configured backend."""
         if self._backend is not None:
             self._backend.close()
             self._backend = None
-        self._cdn_base_url = None
 
     def upload(
         self,
@@ -257,11 +254,13 @@ class StorageService:
             raise StorageError(msg=f"expires_in must be a positive integer, got {expires_in!r}.")
 
     def _rewrite_with_cdn(self, url: str) -> str:
-        """Replace the URL host with the configured CDN origin, keeping path and query."""
-        if not self._cdn_base_url:
+        """Replace the URL host with the CDN origin from the active backend's settings, keeping path and query."""
+        settings = getattr(self.get_backend(), "settings", None)
+        cdn_base_url = getattr(settings, "cdn_base_url", None) if settings is not None else None
+        if not cdn_base_url:
             return url
         parsed = urlparse(url)
-        cdn = urlparse(self._cdn_base_url)
+        cdn = urlparse(cdn_base_url)
         return urlunparse(
             (
                 cdn.scheme or parsed.scheme,

@@ -4,6 +4,8 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import BinaryIO, Protocol
 
+from pydantic_settings import BaseSettings
+
 from .entities import StorageListResult, StorageObject, StorageUploadResult
 
 
@@ -13,6 +15,9 @@ class StorageBackend(Protocol):
     Backends receive already-normalized ``storage_key`` values; the service
     performs validation and normalization before delegation.
     """
+
+    @property
+    def settings(self) -> BaseSettings: ...
 
     def upload(
         self,

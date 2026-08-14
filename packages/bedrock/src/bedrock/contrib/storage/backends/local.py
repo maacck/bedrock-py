@@ -51,6 +51,11 @@ class LocalBackend:
         if self._settings.create_dir:
             self._root.mkdir(parents=True, exist_ok=True)
 
+    @property
+    def settings(self) -> LocalStorageSettings:
+        """Return the settings used to configure this backend."""
+        return self._settings
+
     def _path(self, storage_key: str) -> Path:
         """Return the absolute on-disk path for ``storage_key``, enforcing containment.
 

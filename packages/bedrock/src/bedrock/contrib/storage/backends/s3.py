@@ -47,6 +47,9 @@ class S3StorageSettings(BaseSettings):
     session_token: str | None = None
     endpoint_url: str | None = None
     default_acl: str | None = None
+    #: CDN origin (e.g. "https://cdn.example.com") for access/preview URL host
+    #: rewriting; see StorageService.configure.
+    cdn_base_url: str | None = None
 
 
 class S3Backend:
@@ -78,6 +81,11 @@ class S3Backend:
             config=Config(signature_version="s3v4"),
         )
         self._bucket = self._settings.bucket_name
+
+    @property
+    def settings(self) -> S3StorageSettings:
+        """Return the settings used to configure this backend."""
+        return self._settings
 
     @staticmethod
     def _is_not_found(exc: Exception) -> bool:

@@ -84,6 +84,7 @@ storage.upload(
 | `STORAGE_S3_SESSION_TOKEN` | 未设置 | 会话令牌 |
 | `STORAGE_S3_ENDPOINT_URL` | 未设置 | 自定义端点（MinIO 等） |
 | `STORAGE_S3_DEFAULT_ACL` | 未设置 | 桶级别的默认 canned ACL |
+| `STORAGE_S3_CDN_BASE_URL` | 未设置 | 用于访问/预览 URL host 重写的 CDN 源站 |
 
 支持的 canned ACL：`private`、`public-read`、`public-read-write`、`authenticated-read`、`aws-exec-read`、`bucket-owner-read`、`bucket-owner-full-control`。
 
@@ -163,13 +164,12 @@ S3 可以提供三种 URL：
 只有对真正公开的对象才向 URL 助手传入公开 `acl`——生成的 URL 未签名，可被匿名读取。
 </Callout>
 
-配置 CDN 后，`get_access_url()` / `get_preview_url()` 结果的 host 会被重写到 CDN——无论签名与否——查询字符串保持不变。`get_signed_url()` **永不**被重写。
+CDN 源站配置在 S3 后端的设置上——`S3StorageSettings(cdn_base_url=...)` 或 `STORAGE_S3_CDN_BASE_URL` 环境变量——而不是 `configure()` 的参数。重写是服务层行为，从当前后端的设置中读取 CDN 源站：配置后，`get_access_url()` / `get_preview_url()` 结果的 host 会被重写到 CDN——无论签名与否——查询字符串保持不变。`get_signed_url()` **永不**被重写。
 
 ```python
 storage.configure(
     "s3",
-    settings=S3StorageSettings(bucket_name="my-bucket"),
-    cdn_base_url="https://cdn.example.com",
+    settings=S3StorageSettings(bucket_name="my-bucket", cdn_base_url="https://cdn.example.com"),
 )
 
 storage.get_access_url("media/avatar/a1.png", acl="public-read")
