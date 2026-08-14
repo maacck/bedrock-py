@@ -134,7 +134,12 @@ class LocalBackend:
             raise StorageDownloadError(msg=f"Failed to download {storage_key!r}: {exc}") from exc
         if not stat.S_ISREG(stat_result.st_mode):
             raise StorageObjectNotFoundError(msg=f"Object {storage_key!r} does not exist.")
-        return path.read_bytes()
+        try:
+            return path.read_bytes()
+        except FileNotFoundError as exc:
+            raise StorageObjectNotFoundError(msg=f"Object {storage_key!r} does not exist.") from exc
+        except OSError as exc:
+            raise StorageDownloadError(msg=f"Failed to download {storage_key!r}: {exc}") from exc
 
     def stream(self, storage_key: str, chunk_size: int = 1_048_576) -> Iterable[bytes]:
         """Yield the object content in chunks."""
@@ -154,6 +159,8 @@ class LocalBackend:
                     if not chunk:
                         return
                     yield chunk
+        except FileNotFoundError as exc:
+            raise StorageObjectNotFoundError(msg=f"Object {storage_key!r} does not exist.") from exc
         except OSError as exc:
             raise StorageDownloadError(msg=f"Failed to stream {storage_key!r}: {exc}") from exc
 
@@ -333,14 +340,29 @@ class LocalBackend:
         """Return ``True`` when the subtree at ``path`` holds at least one object file.
 
         Metadata sidecars (``*.bmeta.json``) do not count as objects.
+        Directory symlinks are never traversed and symlinked entries are
+        skipped entirely, so a symlink escaping the backend root cannot leak
+        its target's content into ``list()``; every counted file must also
+        resolve inside the root (the same containment ``_path`` enforces).
         Short-circuits on the first regular file; subtrees that cannot be
         walked are treated as empty so unreadable or vanishing directories are
         simply not emitted.
         """
+        root = self._root.resolve()
         try:
-            for child in path.rglob("*"):
-                if child.is_file() and not child.name.endswith(_METADATA_SUFFIX):
-                    return True
+            pending = [path]
+            while pending:
+                current = pending.pop()
+                if current.is_symlink():
+                    continue
+                for child in current.iterdir():
+                    if child.is_symlink():
+                        continue
+                    if child.is_dir():
+                        pending.append(child)
+                    elif child.is_file() and not child.name.endswith(_METADATA_SUFFIX):
+                        if child.resolve().is_relative_to(root):
+                            return True
         except OSError:
             return False
         return False

@@ -1,11 +1,13 @@
 """Tests for the local filesystem storage backend."""
 
 import os
+import shutil
 from pathlib import Path
 
 import pytest
 from bedrock.contrib.storage import (
     LocalStorageSettings,
+    StorageDownloadError,
     StorageKeyError,
     StorageObjectNotFoundError,
     StorageUploadError,
@@ -87,6 +89,34 @@ def test_download_missing_raises(svc: StorageService) -> None:
     """download() on a missing object raises StorageObjectNotFoundError."""
     with pytest.raises(StorageObjectNotFoundError):
         svc.download("nope.txt")
+
+
+def test_download_read_failure_maps_to_storage_download_error(
+    svc: StorageService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A read-time failure during download() surfaces as StorageDownloadError."""
+    svc.upload("r.txt", b"data")
+
+    def _raise_permission_error(_self: Path) -> bytes:
+        raise PermissionError("simulated read failure")
+
+    monkeypatch.setattr(Path, "read_bytes", _raise_permission_error)
+    with pytest.raises(StorageDownloadError):
+        svc.download("r.txt")
+
+
+def test_stream_open_failure_maps_to_storage_download_error(
+    svc: StorageService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An open-time failure during stream() surfaces as StorageDownloadError."""
+    svc.upload("s.txt", b"data")
+
+    def _raise_permission_error(_self: Path, *_args: object, **_kwargs: object) -> object:
+        raise PermissionError("simulated open failure")
+
+    monkeypatch.setattr(Path, "open", _raise_permission_error)
+    with pytest.raises(StorageDownloadError):
+        list(svc.stream("s.txt"))
 
 
 def test_head_and_delete(svc: StorageService) -> None:
@@ -181,6 +211,26 @@ def test_list_omits_empty_directories(svc: StorageService, tmp_path: Path) -> No
     svc.delete("a/1.txt")
     svc.delete("a/2.txt")
     assert svc.list().items == []
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="os.symlink not supported")
+def test_list_ignores_directory_symlink_escaping_root(svc: StorageService, tmp_path: Path) -> None:
+    """list() never emits a symlinked directory whose target escapes the root.
+
+    A symlinked directory under the root pointing at a tree outside the root
+    must not be surfaced as an object-backed directory: its content cannot be
+    accessed through the storage API (the containment guard rejects the key)
+    and must not be revealed by list().
+    """
+    outside = tmp_path.parent / f"{tmp_path.name}-outside"
+    outside.mkdir(exist_ok=True)
+    (outside / "secret.txt").write_text("secret")
+    (tmp_path / "linked").symlink_to(outside, target_is_directory=True)
+    try:
+        keys = [entry.storage_key for entry in svc.list().items]
+        assert keys == []
+    finally:
+        shutil.rmtree(outside, ignore_errors=True)
 
 
 def test_provider_metadata_follows_move_and_copy(svc: StorageService) -> None:
