@@ -51,6 +51,18 @@ def _check_installation_hooks(func: Callable):
         )
 
 
+def _validate_installation_hooks(app_name: str) -> bool:
+    """Validate optional installation-hook signatures without executing them."""
+    hooks_found = False
+    for hook_name in ("install", "pre_install", "post_install"):
+        hook = load_optional_callable(f"{app_name}.installation:{hook_name}")
+        if hook is None:
+            continue
+        hooks_found = True
+        _check_installation_hooks(hook)
+    return hooks_found
+
+
 def _run_basic_inspect(import_path: str, console: Console) -> InspectResult:
     """Validate manifest, loadability, submodules, and installation hooks with console output."""
     result = InspectResult(import_path=import_path)
@@ -86,25 +98,13 @@ def _run_basic_inspect(import_path: str, console: Console) -> InspectResult:
         return result
 
     try:
-        installation = load_optional_callable(f"{app_config.name}.installation:install")
-        if not installation:
-            result.errors.append(f"No 'install' function found in installation.py for {app_config.name}.")
+        result.installation_valid = _validate_installation_hooks(app_config.name)
+        if result.installation_valid:
             console.print(
-                f"[bold red]✗[/bold red] No 'install' function found in installation.py for {app_config.name}."
+                f"[bold green]✓[/bold green] Installation hooks for '{app_config.name}' are valid (not executed)."
             )
-            return result
-        _check_installation_hooks(installation)
-        pre_install = load_optional_callable(f"{app_config.name}.installation:pre_install")
-        if pre_install:
-            _check_installation_hooks(pre_install)
-        installation()
-        post_install = load_optional_callable(f"{app_config.name}.installation:post_install")
-        if post_install:
-            _check_installation_hooks(post_install)
-        result.installation_valid = True
-        console.print(
-            f"[bold green]✓[/bold green] Installation hooks for '{app_config.name}' are valid and executable."
-        )
+        else:
+            console.print("[bold yellow]![/bold yellow] No installation hooks found; validation skipped.")
     except (InvalidModuleCallableError, ModuleError) as exc:
         result.errors.append(f"Installation hook check failed: {exc}")
         console.print(f"[bold red]✗[/bold red] Installation hook check failed: {exc}")
@@ -138,19 +138,7 @@ def _inspect_dependency(dep_path: str) -> InspectResult:
         return result
 
     try:
-        installation = load_optional_callable(f"{app_config.name}.installation:install")
-        if not installation:
-            result.errors.append(f"No 'install' function in installation.py for {app_config.name}.")
-            return result
-        _check_installation_hooks(installation)
-        pre_install = load_optional_callable(f"{app_config.name}.installation:pre_install")
-        if pre_install:
-            _check_installation_hooks(pre_install)
-        installation()
-        post_install = load_optional_callable(f"{app_config.name}.installation:post_install")
-        if post_install:
-            _check_installation_hooks(post_install)
-        result.installation_valid = True
+        result.installation_valid = _validate_installation_hooks(app_config.name)
     except (InvalidModuleCallableError, ModuleError) as exc:
         result.errors.append(f"Installation: {exc}")
 
@@ -161,11 +149,11 @@ def _inspect_dependency(dep_path: str) -> InspectResult:
 def inspect(
     import_path: str = typer.Argument(..., help="Python import path of the module, e.g., ''bedrock.contrib.cache''."),
 ) -> None:
-    """Inspect a module''s manifest format and loadability.
+    """Inspect a module without executing installation logic.
 
     Validates the manifest.yaml structure, checks bootstrap and models
-    submodules, installation hooks, and verifies that all declared
-    dependencies (depends_on) are importable and pass basic checks.
+    submodules, validates optional installation-hook signatures, and verifies
+    that all declared dependencies (depends_on) are importable and pass basic checks.
 
     Args:
         import_path: Python import path of the module.
@@ -213,7 +201,9 @@ def inspect(
             _status_icon(dep_result.module_loads),
             _status_icon(dep_result.has_bootstrap, optional=True),
             _status_icon(dep_result.has_models, optional=True),
-            _status_icon(dep_result.installation_valid),
+            _status_icon(
+                dep_result.installation_valid, optional=not dep_result.installation_valid and not dep_result.errors
+            ),
             "; ".join(dep_result.errors) if dep_result.errors else "",
         )
 
