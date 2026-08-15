@@ -74,18 +74,21 @@ class TestAppsHelpers:
         with pytest.raises(InvalidModuleCallableError, match=r"must accept \*\*kwargs"):
             cli_apps._check_installation_hooks(install)
 
-    def test_inspect_dependency_executes_installation_hooks(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        install_calls: list[dict[str, object]] = []
+    def test_inspect_dependency_validates_hooks_without_execution(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        hook_calls: list[str] = []
         validated_hooks: list[str] = []
 
         def install(**kwargs: object) -> None:
-            install_calls.append(kwargs)
+            del kwargs
+            hook_calls.append("install")
 
         def pre_install(**kwargs: object) -> None:
             del kwargs
+            hook_calls.append("pre_install")
 
         def post_install(**kwargs: object) -> None:
             del kwargs
+            hook_calls.append("post_install")
 
         monkeypatch.setattr(cli_apps, "find_spec", lambda dep_path: object())
         monkeypatch.setattr(cli_apps, "load_manifest", lambda dep_path: object())
@@ -96,12 +99,12 @@ class TestAppsHelpers:
         )
         monkeypatch.setattr(
             cli_apps,
-            "load_optional_callable",
-            lambda path: {
-                "demo.app.installation:install": install,
-                "demo.app.installation:pre_install": pre_install,
-                "demo.app.installation:post_install": post_install,
-            }.get(path),
+            "_load_optional_installation_hook",
+            lambda app_name, hook_name: {
+                "pre_install": pre_install,
+                "install": install,
+                "post_install": post_install,
+            }.get(hook_name),
         )
         monkeypatch.setattr(cli_apps, "_check_installation_hooks", lambda func: validated_hooks.append(func.__name__))
 
@@ -115,9 +118,50 @@ class TestAppsHelpers:
         assert result.installation_valid is True
         assert result.errors == []
         assert validated_hooks == ["install", "pre_install", "post_install"]
-        assert install_calls == [{}]
+        assert hook_calls == []
 
-    def test_inspect_dependency_reports_missing_install_function(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_basic_inspect_validates_hooks_without_execution(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        hook_calls: list[str] = []
+
+        def install(**kwargs: object) -> None:
+            del kwargs
+            hook_calls.append("install")
+
+        monkeypatch.setattr(cli_apps, "load_manifest", lambda import_path: object())
+        monkeypatch.setattr(
+            cli_apps,
+            "build_app_config",
+            lambda import_path: SimpleNamespace(name=import_path, bootstrap_module=None, models_module=None),
+        )
+        monkeypatch.setattr(
+            cli_apps,
+            "_load_optional_installation_hook",
+            lambda app_name, hook_name: install if hook_name == "install" else None,
+        )
+
+        result = cli_apps._run_basic_inspect("demo.app", MagicMock())
+
+        assert result.installation_valid is True
+        assert result.errors == []
+        assert hook_calls == []
+
+    def test_basic_inspect_allows_missing_installation_hooks(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        console = MagicMock()
+        monkeypatch.setattr(cli_apps, "load_manifest", lambda import_path: object())
+        monkeypatch.setattr(
+            cli_apps,
+            "build_app_config",
+            lambda import_path: SimpleNamespace(name=import_path, bootstrap_module=None, models_module=None),
+        )
+        monkeypatch.setattr(cli_apps, "_load_optional_installation_hook", lambda app_name, hook_name: None)
+
+        result = cli_apps._run_basic_inspect("demo.app", console)
+
+        assert result.installation_valid is False
+        assert result.errors == []
+        console.print.assert_any_call("[bold yellow]![/bold yellow] No installation hooks found; validation skipped.")
+
+    def test_inspect_dependency_allows_missing_installation_hooks(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(cli_apps, "find_spec", lambda dep_path: object())
         monkeypatch.setattr(cli_apps, "load_manifest", lambda dep_path: object())
         monkeypatch.setattr(
@@ -125,14 +169,94 @@ class TestAppsHelpers:
             "build_app_config",
             lambda dep_path: SimpleNamespace(name=dep_path, bootstrap_module=None, models_module=None),
         )
-        monkeypatch.setattr(cli_apps, "load_optional_callable", lambda path: None)
+        monkeypatch.setattr(cli_apps, "_load_optional_installation_hook", lambda app_name, hook_name: None)
 
         result = cli_apps._inspect_dependency("demo.app")
 
-        assert result.manifest_valid is True
-        assert result.module_loads is True
         assert result.installation_valid is False
-        assert result.errors == ["No 'install' function in installation.py for demo.app."]
+        assert result.errors == []
+
+    def test_inspect_dependency_reports_invalid_present_hook(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def install() -> None:
+            return None
+
+        monkeypatch.setattr(cli_apps, "find_spec", lambda dep_path: object())
+        monkeypatch.setattr(cli_apps, "load_manifest", lambda dep_path: object())
+        monkeypatch.setattr(
+            cli_apps,
+            "build_app_config",
+            lambda dep_path: SimpleNamespace(name=dep_path, bootstrap_module=None, models_module=None),
+        )
+        monkeypatch.setattr(
+            cli_apps,
+            "_load_optional_installation_hook",
+            lambda app_name, hook_name: install if hook_name == "install" else None,
+        )
+
+        result = cli_apps._inspect_dependency("demo.app")
+
+        assert result.installation_valid is False
+        assert len(result.errors) == 1
+        assert "must accept **kwargs" in result.errors[0]
+
+    def test_validate_installation_hooks_allows_missing_installation_module(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def import_missing(module_name: str) -> object:
+            raise ModuleNotFoundError(f"No module named '{module_name}'", name=module_name)
+
+        monkeypatch.setattr(cli_apps, "import_module", import_missing)
+
+        assert cli_apps._validate_installation_hooks("demo.app") is False
+
+    def test_basic_inspect_reports_broken_installation_import(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(cli_apps, "load_manifest", lambda import_path: object())
+        monkeypatch.setattr(
+            cli_apps,
+            "build_app_config",
+            lambda import_path: SimpleNamespace(name=import_path, bootstrap_module=None, models_module=None),
+        )
+
+        def import_broken(module_name: str) -> object:
+            raise ModuleNotFoundError("No module named 'required_dependency'", name="required_dependency")
+
+        monkeypatch.setattr(cli_apps, "import_module", import_broken)
+
+        result = cli_apps._run_basic_inspect("demo.app", MagicMock())
+
+        assert result.installation_valid is False
+        assert result.errors == [
+            "Installation hook check failed: Cannot import installation module "
+            "'demo.app.installation': No module named 'required_dependency'"
+        ]
+
+    def test_inspect_dependency_reports_broken_installation_import(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(cli_apps, "find_spec", lambda dep_path: object())
+        monkeypatch.setattr(cli_apps, "load_manifest", lambda dep_path: object())
+        monkeypatch.setattr(
+            cli_apps,
+            "build_app_config",
+            lambda dep_path: SimpleNamespace(name=dep_path, bootstrap_module=None, models_module=None),
+        )
+
+        def import_broken(module_name: str) -> object:
+            raise ModuleNotFoundError("No module named 'required_dependency'", name="required_dependency")
+
+        monkeypatch.setattr(cli_apps, "import_module", import_broken)
+
+        result = cli_apps._inspect_dependency("demo.app")
+
+        assert result.installation_valid is False
+        assert result.errors == [
+            "Installation: Cannot import installation module 'demo.app.installation': "
+            "No module named 'required_dependency'"
+        ]
+
+    def test_validate_installation_hooks_rejects_non_callable_hook(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(cli_apps, "import_module", lambda module_name: SimpleNamespace(install=42))
+
+        with pytest.raises(InvalidModuleCallableError, match="is not callable"):
+            cli_apps._validate_installation_hooks("demo.app")
 
 
 class TestInstallCommand:

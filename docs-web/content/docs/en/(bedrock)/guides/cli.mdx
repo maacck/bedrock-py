@@ -33,7 +33,7 @@ Commands for inspecting and managing Bedrock modules.
 
 ### `bedrock app inspect`
 
-Validate a module's manifest and loadability.
+Validate a module's manifest, loadability, and optional installation-hook signatures without executing installation logic.
 
 ```bash
 bedrock app inspect <import_path>
@@ -44,7 +44,7 @@ bedrock app inspect <import_path>
 2. Module can be imported successfully
 3. Bootstrap submodule exists
 4. Models submodule exists
-5. Installation hooks are valid
+5. Present installation hooks accept the required `**kwargs` signature; no hook is invoked
 
 **Example:**
 
@@ -55,8 +55,10 @@ $ bedrock app inspect myapp.users
 ✓ Module 'myapp.users' loads successfully.
 ✓ Bootstrap submodule is available.
 ! No models submodule found.
-✓ Installation hooks for 'myapp.users' are valid and executable.
+✓ Installation hooks for 'myapp.users' are valid (not executed).
 ```
+
+`installation.py` and its hooks are optional. Use `bedrock app install <import_path>` to run the installation lifecycle hooks.
 
 **Exit codes:**
 - `0` — All checks passed
@@ -92,14 +94,14 @@ Commands     commands:app
 
 ### `bedrock app install`
 
-Install a Bedrock module (runs migrations and hooks).
+Install a Bedrock module: ensure its database schema is current, then run its optional installation lifecycle hooks.
 
 ```bash
 bedrock app install <import_path>
 ```
 
-<Callout type="warning">
-This command is currently a placeholder. Use `bedrock manage install` for full installation with migrations and hooks.
+<Callout type="info">
+`installation.py` is optional. When its `install` callable is present, Bedrock runs `pre_install` → `install` → `post_install`.
 </Callout>
 
 ---
