@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from importlib import import_module
 from importlib.util import find_spec
 from pathlib import Path
 
@@ -51,11 +52,33 @@ def _check_installation_hooks(func: Callable):
         )
 
 
+def _load_optional_installation_hook(app_name: str, hook_name: str) -> Callable[..., object] | None:
+    """Load an optional installation hook without masking module import errors."""
+    module_name = f"{app_name}.installation"
+    try:
+        module = import_module(module_name)
+    except ModuleNotFoundError as exc:
+        if exc.name == module_name:
+            return None
+        raise InvalidModuleCallableError(f"Cannot import installation module '{module_name}': {exc}") from exc
+    except ImportError as exc:
+        raise InvalidModuleCallableError(f"Cannot import installation module '{module_name}': {exc}") from exc
+
+    try:
+        hook = getattr(module, hook_name)
+    except AttributeError:
+        return None
+
+    if not callable(hook):
+        raise InvalidModuleCallableError(f"Installation hook '{module_name}:{hook_name}' is not callable.")
+    return hook
+
+
 def _validate_installation_hooks(app_name: str) -> bool:
     """Validate optional installation-hook signatures without executing them."""
     hooks_found = False
     for hook_name in ("install", "pre_install", "post_install"):
-        hook = load_optional_callable(f"{app_name}.installation:{hook_name}")
+        hook = _load_optional_installation_hook(app_name, hook_name)
         if hook is None:
             continue
         hooks_found = True
