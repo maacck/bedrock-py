@@ -1,0 +1,253 @@
+---
+title: 指标
+description: 应用指标 — 计数器/仪表/计时器、装饰器与可插拔 Provider（StatsD、Sentry、Prometheus pushgateway），与业务代码硬隔离
+---
+
+Bedrock 内置了一套官方指标子系统：计数器/仪表/计时器句柄与装饰器、硬编码日志器，以及可插拔 Provider（StatsD、Sentry、Prometheus pushgateway）。埋点全部同步执行且**永不抛异常**——出错的 Provider 无法破坏业务代码。整个子系统位于 `bedrock.contrib.metric` 下。
+
+## 快速开始
+
+`metrics` 单例负责创建句柄；每次发射都会写入一条日志记录，并扇出（fan-out）到所有已注册的 Provider。
+
+```python
+from bedrock.contrib.metric import metrics
+
+# Decorator (sync or async): increments by 1 on every call
+@metrics.counter("user.login.count", tags={"realm": "cn"})
+def login(user_id: str) -> bool:
+    ...
+
+# Async timer decorator: records elapsed seconds per call
+@metrics.timer("http.request.duration")
+async def handler(request):
+    ...
+
+# Context manager timer
+with metrics.timer("db.query.duration"):
+    rows = db.query(...)
+```
+
+每次发射都会向 `bedrock.contrib.metric` 日志器写入一条日志记录，默认严重级别为 `INFO`。管理器不会安装日志 handler——请先配置标准 logging 以观察输出：
+
+```python
+import logging
+
+logging.basicConfig(level=logging.INFO)
+```
+
+没有注册任何 Provider 时，日志记录就是唯一的输出：
+
+```
+metric counter user.login.count=1.0 tags={'realm': 'cn'}
+metric timer http.request.duration=0.042 tags={}
+```
+
+这就是核心使用循环。本页其余部分会介绍指标类型、Provider 与隔离保证。
+
+## 指标类型
+
+三种句柄类型都从单例创建。所有句柄都接受 `tags=None`，并在创建时复制该映射。
+
+### 计数器
+
+计数器——调用 `inc()` 或用作装饰器。小数增量会被完整保留。`inc()` 不校验增量：为保证可移植行为，请保持增量非负，因为 Provider 可能拒绝有符号负增量（例如 Prometheus 计数器）。
+
+```python
+from bedrock.contrib.metric import metrics
+
+logins = metrics.counter("user.login.count", tags={"realm": "cn"})
+logins.inc()       # +1
+logins.inc(2.5)    # +2.5, fractional deltas preserved
+
+@metrics.counter("http.requests")
+def handle(request):
+    ...            # increments by 1 on every call (sync or async)
+```
+
+### 仪表
+
+当前状态仪表——只能 `set()`；**仪表没有装饰器**。
+
+```python
+from bedrock.contrib.metric import metrics
+
+connections = metrics.gauge("db.connections")
+connections.set(12)
+```
+
+### 计时器
+
+经过的秒数——三种用法：装饰器（同步或异步）、上下文管理器、显式 `observe()`。
+
+```python
+from bedrock.contrib.metric import metrics
+
+# Decorator (sync or async)
+@metrics.timer("render.duration")
+def render(...):
+    ...
+
+# Context manager
+with metrics.timer("db.query.duration"):
+    rows = db.query(...)
+
+# Manual observation, value in seconds
+timer = metrics.timer("worker.batch.duration")
+timer.observe(1.24)
+```
+
+## Provider
+
+Provider 是带有 `emit(event)` 与 `close()` 的普通对象。想注册多少就注册多少——每个事件都会广播给**所有** Provider。不存在 `configure()`，也没有默认 Provider：Provider 是添加的，而不是选择的。
+
+```python
+from bedrock.contrib.metric import metrics, StatsDProvider, StatsDSettings
+from bedrock.contrib.metric import SentryProvider
+from bedrock.contrib.metric import PrometheusPushProvider, PrometheusPushSettings
+
+metrics.register_provider(StatsDProvider(settings=StatsDSettings(host="127.0.0.1")))
+metrics.register_provider(SentryProvider())
+metrics.register_provider(PrometheusPushProvider(
+    settings=PrometheusPushSettings(gateway_url="http://pushgateway:9091")))
+```
+
+### StatsD
+
+零依赖的 UDP 后端——无需额外安装。线路格式：计数器 `name:value|c`、仪表 `name:value|g`、计时器 `name:<ms>|ms`（由秒转换）。数值保持完整浮点精度（`1.23456789` 原样保留），整数值浮点不带尾随 `.0`，标签使用 Datadog 语法 `|#k:v,k2:v2` 且键名排序。UDP socket 在首次发射时惰性创建。
+
+| 设置 | 默认值 | 说明 |
+|---------|---------|-------------|
+| `STATSD_HOST` | `"127.0.0.1"` | UDP 主机 |
+| `STATSD_PORT` | `"8125"` | UDP 端口 |
+| `STATSD_PREFIX` | `""` | 附加到每个指标名称前的前缀 |
+
+### Sentry
+
+将指标转发给 Sentry SDK（`sentry_sdk.metrics`）。映射：counter → `count`、gauge → `gauge`、timer → `distribution`（单位 `"second"`）。标签会作为 Sentry attributes 原样传递。Sentry SDK 的生命周期由应用管理，因此 `close()` 不释放任何资源。
+
+```bash
+uv add bedrock-core[metric-sentry]
+```
+
+`sentry_sdk` 为惰性导入，因此 `bedrock.contrib.metric` 无需该依赖即可导入。未安装该 extra 时构造 `SentryProvider()` 会抛出 `MetricProviderError`。
+
+### Prometheus Pushgateway
+
+通过 `prometheus_client` 将指标推送到 Prometheus pushgateway。需要可选依赖 `metric-prometheus`。
+
+```bash
+uv add bedrock-core[metric-prometheus]
+```
+
+| 设置 | 默认值 | 说明 |
+|---------|---------|-------------|
+| `METRIC_PROMETHEUS_GATEWAY_URL` | `""` | Pushgateway URL（必填；缺失 → `MetricConfigurationError`） |
+| `METRIC_PROMETHEUS_JOB` | `"bedrock-app"` | Pushgateway job 名称 |
+| `METRIC_PROMETHEUS_PUSH_INTERVAL` | `"1.0"` | 两次推送之间的最小间隔秒数 |
+
+每个指标名称注册一个 collector；其类型与标签键模式在**首次观测时固定**。映射：counter → `Counter`、gauge → `Gauge`、timer → `Histogram`（经过秒数）。之后若某个事件改变了类型或标签键集合，会抛出 `ValueError`——由管理器隔离，绝不会到达业务代码——而不是尝试重复注册到 registry。
+
+每次发射都会在节流检查**之前**更新保留的 collector 状态：计数器累加增量、仪表保存最新值、直方图累加观测值。注册表在首个事件时推送（即使单调时钟尚未达到间隔），之后至多每 `push_interval` 秒推送一次——每次符合推送条件的发射都会推送**累计**的注册表状态。不存在事件队列，也没有后台刷写：落在节流窗口内的发射只更新内存中的 collector，要等到之后某次符合条件的发射才会被推送——如果之后没有任何符合条件的发射，则永远不会推送。基于拉取模式的抓取（`/metrics` 端点）计划在 v2 提供。
+
+```python
+from bedrock.contrib.metric import metrics, PrometheusPushProvider, PrometheusPushSettings
+
+metrics.register_provider(PrometheusPushProvider(
+    settings=PrometheusPushSettings(gateway_url="http://pushgateway:9091")))
+```
+
+## 硬编码日志
+
+日志器内置于管理器，且**无法移除**。每次发射都会先写一条日志记录（严重级别可配置，默认 `INFO`），然后再广播给 Provider。它不是 Provider——没有注册任何 Provider 时，日志记录就是唯一的输出。
+
+`set_log_level()` **只改变分配给每条指标日志记录的严重级别**——仅此而已：它不会安装 handler，也不会改动 stdlib 中 logger 或 handler 的任何配置。之后的日志管线与标准 Python logging 完全一致：源 logger 的有效级别决定记录是否会被创建；一旦创建，记录便会传播，**每个接收的 handler 各自独立应用自己的级别/过滤器**（传播过程中不会重新检查祖先 logger 的级别）。
+
+```python
+import logging
+
+logging.basicConfig(level=logging.INFO)  # root logger level; installs a default handler when none exists
+
+from bedrock.contrib.metric import metrics
+
+metrics.set_log_level(logging.DEBUG)   # records become DEBUG: skipped entirely when the source logger is not configured for DEBUG
+metrics.set_log_level(logging.WARNING) # records become WARNING: visible wherever a receiving handler accepts WARNING
+```
+
+Provider 失败时也会以 `WARNING` 记日志，按（provider, metric）对限制频率：首次出现与每第 100 次出现。
+
+## 隔离保证
+
+埋点永远不会向业务代码抛异常：
+
+- `emit()` 失败会被捕获（`except Exception`，绝不捕获 `BaseException`），并记录为限频警告——调用方与其他 Provider 不受影响。
+- 出错的 Provider **不会被自动禁用**；它们继续接收事件（并继续按每 100 次的节奏告警）。
+- 发射是同步的——没有后台线程、缓冲队列。Provider 会在调用方线程内联执行其 I/O（StatsD `sendto`、Prometheus pushgateway HTTP POST），因此缓慢或不可达的接收端可能会阻塞调用方。派发没有递归保护，因此自定义 Provider **不得**在其 `emit()` 内部向同一个管理器发射（否则会递归）。
+- 异常只会在配置阶段、构造 Provider 时抛出（见[异常层级](#异常层级)）。
+
+## API 参考
+
+`metrics` 单例是一个 `MetricsManager` 实例；模块级的 `register_provider` / `list_providers` 委托给它。
+
+| 方法 | 签名 | 说明 |
+|--------|-----------|-------------|
+| `metrics.counter()` | `counter(name, tags=None) → Counter` | 计数器句柄；`.inc(delta=1)` 或用作 `@counter` 装饰器（同步与异步） |
+| `metrics.gauge()` | `gauge(name, tags=None) → Gauge` | 仪表句柄；只能 `.set(value)`——没有装饰器 |
+| `metrics.timer()` | `timer(name, tags=None) → Timer` | 计时器句柄；`@timer` 装饰器（同步与异步）、上下文管理器或 `.observe(seconds)` |
+| `metrics.set_log_level()` | `set_log_level(level) → None` | 设置分配给每条指标日志记录的严重级别（默认 `logging.INFO`） |
+| `register_provider()` | `register_provider(provider) → None` | 在单例上注册 Provider；按实例幂等 |
+| `list_providers()` | `list_providers() → list[str]` | 已注册 Provider 的类名，按注册顺序 |
+| `metrics.close()` | `close() → None` | 释放 Provider 资源——仅显式调用；框架永远不会调用它 |
+
+## 标签
+
+标签是 `dict[str, str]`，会传递给每个 Provider：
+
+- **StatsD** — Datadog 语法 `|#k:v,k2:v2`，键名排序。
+- **Sentry** — 作为 attributes 原样传递。
+- **Prometheus** — 成为 labels；标签键模式（排序后的标签键集合）在首次观测时固定，同一指标名称必须保持一致。
+
+```python
+metrics.counter("user.login.count", tags={"realm": "cn"}).inc()
+```
+
+## 异常层级
+
+所有指标异常都继承自 `MetricError`（其本身是 `BedrockExc`）：
+
+```
+MetricError
+├── MetricConfigurationError — Provider 配置错误（例如缺少 gateway_url）
+└── MetricProviderError       — Provider 无法初始化（例如缺少可选 extra）
+```
+
+```python
+from bedrock.contrib.metric import (
+    MetricConfigurationError,
+    MetricError,
+    MetricProviderError,
+)
+```
+
+这些异常只在配置阶段、构造 Provider 时抛出。发射本身永不抛异常。
+
+## 反模式
+
+**不要用 try/except 包裹埋点。** 发射永不抛异常——`inc()` / `set()` / `observe()` 外面的 try/except 是死代码。
+
+**不要在正常运行时调用 `close()`。** 它按设计只应显式调用，框架永远不会调用；如果拥有长期存活的 Provider 资源（例如 StatsD socket），请在关停时调用一次。
+
+**不要寻找内存 Provider。** 本地调试请改用硬编码日志器——在 logging 配置为 `DEBUG` 的情况下，`metrics.set_log_level(logging.DEBUG)` 会打印每个事件。
+
+**不要期待 Prometheus 推送会批量聚合事件。** pushgateway Provider 按每次发射节流（至多每 `push_interval` 推送一次）；落在节流窗口内的更新只保留在内存 collector 中，要等之后某次符合条件的发射才会推送——不存在事件队列或后台刷写。
+
+**不要在 Prometheus 上改变指标的类型或标签键。** 两者都在首次观测时固定；不匹配的事件会抛出异常（由管理器隔离），且永远不会到达网关。
+
+**不要给 `inc()` 传负增量。** 增量不被校验；Provider 可能拒绝有符号负更新（例如 Prometheus 计数器），失败会被吞掉并记录为限频的 Provider 警告。
+
+**不要把仪表当作装饰器。** 只有 counter 与 timer 可作为装饰器调用。
+
+## 另请参阅
+
+- [数据库](./database) — SQLAlchemy 2.0 数据库层
+- [缓存](./cache) — 内存与 Redis 缓存，带同步/异步 API
+- [存储](./storage) — 可插拔本地/S3 后端的文件存储

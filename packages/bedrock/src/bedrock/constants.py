@@ -1,5 +1,5 @@
-from enum import StrEnum as IStrEnum
+from enum import Enum
 
 
-class StrEnum(IStrEnum, str):
+class StrEnum(str, Enum):  # noqa: UP042
     pass

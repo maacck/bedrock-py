@@ -1,0 +1,180 @@
+"""Tests for the StatsD provider wire format."""
+
+import socket
+
+import pytest
+from bedrock.contrib.metric.backends.statsd import StatsDProvider, StatsDSettings
+from bedrock.contrib.metric.events import MetricEvent
+
+
+class FakeSocket:
+    """Records sent payloads instead of touching the network."""
+
+    def __init__(self) -> None:
+        self.sent: list[tuple[bytes, tuple[str, int]]] = []
+        self.closed = False
+
+    def sendto(self, data: bytes, addr: tuple[str, int]) -> int:
+        self.sent.append((data, addr))
+        return len(data)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_counter_format(monkeypatch) -> None:
+    """counter -> name:value|c."""
+    fake = FakeSocket()
+    monkeypatch.setattr(socket, "socket", lambda *a, **k: fake)
+    provider = StatsDProvider(settings=StatsDSettings(host="h", port=8125))
+    provider.emit(MetricEvent(type="counter", name="a.b", value=2.0))
+    ((data, addr),) = fake.sent
+    assert data == b"a.b:2|c"
+    assert addr == ("h", 8125)
+    provider.close()
+
+
+def test_counter_preserves_fractional_delta(monkeypatch) -> None:
+    """counter preserves fractional deltas instead of truncating."""
+    fake = FakeSocket()
+    monkeypatch.setattr(socket, "socket", lambda *a, **k: fake)
+    provider = StatsDProvider(settings=StatsDSettings())
+    provider.emit(MetricEvent(type="counter", name="c", value=2.5))
+    assert fake.sent[0][0] == b"c:2.5|c"
+    provider.close()
+
+
+def test_counter_high_precision(monkeypatch) -> None:
+    """counter preserves full float precision (no six-digit rounding)."""
+    fake = FakeSocket()
+    monkeypatch.setattr(socket, "socket", lambda *a, **k: fake)
+    provider = StatsDProvider(settings=StatsDSettings())
+    provider.emit(MetricEvent(type="counter", name="c", value=1.23456789))
+    assert fake.sent[0][0] == b"c:1.23456789|c"
+    provider.close()
+
+
+def test_gauge_format(monkeypatch) -> None:
+    """gauge -> name:value|g."""
+    fake = FakeSocket()
+    monkeypatch.setattr(socket, "socket", lambda *a, **k: fake)
+    provider = StatsDProvider(settings=StatsDSettings())
+    provider.emit(MetricEvent(type="gauge", name="g", value=42.0))
+    assert fake.sent[0][0] == b"g:42|g"
+    provider.close()
+
+
+def test_gauge_high_precision(monkeypatch) -> None:
+    """gauge preserves full float precision (no six-digit rounding)."""
+    fake = FakeSocket()
+    monkeypatch.setattr(socket, "socket", lambda *a, **k: fake)
+    provider = StatsDProvider(settings=StatsDSettings())
+    provider.emit(MetricEvent(type="gauge", name="g", value=3.141592653589793))
+    assert fake.sent[0][0] == b"g:3.141592653589793|g"
+    provider.close()
+
+
+def test_timer_converts_to_milliseconds(monkeypatch) -> None:
+    """timer seconds -> integer ms -> name:value|ms."""
+    fake = FakeSocket()
+    monkeypatch.setattr(socket, "socket", lambda *a, **k: fake)
+    provider = StatsDProvider(settings=StatsDSettings())
+    provider.emit(MetricEvent(type="timer", name="t", value=1.5))
+    assert fake.sent[0][0] == b"t:1500|ms"
+    provider.close()
+
+
+def test_tags_datadog_syntax_sorted(monkeypatch) -> None:
+    """tags -> |#k:v,k2:v2 with sorted keys."""
+    fake = FakeSocket()
+    monkeypatch.setattr(socket, "socket", lambda *a, **k: fake)
+    provider = StatsDProvider(settings=StatsDSettings())
+    provider.emit(MetricEvent(type="counter", name="c", value=1.0, tags={"b": "2", "a": "1"}))
+    assert fake.sent[0][0] == b"c:1|c|#a:1,b:2"
+    provider.close()
+
+
+def test_prefix_applied(monkeypatch) -> None:
+    """prefix is prepended to the metric name."""
+    fake = FakeSocket()
+    monkeypatch.setattr(socket, "socket", lambda *a, **k: fake)
+    provider = StatsDProvider(settings=StatsDSettings(prefix="app."))
+    provider.emit(MetricEvent(type="counter", name="c", value=1.0))
+    assert fake.sent[0][0] == b"app.c:1|c"
+    provider.close()
+
+
+def test_lazy_socket_creation(monkeypatch) -> None:
+    """socket is only created on first emit, not at construction."""
+    fake = FakeSocket()
+    monkeypatch.setattr(socket, "socket", lambda *a, **k: fake)
+    provider = StatsDProvider(settings=StatsDSettings())
+    assert provider._socket is None
+    provider.emit(MetricEvent(type="counter", name="c", value=1.0))
+    assert provider._socket is fake
+    provider.close()
+
+
+def test_close_closes_socket(monkeypatch) -> None:
+    """close() releases the UDP socket."""
+    fake = FakeSocket()
+    monkeypatch.setattr(socket, "socket", lambda *a, **k: fake)
+    provider = StatsDProvider(settings=StatsDSettings())
+    provider.emit(MetricEvent(type="counter", name="c", value=1.0))
+    provider.close()
+    assert fake.closed is True
+
+
+def test_close_idempotent(monkeypatch) -> None:
+    """close() may be called multiple times safely."""
+    fake = FakeSocket()
+    monkeypatch.setattr(socket, "socket", lambda *a, **k: fake)
+    provider = StatsDProvider(settings=StatsDSettings())
+    provider.close()
+    provider.close()
+    assert fake.closed is False
+
+
+def test_sanitizes_name_delimiters(monkeypatch) -> None:
+    """metric names replace StatsD field delimiters and control characters."""
+    fake = FakeSocket()
+    monkeypatch.setattr(socket, "socket", lambda *a, **k: fake)
+    provider = StatsDProvider(settings=StatsDSettings())
+
+    provider.emit(MetricEvent(type="counter", name="bad|name#x\ny", value=1.0))
+
+    assert fake.sent[0][0].decode("utf-8") == "bad_name_x_y:1|c"
+    provider.close()
+
+
+def test_sanitizes_tag_keys_and_values(monkeypatch) -> None:
+    """tag keys and values replace structural delimiters and newlines."""
+    fake = FakeSocket()
+    monkeypatch.setattr(socket, "socket", lambda *a, **k: fake)
+    provider = StatsDProvider(settings=StatsDSettings())
+
+    provider.emit(
+        MetricEvent(
+            type="gauge",
+            name="metric",
+            value=1.5,
+            tags={"k:ey": "va|lue#x\ny", "ok": "fine"},
+        )
+    )
+
+    assert fake.sent[0][0].decode("utf-8") == "metric:1.5|g|#k_ey:va_lue_x_y,ok:fine"
+    provider.close()
+
+
+def test_rejects_non_finite_values(monkeypatch) -> None:
+    """counter and gauge with NaN/inf raise ValueError instead of emitting."""
+    fake = FakeSocket()
+    monkeypatch.setattr(socket, "socket", lambda *a, **k: fake)
+    provider = StatsDProvider(settings=StatsDSettings())
+
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(ValueError):
+            provider.emit(MetricEvent(type="counter", name="m", value=bad))
+
+    assert fake.sent == []
+    provider.close()

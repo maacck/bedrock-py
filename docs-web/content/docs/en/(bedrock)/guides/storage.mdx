@@ -1,0 +1,273 @@
+---
+title: Storage
+description: File storage with pluggable backends — local folder and S3-compatible, with upload/download/stream/move/list/head/exists/delete/copy, signed/access/preview URLs, ACL and CDN support
+---
+
+Bedrock ships a first-party storage system with pluggable backends: a local filesystem backend and an S3-compatible backend. The whole subsystem lives under `bedrock.contrib.storage`.
+
+## Quick Start
+
+The storage service is **strict**: no backend is configured until you call `storage.configure()`. The first operation before that raises `StorageBackendNotConfiguredError` — there is no lazy default.
+
+```python
+from bedrock.contrib.storage import storage, LocalStorageSettings
+
+# Required: configure explicitly before the first operation.
+storage.configure("local")  # LocalStorageSettings defaults: ./storage, create_dir=True
+
+storage.upload("media/avatar/a1.png", open("avatar.png", "rb"))
+data = storage.download("media/avatar/a1.png")
+storage.exists("media/avatar/a1.png")  # True
+```
+
+That's the core loop. The rest of this page covers configuration, the full API, and advanced patterns.
+
+## Configuration
+
+The storage service uses a dynamic backend registry. The local backend is always available; S3 requires the optional `storage-s3` dependency.
+
+### Backend Selection
+
+```python
+from bedrock.contrib.storage import storage, S3StorageSettings
+
+# Local filesystem backend
+storage.configure("local")
+
+# S3-compatible backend (requires: uv add bedrock-core[storage-s3])
+storage.configure("s3", settings=S3StorageSettings(bucket_name="my-bucket"))
+```
+
+`configure()` returns the configured backend instance. Without a `settings` argument, each backend builds its settings from environment variables.
+
+### Local Backend
+
+Stores objects as files under a base directory. Writes are atomic (temp file + `os.replace`); `mime_type` and `provider_metadata` persist in a sidecar file next to the object.
+
+```python
+from bedrock.contrib.storage import storage, LocalStorageSettings
+
+storage.configure("local", settings=LocalStorageSettings(base_dir="/data/files"))
+```
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `STORAGE_LOCAL_BASE_DIR` | `"./storage"` | Root directory for stored objects |
+| `STORAGE_LOCAL_CREATE_DIR` | `"true"` | Create the base directory on startup if missing |
+
+<Callout type="warning">
+The `.bmeta.json` suffix is reserved for the local backend's metadata sidecars. Do not use it for real object keys.
+</Callout>
+
+### S3 Backend
+
+Works with AWS S3 and any S3-compatible endpoint (e.g. MinIO via `STORAGE_S3_ENDPOINT_URL`). Requires `uv add bedrock-core[storage-s3]`; `boto3` is imported lazily.
+
+```python
+from bedrock.contrib.storage import storage, S3StorageSettings
+
+storage.configure("s3", settings=S3StorageSettings(bucket_name="my-bucket"))
+storage.upload(
+    "media/avatar/a1.png",
+    open("avatar.png", "rb"),
+    mime_type="image/png",
+    acl="public-read",
+)
+```
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `STORAGE_S3_BUCKET_NAME` | `""` | Bucket name (required) |
+| `STORAGE_S3_REGION_NAME` | `"us-east-1"` | AWS region |
+| `STORAGE_S3_ACCESS_KEY_ID` | unset | Access key ID |
+| `STORAGE_S3_SECRET_ACCESS_KEY` | unset | Secret access key |
+| `STORAGE_S3_SESSION_TOKEN` | unset | Session token |
+| `STORAGE_S3_ENDPOINT_URL` | unset | Custom endpoint (MinIO, etc.) |
+| `STORAGE_S3_DEFAULT_ACL` | unset | Bucket-level default canned ACL |
+| `STORAGE_S3_CDN_BASE_URL` | unset | CDN origin for access/preview URL host rewriting |
+
+Supported canned ACLs: `private`, `public-read`, `public-read-write`, `authenticated-read`, `aws-exec-read`, `bucket-owner-read`, `bucket-owner-full-control`.
+
+ACL resolution is: explicit `acl=` parameter > `S3StorageSettings.default_acl` (or `STORAGE_S3_DEFAULT_ACL`) > none. An explicit or default ACL is validated against the canned ACL list; an invalid `default_acl` fails fast at `configure()`.
+
+### Registering Custom Backends
+
+```python
+from bedrock.contrib.storage import register_backend, storage
+from bedrock.contrib.storage.base import StorageBackend
+
+class MyBackend:
+    """Implement the StorageBackend protocol (12 operations + close)."""
+    ...
+
+register_backend("custom", MyBackend)
+storage.configure("custom")
+```
+
+## StorageService API Reference
+
+The `storage` singleton is a `StorageService` instance. All access goes through this object. Every operation normalizes and validates its `storage_key` before delegating to the backend (see [Storage Keys](#storage-keys) below) and never configures a backend implicitly.
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `storage.upload()` | `upload(storage_key, data, mime_type=None, provider_metadata=None, acl=None) → StorageUploadResult` | Store `data` (bytes, `Path`, or file-like) at `storage_key`; `acl` is upload-time only |
+| `storage.download()` | `download(storage_key) → bytes` | Return the full object content |
+| `storage.stream()` | `stream(storage_key, chunk_size=1_048_576) → Iterable[bytes]` | Yield the object content in chunks |
+| `storage.move()` | `move(storage_key, dest_storage_key) → None` | Move an object within the backend |
+| `storage.copy()` | `copy(storage_key, dest_storage_key) → None` | Copy an object within the backend |
+| `storage.list()` | `list(prefix=None, limit=None, continuation_token=None) → StorageListResult` | List the immediate children of a directory prefix (top level when `prefix` is `None`) |
+| `storage.head()` | `head(storage_key) → StorageObject \| None` | Object metadata, or `None` when it does not exist |
+| `storage.exists()` | `exists(storage_key) → bool` | `True` when the object exists |
+| `storage.delete()` | `delete(storage_key) → bool` | Delete the object; `True` when it existed |
+| `storage.get_signed_url()` | `get_signed_url(storage_key, method="GET", expires_in=3600) → str` | Presigned URL for `method` (`GET`/`PUT`) |
+| `storage.get_access_url()` | `get_access_url(storage_key, acl=None, expires_in=3600) → str` | Direct download URL (CDN-rewritten when configured) |
+| `storage.get_preview_url()` | `get_preview_url(storage_key, acl=None, expires_in=3600) → str` | Inline preview URL (CDN-rewritten when configured) |
+
+### Listing
+
+`list()` is directory-scoped: the prefix names a directory, and the result holds only its immediate children — object entries plus directory entries. `"a"` and `"a/"` are equivalent, and `list("a")` never matches objects under `a2/`.
+
+```python
+result = storage.list("media")  # directory-scoped: immediate children of media/
+for entry in result.items:
+    if entry.is_dir:
+        print(entry.storage_key)  # e.g. "media/videos/"
+    else:
+        print(entry.storage_key, entry.size)
+```
+
+Pagination is cursor-based: pass the previous result's `continuation_token` (when `truncated` is `True`) to fetch the next page.
+
+```python
+page = storage.list("media", limit=50)
+while page.truncated:
+    page = storage.list("media", limit=50, continuation_token=page.continuation_token)
+```
+
+### Upload Options
+
+- `mime_type` — stored/returned as the object's content type; when omitted, both backends guess it from the key (e.g. `"a1.png"` → `image/png`).
+- `provider_metadata` — opaque backend-specific string dict. Keys are lowercase by convention (S3 lowercases metadata keys on the wire; the local backend preserves them as-is).
+- `acl` — AWS canned ACL (S3 only; the local backend accepts and ignores it). Never reported by `head()`.
+
+## URLs and CDN Rewriting
+
+S3 can hand out three kinds of URLs:
+
+- `get_access_url()` — a direct download URL.
+- `get_preview_url()` — an inline preview URL (browser-safe, `ResponseContentDisposition=inline`), for embedding in `<img>`/`<video>` and similar.
+- `get_signed_url()` — a raw presigned URL for a specific method.
+
+The `acl` switch on the access/preview helpers decides whether the URL is signed: explicit `acl=` parameter, else the bucket-level `STORAGE_S3_DEFAULT_ACL`, else none. Only public resolved ACLs (`public-read`, `public-read-write`) yield unsigned URLs; everything else (including `private`) is presigned.
+
+<Callout type="warning">
+Pass a public `acl` to the URL helpers only for objects that are actually public — the resulting URL is unsigned and anonymously readable.
+</Callout>
+
+The CDN origin is configured on the S3 backend's settings — `S3StorageSettings(cdn_base_url=...)` or the `STORAGE_S3_CDN_BASE_URL` env var — not as a `configure()` argument. Rewriting is a service-level behavior that reads the CDN origin from the active backend's settings: when set, the hosts of `get_access_url()` / `get_preview_url()` results are rewritten to it — signed or unsigned — with the query string preserved. `get_signed_url()` is **never** rewritten.
+
+```python
+storage.configure(
+    "s3",
+    settings=S3StorageSettings(bucket_name="my-bucket", cdn_base_url="https://cdn.example.com"),
+)
+
+storage.get_access_url("media/avatar/a1.png", acl="public-read")
+# https://cdn.example.com/my-bucket/media/avatar/a1.png  (unsigned, host rewritten)
+
+storage.get_access_url("media/avatar/a1.png")
+# https://cdn.example.com/my-bucket/media/avatar/a1.png?X-Amz-...  (signed, host rewritten)
+
+storage.get_signed_url("media/avatar/a1.png")
+# https://my-bucket.s3.amazonaws.com/media/avatar/a1.png?X-Amz-...  (never rewritten)
+```
+
+<Callout type="warning">
+The CDN must be a reverse proxy to the bucket that preserves the query string and the origin `Host` header — a CloudFront distribution with an S3 origin, or `nginx proxy_pass` to the bucket/endpoint. Otherwise presigned query parameters are stripped and public URLs break.
+</Callout>
+
+`get_signed_url()` supports `method="GET"` and `method="PUT"` only. Presigned POST uploads are not supported in v1: the multipart form protocol needs a `{url, fields}` pair, which a single-URL API cannot express — use `upload()` or a future presigned-post API; any other method raises `StorageError`.
+
+The local backend has no URL operations: all three raise `StorageUrlUnsupportedError`. Build URLs in your application instead.
+
+## Streaming
+
+`stream()` yields the object content in chunks without loading it into memory — use it for large files. `download()` always loads the full object into memory.
+
+```python
+for chunk in storage.stream("media/videos/demo.mp4", chunk_size=1_048_576):
+    write_chunk(chunk)
+```
+
+## Storage Keys
+
+Keys are POSIX-style paths. They are normalized before delegation:
+
+- leading/trailing slashes and whitespace are stripped, duplicate separators collapsed;
+- empty keys and keys containing `..` segments raise `StorageKeyError`.
+
+```python
+from bedrock.contrib.storage import normalize_storage_key
+
+normalize_storage_key("/media/avatar/a1.png/")  # "media/avatar/a1.png"
+normalize_storage_key("media//avatar/a1.png")   # "media/avatar/a1.png"
+normalize_storage_key("a/../b")                 # raises StorageKeyError
+normalize_storage_key("")                       # raises StorageKeyError
+```
+
+The local backend additionally verifies that every resolved path stays inside its root directory, rejecting escape attempts (backslashes, `..`, absolute paths) with `StorageKeyError`.
+
+## Exception Hierarchy
+
+All storage exceptions inherit from `StorageError`:
+
+```
+StorageError
+├── StorageBackendNotConfiguredError — No backend configured / unknown backend name
+├── StorageConnectionError           — Backend unreachable or misconfigured
+├── StorageObjectNotFoundError       — Object does not exist
+├── StorageKeyError                  — Invalid storage key (empty, escaped, malformed)
+├── StorageUploadError               — Upload or move failure
+├── StorageDownloadError             — Download or stream failure
+├── StoragePermissionError           — Backend denied access to an object or bucket
+└── StorageUrlUnsupportedError       — Backend does not support URL generation
+```
+
+```python
+from bedrock.contrib.storage import (
+    StorageBackendNotConfiguredError,
+    StorageConnectionError,
+    StorageDownloadError,
+    StorageError,
+    StorageKeyError,
+    StorageObjectNotFoundError,
+    StoragePermissionError,
+    StorageUploadError,
+    StorageUrlUnsupportedError,
+)
+```
+
+## Anti-Patterns
+
+**Don't rely on an implicit backend.** The service is strict: using any operation before `configure()` raises `StorageBackendNotConfiguredError`. There is no lazy default.
+
+**Don't call `configure()` at runtime.** Reconfiguration is unsynchronized — the backend is swapped in place without a lock. Call `configure()` once at startup.
+
+**Don't expect async methods.** The v1 API is sync-only — there are no `a`-prefixed methods, and that is permanent. Async support, if added, will be a separate additive layer, never a replacement.
+
+**Don't use the local backend for URLs.** `get_signed_url()` / `get_access_url()` / `get_preview_url()` raise `StorageUrlUnsupportedError`. Build URLs in your application (e.g. a static route or a reverse proxy) instead.
+
+**Don't assume `move()` is atomic on S3.** The S3 backend implements move as copy + delete. A failure between the two leaves both objects present.
+
+**Don't guess the missing-object behavior.** `download()` / `stream()` raise `StorageObjectNotFoundError`; `head()` returns `None`; `delete()` returns `False`.
+
+**Don't use `.bmeta.json` keys.** The suffix is reserved for local metadata sidecars; real objects with that suffix collide with sidecar files.
+
+**Don't paginate with page numbers.** `list()` is cursor-based — pass back the `continuation_token` from the previous result.
+
+**Don't pass public ACLs to private objects.** An explicit public `acl` on `get_access_url()` / `get_preview_url()` produces an unsigned URL; use it only for objects that are actually public.
+
+## See Also
+
+- [Database](./database) — SQLAlchemy 2.0 database layer
+- [Cache](./cache) — In-memory and Redis cache with sync/async API
