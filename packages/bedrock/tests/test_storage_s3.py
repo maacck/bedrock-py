@@ -27,6 +27,11 @@ from bedrock.contrib.storage.service import StorageService
 
 _BUCKET = "test-bucket"
 _REGION = "us-east-1"
+#: Test-only dummy credentials: boto3 needs signing credentials even against moto,
+#: and ambient AWS credential sources are disabled in CI. Non-secret; used only
+#: by the fixtures in this module.
+_AWS_ACCESS_KEY_ID = "test-access-key"
+_AWS_SECRET_ACCESS_KEY = "test-secret-key"
 
 
 @pytest.fixture(scope="session")
@@ -65,7 +70,13 @@ def _reset_bucket(endpoint_url: str) -> None:
     """Delete every object and then the bucket so each test starts from an empty bucket."""
     import boto3
 
-    client = boto3.client("s3", region_name=_REGION, endpoint_url=endpoint_url)
+    client = boto3.client(
+        "s3",
+        region_name=_REGION,
+        endpoint_url=endpoint_url,
+        aws_access_key_id=_AWS_ACCESS_KEY_ID,
+        aws_secret_access_key=_AWS_SECRET_ACCESS_KEY,
+    )
     try:
         contents = client.list_objects_v2(Bucket=_BUCKET).get("Contents", [])
         if contents:
@@ -78,7 +89,13 @@ def _reset_bucket(endpoint_url: str) -> None:
 def _create_bucket(endpoint_url: str) -> None:
     import boto3
 
-    boto3.client("s3", region_name=_REGION, endpoint_url=endpoint_url).create_bucket(Bucket=_BUCKET)
+    boto3.client(
+        "s3",
+        region_name=_REGION,
+        endpoint_url=endpoint_url,
+        aws_access_key_id=_AWS_ACCESS_KEY_ID,
+        aws_secret_access_key=_AWS_SECRET_ACCESS_KEY,
+    ).create_bucket(Bucket=_BUCKET)
 
 
 def _configured_service(
@@ -97,6 +114,8 @@ def _configured_service(
             bucket_name=_BUCKET,
             region_name=_REGION,
             endpoint_url=endpoint_url,
+            access_key_id=_AWS_ACCESS_KEY_ID,
+            secret_access_key=_AWS_SECRET_ACCESS_KEY,
             default_acl=default_acl,
             cdn_base_url=cdn_base_url,
         ),
@@ -280,7 +299,13 @@ def test_presigned_post_form_executes(svc: StorageService, moto_server: str) -> 
     """
     import boto3
 
-    client = boto3.client("s3", region_name=_REGION, endpoint_url=moto_server)
+    client = boto3.client(
+        "s3",
+        region_name=_REGION,
+        endpoint_url=moto_server,
+        aws_access_key_id=_AWS_ACCESS_KEY_ID,
+        aws_secret_access_key=_AWS_SECRET_ACCESS_KEY,
+    )
     post = client.generate_presigned_post(_BUCKET, "posted.txt", ExpiresIn=300)
     response = requests.post(
         post["url"],
