@@ -32,6 +32,19 @@ Bedrock is a modular Python framework for building applications with manifest-dr
 - **Using signals / events** → Read `references/signals-guide.md`
 - **Understanding project structure** → Read `references/module-hierarchy.md`
 - **Understanding architecture / layer boundaries** → Read `references/architecture.md`
+- **Using caching / distributed locks** → View `bedrock app playbook bedrock.contrib.cache`
+- **Instrumenting metrics** → View `bedrock app playbook bedrock.contrib.metric`
+- **Using file/object storage** → View `bedrock app playbook bedrock.contrib.storage`
+
+## Contrib Packages
+
+Bedrock ships first-party contrib packages, each documented by a playbook (view with `bedrock app playbook <import_path>`):
+
+| Package | Import | Purpose |
+|---------|--------|---------|
+| Cache | `bedrock.contrib.cache` | In-memory / Redis cache with TTL, distributed locks, typed namespaces |
+| Metrics | `bedrock.contrib.metric` | Counter/gauge/timer instrumentation with StatsD, Sentry, and Prometheus providers |
+| Storage | `bedrock.contrib.storage` | File/object storage with local and S3-compatible backends |
 
 ## Quick Start: New Project
 
@@ -391,4 +404,4 @@ Key commands:
 - `bedrock db revision <module> -m "msg"` — Create migration
 - `bedrock db upgrade <module>` — Apply migrations
 - `bedrock app info <module>` — Inspect module
-- `bedrock app playbook <module>` — Inspect module
+- `bedrock app playbook <module>` — View module playbook
