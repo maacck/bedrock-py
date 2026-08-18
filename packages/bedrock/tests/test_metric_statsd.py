@@ -2,6 +2,7 @@
 
 import socket
 
+import pytest
 from bedrock.contrib.metric.backends.statsd import StatsDProvider, StatsDSettings
 from bedrock.contrib.metric.events import MetricEvent
 
@@ -132,3 +133,48 @@ def test_close_idempotent(monkeypatch) -> None:
     provider.close()
     provider.close()
     assert fake.closed is False
+
+
+def test_sanitizes_name_delimiters(monkeypatch) -> None:
+    """metric names replace StatsD field delimiters and control characters."""
+    fake = FakeSocket()
+    monkeypatch.setattr(socket, "socket", lambda *a, **k: fake)
+    provider = StatsDProvider(settings=StatsDSettings())
+
+    provider.emit(MetricEvent(type="counter", name="bad|name#x\ny", value=1.0))
+
+    assert fake.sent[0][0].decode("utf-8") == "bad_name_x_y:1|c"
+    provider.close()
+
+
+def test_sanitizes_tag_keys_and_values(monkeypatch) -> None:
+    """tag keys and values replace structural delimiters and newlines."""
+    fake = FakeSocket()
+    monkeypatch.setattr(socket, "socket", lambda *a, **k: fake)
+    provider = StatsDProvider(settings=StatsDSettings())
+
+    provider.emit(
+        MetricEvent(
+            type="gauge",
+            name="metric",
+            value=1.5,
+            tags={"k:ey": "va|lue#x\ny", "ok": "fine"},
+        )
+    )
+
+    assert fake.sent[0][0].decode("utf-8") == "metric:1.5|g|#k_ey:va_lue_x_y,ok:fine"
+    provider.close()
+
+
+def test_rejects_non_finite_values(monkeypatch) -> None:
+    """counter and gauge with NaN/inf raise ValueError instead of emitting."""
+    fake = FakeSocket()
+    monkeypatch.setattr(socket, "socket", lambda *a, **k: fake)
+    provider = StatsDProvider(settings=StatsDSettings())
+
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(ValueError):
+            provider.emit(MetricEvent(type="counter", name="m", value=bad))
+
+    assert fake.sent == []
+    provider.close()

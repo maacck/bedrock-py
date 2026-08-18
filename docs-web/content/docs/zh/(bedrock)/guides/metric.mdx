@@ -181,7 +181,7 @@ Provider 失败时也会以 `WARNING` 记日志，按（provider, metric）对�
 
 - `emit()` 失败会被捕获（`except Exception`，绝不捕获 `BaseException`），并记录为限频警告——调用方与其他 Provider 不受影响。
 - 出错的 Provider **不会被自动禁用**；它们继续接收事件（并继续按每 100 次的节奏告警）。
-- 发射是同步的——没有后台线程、缓冲队列。派发没有递归保护，因此自定义 Provider **不得**在其 `emit()` 内部向同一个管理器发射（否则会递归）。
+- 发射是同步的——没有后台线程、缓冲队列。Provider 会在调用方线程内联执行其 I/O（StatsD `sendto`、Prometheus pushgateway HTTP POST），因此缓慢或不可达的接收端可能会阻塞调用方。派发没有递归保护，因此自定义 Provider **不得**在其 `emit()` 内部向同一个管理器发射（否则会递归）。
 - 异常只会在配置阶段、构造 Provider 时抛出（见[异常层级](#异常层级)）。
 
 ## API 参考

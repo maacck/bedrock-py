@@ -181,7 +181,7 @@ Instrumentation never raises into business code:
 
 - `emit()` failures are caught (`except Exception`, never `BaseException`) and logged as rate-limited warnings — the caller and other providers are unaffected.
 - Failing providers are **not** auto-disabled; they keep receiving events (and keep warning at the 100-occurrence cadence).
-- Emission is synchronous — no background threads, no buffered queues. Dispatch has no recursion guard, so a custom provider must **not** emit into the same manager from inside its `emit()` (it would recurse).
+- Emission is synchronous — no background threads, no buffered queues. Providers run their I/O inline on the caller's thread (StatsD `sendto`, Prometheus pushgateway HTTP POST), so a slow or unreachable sink can block the caller. Dispatch has no recursion guard, so a custom provider must **not** emit into the same manager from inside its `emit()` (it would recurse).
 - Exceptions are raised only at configuration time, when constructing a provider (see [Exception Hierarchy](#exception-hierarchy)).
 
 ## API Reference

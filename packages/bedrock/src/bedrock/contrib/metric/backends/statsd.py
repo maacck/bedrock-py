@@ -1,10 +1,20 @@
 """StatsD provider — zero-dependency UDP protocol."""
 
+import math
+import re
 import socket
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from ..events import MetricEvent
+
+#: StatsD wire-format delimiters and control characters that a metric name,
+#: tag key, or tag value must never carry: they could inject extra metrics,
+#: tags, or packets into the line. Each is replaced with ``_`` at the wire
+#: boundary so instrumentation never corrupts the output stream.
+_UNSAFE_NAME_CHARS = re.compile(r"[\x00-\x1f\x7f|#]")
+_UNSAFE_TAG_KEY_CHARS = re.compile(r"[\x00-\x1f\x7f|#,=:]")
+_UNSAFE_TAG_VALUE_CHARS = re.compile(r"[\x00-\x1f\x7f|#,]")
 
 
 def _format_value(value: float) -> str:
@@ -15,6 +25,8 @@ def _format_value(value: float) -> str:
     to six significant digits by default. Integer-valued floats still render
     without the ``.0`` suffix (``2.0`` -> ``2``).
     """
+    if not math.isfinite(value):
+        raise ValueError(f"StatsD cannot encode non-finite value {value!r}.")
     text = repr(value)
     if text.endswith(".0"):
         return text[:-2]
@@ -53,7 +65,8 @@ class StatsDProvider:
 
     def emit(self, event: MetricEvent) -> None:
         """Serialize ``event`` to the StatsD wire format and send it."""
-        name = f"{self._settings.prefix}{event.name}" if self._settings.prefix else event.name
+        raw_name = f"{self._settings.prefix}{event.name}" if self._settings.prefix else event.name
+        name = _UNSAFE_NAME_CHARS.sub("_", raw_name)
         if event.type == "counter":
             body = f"{name}:{_format_value(event.value)}|c"
         elif event.type == "gauge":
@@ -61,7 +74,10 @@ class StatsDProvider:
         else:  # timer
             body = f"{name}:{int(round(event.value * 1000))}|ms"
         if event.tags:
-            tag_str = ",".join(f"{k}:{v}" for k, v in sorted(event.tags.items()))
+            tag_str = ",".join(
+                f"{_UNSAFE_TAG_KEY_CHARS.sub('_', k)}:{_UNSAFE_TAG_VALUE_CHARS.sub('_', v)}"
+                for k, v in sorted(event.tags.items())
+            )
             body += f"|#{tag_str}"
         self._send(body)
 

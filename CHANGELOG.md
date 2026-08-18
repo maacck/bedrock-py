@@ -7,9 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`bedrock.contrib.metric`** — application metrics instrumentation with a
+  hardcoded-logging manager and pluggable providers:
+  - `MetricsManager` singleton with `Counter` / `Gauge` / `Timer` handles
+    (decorator, context-manager, and direct APIs).
+  - `StatsDProvider` (zero-dependency UDP wire format).
+  - `SentryProvider` (optional `metric-sentry` extra).
+  - `PrometheusPushProvider` (optional `metric-prometheus` extra).
+- **`bedrock.contrib.storage`** — unified storage service with pluggable backends:
+  - `LocalBackend` (atomic writes, metadata sidecars, path-traversal containment).
+  - `S3Backend` (canned-ACL validation, SigV4 presigned URLs, CDN host rewriting;
+    optional `storage-s3` extra).
+  - Key normalization rejecting `..` segments; signed/access/preview URL helpers.
+
 ### Fixes
 
 - `bedrock app inspect` validates optional installation hooks without executing them (MCK-1).
+
+### Security
+
+- StatsD provider sanitizes metric names and tags against wire-format delimiter
+  injection and rejects non-finite values.
 
 ## [0.2.0] - 2026-08-13
 
