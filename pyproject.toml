@@ -10,7 +10,7 @@ members = ["packages/*"]
 
 [dependency-groups]
 dev = [
-    "ruff>=0.15.10",
+    "ruff>=0.16.3",
     "pre-commit>=4.6.0",
 ]
 docs = [
