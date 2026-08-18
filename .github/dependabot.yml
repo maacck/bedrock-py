@@ -20,7 +20,7 @@ updates:
           - "coverage"
           - "ruff"
           - "pytest*"
-    target-branch: "main"
+    target-branch: "dev"
     
   # GitHub Actions
   - package-ecosystem: github-actions
@@ -35,4 +35,4 @@ updates:
       github-actions-dependencies:
         patterns:
           - "*"
-    target-branch: "main"
+    target-branch: "dev"
