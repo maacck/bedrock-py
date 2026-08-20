@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import inspect
+from collections.abc import Awaitable, Callable
 from string import Formatter
 from typing import TYPE_CHECKING, Any, TypeVar
 
@@ -12,6 +14,7 @@ if TYPE_CHECKING:
 
 _T = TypeVar("_T")
 _FORMATTER = Formatter()
+_MISSING = object()
 
 
 def _normalize_segment(segment: str) -> str:
@@ -151,6 +154,42 @@ class CacheSlot[T]:
             type_=self._value_type,
             coder=self._coder,
         )
+
+    def get_or_load(
+        self,
+        loader: Callable[[], T],
+        *,
+        ex: int | None = None,
+        px: int | None = None,
+        ea: float | None = None,
+        **params: Any,
+    ) -> T:
+        """Return the cached value, or load, store, and return it on a miss."""
+        value = self.get(default=_MISSING, **params)
+        if value is not _MISSING:
+            return value
+        loaded = loader()
+        self.set(loaded, ex=ex, px=px, ea=ea, **params)
+        return loaded
+
+    async def aget_or_load(
+        self,
+        loader: Callable[[], T] | Callable[[], Awaitable[T]],
+        *,
+        ex: int | None = None,
+        px: int | None = None,
+        ea: float | None = None,
+        **params: Any,
+    ) -> T:
+        """Asynchronous variant of :meth:`get_or_load`."""
+        value = await self.aget(default=_MISSING, **params)
+        if value is not _MISSING:
+            return value
+        loaded = loader()
+        if inspect.isawaitable(loaded):
+            loaded = await loaded
+        await self.aset(loaded, ex=ex, px=px, ea=ea, **params)
+        return loaded
 
     def get_with_ttl(self, **params: Any) -> tuple[T | Any, int | None]:
         """Read the cached value and remaining TTL for this slot."""

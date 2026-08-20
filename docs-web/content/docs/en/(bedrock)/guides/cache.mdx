@@ -244,6 +244,9 @@ user_slot.set(User(name="Alice", email="alice@example.com"), user_id="123")
 user = user_slot.get(user_id="123")  # Returns User instance
 user_slot.delete(user_id="123")
 exists = user_slot.exists(user_id="123")  # False
+
+# Load from source only when the key is missing, then store it
+user = user_slot.get_or_load(lambda: User(name="Alice", email="alice@example.com"), user_id="123")
 ```
 
 ### Slot API
@@ -252,6 +255,8 @@ exists = user_slot.exists(user_id="123")  # False
 |--------|-----------|-------------|
 | `slot.get()` | `get(default=None, **params) → T` | Read the cached value |
 | `slot.aget()` | `aget(default=None, **params) → T` | Async variant |
+| `slot.get_or_load()` | `get_or_load(loader, **params) → T` | Read, or load and store on a miss |
+| `slot.aget_or_load()` | `aget_or_load(loader, **params) → T` | Async variant |
 | `slot.set()` | `set(value, ex=None, ea=None, **params) → None` | Write a value |
 | `slot.aset()` | `aset(value, ex=None, ea=None, **params) → None` | Async variant |
 | `slot.delete()` | `delete(**params) → bool` | Delete the cached value |

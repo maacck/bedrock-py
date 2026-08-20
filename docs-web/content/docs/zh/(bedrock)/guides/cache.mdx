@@ -244,6 +244,9 @@ user_slot.set(User(name="Alice", email="alice@example.com"), user_id="123")
 user = user_slot.get(user_id="123")  # Returns User instance
 user_slot.delete(user_id="123")
 exists = user_slot.exists(user_id="123")  # False
+
+# 仅在缓存未命中时调用 loader，并写回
+user = user_slot.get_or_load(lambda: User(name="Alice", email="alice@example.com"), user_id="123")
 ```
 
 ### Slot API
@@ -252,6 +255,8 @@ exists = user_slot.exists(user_id="123")  # False
 |--------|-----------|-------------|
 | `slot.get()` | `get(default=None, **params) → T` | 读取缓存值 |
 | `slot.aget()` | `aget(default=None, **params) → T` | 异步版本 |
+| `slot.get_or_load()` | `get_or_load(loader, **params) → T` | 读取，未命中则加载并写入 |
+| `slot.aget_or_load()` | `aget_or_load(loader, **params) → T` | 异步版本 |
 | `slot.set()` | `set(value, ex=None, ea=None, **params) → None` | 写入一个值 |
 | `slot.aset()` | `aset(value, ex=None, ea=None, **params) → None` | 异步版本 |
 | `slot.delete()` | `delete(**params) → bool` | 删除缓存值 |
