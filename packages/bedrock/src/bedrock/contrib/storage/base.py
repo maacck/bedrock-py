@@ -6,7 +6,7 @@ from typing import BinaryIO, Protocol
 
 from pydantic_settings import BaseSettings
 
-from .entities import StorageListResult, StorageObject, StorageUploadResult
+from .entities import StorageListResult, StorageObject, StoragePresignedUrl, StorageUploadResult
 
 
 class StorageBackend(Protocol):
@@ -72,10 +72,31 @@ class StorageBackend(Protocol):
         """Delete an object; return ``True`` when it existed."""
         ...
 
-    def get_signed_url(self, storage_key: str, method: str = "GET", expires_in: int = 3600) -> str:
-        """Return a time-limited URL for ``method`` (``GET``/``PUT``; ``POST`` form uploads are not supported in v1).
+    def generate_presigned_url(
+        self,
+        storage_key: str,
+        method: str = "GET",
+        expires_in: int = 3600,
+        *,
+        mime_type: str | None = None,
+        content_length: int | None = None,
+        checksum_sha256: str | None = None,
+        provider_headers: dict[str, str] | None = None,
+    ) -> StoragePresignedUrl:
+        """Return a presigned request for ``method`` (``GET``/``PUT``).
 
-        Backends without support raise StorageUrlUnsupportedError.
+        The service validates every argument before delegation: ``method`` is
+        uppercase; upload conditions (``mime_type``, ``content_length``,
+        ``checksum_sha256``) only arrive with ``PUT``; ``checksum_sha256`` is
+        the base64 of a 32-byte digest; ``provider_headers`` names are
+        lowercase HTTP tokens that never collide with ``content-type`` /
+        ``content-length``. Backends map the conditions to their wire header
+        names, sign them together with ``provider_headers``, and return the
+        unencoded query parameters plus every signed header except ``host``.
+        Backends must reject ``provider_headers`` that collide with mapped or
+        signer-owned headers, and must raise rather than silently drop a
+        condition they cannot sign. Backends without URL support raise
+        StorageUrlUnsupportedError.
         """
         ...
 

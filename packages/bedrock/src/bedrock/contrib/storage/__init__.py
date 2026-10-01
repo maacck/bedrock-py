@@ -2,7 +2,7 @@
 
 from .backends.local import LocalBackend, LocalStorageSettings
 from .backends.s3 import S3Backend, S3StorageSettings
-from .entities import StorageListEntry, StorageListResult, StorageObject, StorageUploadResult
+from .entities import StorageListEntry, StorageListResult, StorageObject, StoragePresignedUrl, StorageUploadResult
 from .exc import (
     StorageBackendNotConfiguredError,
     StorageConnectionError,
@@ -31,6 +31,7 @@ __all__ = [
     "StorageListEntry",
     "StorageListResult",
     "StorageObject",
+    "StoragePresignedUrl",
     "StorageUploadResult",
     # Settings and backends
     "LocalBackend",

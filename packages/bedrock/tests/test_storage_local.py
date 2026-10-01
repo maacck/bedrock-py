@@ -261,7 +261,7 @@ def test_delete_removes_sidecar(svc: StorageService, tmp_path: Path) -> None:
     assert not (tmp_path / "d.txt.bmeta.json").exists()
 
 
-@pytest.mark.parametrize("op", ["get_signed_url", "get_access_url", "get_preview_url"])
+@pytest.mark.parametrize("op", ["generate_presigned_url", "get_access_url", "get_preview_url"])
 def test_url_operations_unsupported(svc: StorageService, op: str) -> None:
     """The local backend rejects all URL operations."""
     svc.upload("u.txt", b"x")

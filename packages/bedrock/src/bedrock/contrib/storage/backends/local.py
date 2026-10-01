@@ -13,7 +13,7 @@ from typing import BinaryIO
 import orjson
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from ..entities import StorageListEntry, StorageListResult, StorageObject, StorageUploadResult
+from ..entities import StorageListEntry, StorageListResult, StorageObject, StoragePresignedUrl, StorageUploadResult
 from ..exc import (
     StorageDownloadError,
     StorageKeyError,
@@ -326,7 +326,17 @@ class LocalBackend:
             raise StoragePermissionError(msg=f"Failed to delete metadata for {storage_key!r}: {exc}") from exc
         return True
 
-    def get_signed_url(self, storage_key: str, method: str = "GET", expires_in: int = 3600) -> str:
+    def generate_presigned_url(
+        self,
+        storage_key: str,
+        method: str = "GET",
+        expires_in: int = 3600,
+        *,
+        mime_type: str | None = None,
+        content_length: int | None = None,
+        checksum_sha256: str | None = None,
+        provider_headers: dict[str, str] | None = None,
+    ) -> StoragePresignedUrl:
         """Raise StorageUrlUnsupportedError: the local backend has no URL operations."""
         raise StorageUrlUnsupportedError(msg=_URL_UNSUPPORTED_MESSAGE)
 

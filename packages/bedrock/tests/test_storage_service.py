@@ -1,5 +1,7 @@
 """Tests for StorageService: key normalization, backend configuration, registry."""
 
+import base64
+import hashlib
 from collections.abc import Iterable
 from types import SimpleNamespace
 
@@ -9,6 +11,7 @@ from bedrock.contrib.storage import (
     StorageError,
     StorageKeyError,
     StorageObject,
+    StoragePresignedUrl,
     StorageUploadResult,
     list_backends,
     normalize_storage_key,
@@ -87,8 +90,31 @@ class StubBackend:
     def exists(self, storage_key: str) -> bool:
         return storage_key in self.objects
 
-    def get_signed_url(self, storage_key: str, method: str = "GET", expires_in: int = 3600) -> str:
-        return f"https://signed.example.com/{storage_key}?method={method}&expires={expires_in}"
+    def generate_presigned_url(
+        self,
+        storage_key: str,
+        method: str = "GET",
+        expires_in: int = 3600,
+        *,
+        mime_type: str | None = None,
+        content_length: int | None = None,
+        checksum_sha256: str | None = None,
+        provider_headers: dict[str, str] | None = None,
+    ) -> StoragePresignedUrl:
+        headers: dict[str, str] = {}
+        if mime_type is not None:
+            headers["content-type"] = mime_type
+        if content_length is not None:
+            headers["content-length"] = str(content_length)
+        if checksum_sha256 is not None:
+            headers["x-checksum"] = checksum_sha256
+        headers.update(provider_headers or {})
+        return StoragePresignedUrl(
+            method=method,
+            endpoint=f"https://signed.example.com/{storage_key}",
+            query_params={"method": method, "expires": str(expires_in), "sig": "a/b+="},
+            headers=headers,
+        )
 
     def get_access_url(self, storage_key: str, acl: str | None = None, expires_in: int = 3600) -> str:
         if acl is None:
@@ -150,6 +176,23 @@ def test_configure_unknown_backend_raises() -> None:
         StorageService().configure("does-not-exist")
 
 
+def test_configure_logs_backend_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Successful configure() logs the backend name at INFO."""
+    recorded: list[tuple[str, tuple[object, ...]]] = []
+
+    def capture(message: str, *args: object) -> None:
+        recorded.append((message, args))
+
+    monkeypatch.setattr("bedrock.contrib.storage.service.logger.info", capture)
+    register_backend("stub", StubBackend)
+    service = StorageService()
+    try:
+        service.configure("stub")
+    finally:
+        service.close()
+    assert recorded == [("Storage backend configured: {}", ("stub",))]
+
+
 def test_list_backends_includes_registered_names() -> None:
     """list_backends() reports stub plus the built-in local/s3 entries."""
     assert "stub" in list_backends()
@@ -198,16 +241,70 @@ def test_cdn_rewrites_access_and_preview_urls() -> None:
         assert "expires=" in access
         preview = service.get_preview_url("a/b.txt")
         assert preview.startswith("https://cdn.example.com/a/b.txt")
-        signed = service.get_signed_url("a/b.txt", method="PUT", expires_in=60)
-        assert signed.startswith("https://signed.example.com/")
-        assert "method=PUT" in signed and "expires=60" in signed
+        presigned = service.generate_presigned_url("a/b.txt", method="PUT", expires_in=60)
+        assert presigned.endpoint == "https://signed.example.com/a/b.txt"
     finally:
         service.close()
 
 
-@pytest.mark.parametrize("method_name", ["get_signed_url", "get_access_url", "get_preview_url"])
+@pytest.mark.parametrize("method_name", ["generate_presigned_url", "get_access_url", "get_preview_url"])
 @pytest.mark.parametrize("expires_in", [0, -1, "60", True])
 def test_url_methods_reject_invalid_expires_in(svc: StorageService, method_name: str, expires_in: object) -> None:
     """expires_in must be a positive integer; invalid values raise StorageError before delegation."""
     with pytest.raises(StorageError, match="expires_in"):
         getattr(svc, method_name)("a/b.txt", expires_in=expires_in)  # type: ignore[arg-type]
+
+
+_SHA256_B64 = base64.b64encode(hashlib.sha256(b"body").digest()).decode()
+
+
+def test_generate_presigned_url_normalizes_inputs(svc: StorageService) -> None:
+    """Key and method are normalized; provider header names are lowercased before delegation."""
+    presigned = svc.generate_presigned_url(
+        "/a//b.txt",
+        method="put",
+        mime_type="text/plain",
+        content_length=0,
+        checksum_sha256=_SHA256_B64,
+        provider_headers={"X-Amz-Checksum-Type": "FULL_OBJECT"},
+    )
+    assert presigned.method == "PUT"
+    assert presigned.endpoint == "https://signed.example.com/a/b.txt"
+    assert presigned.headers == {
+        "content-type": "text/plain",
+        "content-length": "0",
+        "x-checksum": _SHA256_B64,
+        "x-amz-checksum-type": "FULL_OBJECT",
+    }
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"method": "POST"}, "Unsupported presigned URL method"),
+        ({"method": "GET", "mime_type": "text/plain"}, "only be signed for PUT"),
+        ({"method": "GET", "checksum_sha256": _SHA256_B64}, "only be signed for PUT"),
+        ({"method": "PUT", "content_length": -1}, "content_length"),
+        ({"method": "PUT", "content_length": True}, "content_length"),
+        ({"method": "PUT", "mime_type": ""}, "mime_type"),
+        ({"method": "PUT", "mime_type": "text/plain\r\nx-evil: 1"}, "CR, LF"),
+        ({"method": "PUT", "checksum_sha256": hashlib.sha256(b"body").hexdigest()}, "32-byte"),
+        ({"method": "PUT", "checksum_sha256": "not base64!"}, "valid base64"),
+        ({"method": "PUT", "checksum_sha256": base64.b64encode(b"short").decode()}, "32-byte"),
+        ({"method": "PUT", "provider_headers": {"bad name": "x"}}, "Invalid provider header name"),
+        ({"method": "PUT", "provider_headers": {"x-a": "1\n2"}}, "CR, LF"),
+        ({"method": "PUT", "provider_headers": {"Content-Type": "text/plain"}}, "typed argument"),
+        ({"method": "PUT", "provider_headers": {"X-A": "1", "x-a": "2"}}, "Duplicate provider header"),
+    ],
+)
+def test_generate_presigned_url_rejects_invalid_conditions(svc: StorageService, kwargs: dict, match: str) -> None:
+    """Invalid methods, conditions, and provider headers raise StorageError before reaching the backend."""
+    with pytest.raises(StorageError, match=match):
+        svc.generate_presigned_url("a/b.txt", **kwargs)
+
+
+def test_get_signed_url_is_deprecated_and_returns_full_url(svc: StorageService) -> None:
+    """The deprecated helper warns and joins endpoint with the encoded query parameters."""
+    with pytest.warns(DeprecationWarning, match="generate_presigned_url"):
+        url = svc.get_signed_url("a/b.txt", method="PUT", expires_in=60)
+    assert url == "https://signed.example.com/a/b.txt?method=PUT&expires=60&sig=a%2Fb%2B%3D"

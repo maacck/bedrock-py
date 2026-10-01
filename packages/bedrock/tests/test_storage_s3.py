@@ -7,6 +7,8 @@ fixtures below run a real ``moto.server`` on a local port and point
 actual HTTP against the mock.
 """
 
+import base64
+import hashlib
 import io
 import socket
 import subprocess
@@ -22,6 +24,7 @@ from bedrock.contrib.storage import (
     StorageError,
     StorageListEntry,
     StorageObjectNotFoundError,
+    StoragePresignedUrl,
 )
 from bedrock.contrib.storage.service import StorageService
 
@@ -253,41 +256,73 @@ def test_delete_existence_semantics(svc: StorageService) -> None:
     assert svc.delete("d.txt") is False
 
 
-def test_get_signed_url(svc: StorageService, moto_server: str) -> None:
-    """get_signed_url() returns a presigned URL for the object."""
+def _send(presigned: StoragePresignedUrl, data: bytes | None = None, **header_overrides: str) -> requests.Response:
+    """Replay a presigned request exactly as a browser client would."""
+    headers = {**presigned.headers, **header_overrides}
+    return requests.request(
+        presigned.method, presigned.endpoint, params=presigned.query_params, headers=headers, data=data, timeout=10
+    )
+
+
+def test_generate_presigned_url_get_and_put(svc: StorageService, moto_server: str) -> None:
+    """Unconditioned GET/PUT presign and execute over real HTTP; other methods are rejected."""
     svc.upload("s.txt", b"x")
-    url = svc.get_signed_url("s.txt", expires_in=300)
-    assert url.startswith(moto_server)
-    assert "test-bucket" in url
-    assert "X-Amz-Expires=300" in url
 
+    get = svc.generate_presigned_url("s.txt", method="GET", expires_in=300)
+    assert get.endpoint == f"{moto_server}/{_BUCKET}/s.txt"
+    assert get.query_params["X-Amz-Expires"] == "300"
+    assert get.headers == {}
+    assert _send(get).content == b"x"
 
-def test_get_signed_url_methods(svc: StorageService, moto_server: str) -> None:
-    """GET/PUT presign and execute over real HTTP; POST/DELETE are rejected (A14 ruling)."""
-    svc.upload("s.txt", b"x")
-
-    get_url = svc.get_signed_url("s.txt", method="GET", expires_in=300)
-    assert get_url.startswith(moto_server)
-    assert "X-Amz-Expires=300" in get_url
-    get_response = requests.get(get_url, timeout=10)
-    assert get_response.status_code == 200
-    assert get_response.content == b"x"
-
-    put_url = svc.get_signed_url("s.txt", method="PUT", expires_in=300)
-    assert put_url.startswith(moto_server)
-    assert "X-Amz-Expires=300" in put_url
-    put_response = requests.put(put_url, data=b"updated via presigned PUT", timeout=10)
-    assert put_response.status_code == 200
+    put = svc.generate_presigned_url("s.txt", method="PUT", expires_in=300)
+    assert _send(put, b"updated via presigned PUT").status_code == 200
     assert svc.download("s.txt") == b"updated via presigned PUT"
 
-    # A14 ruling: POST presigning is unsupported (boto3 has no post_object client
-    # method; presigned POST is form-based and a str-returning API cannot express
-    # it). Both POST and DELETE are rejected up front with StorageError; real
-    # form-protocol POST is covered by test_presigned_post_form_executes.
-    with pytest.raises(StorageError, match="Unsupported signed URL method 'POST'"):
-        svc.get_signed_url("s.txt", method="POST", expires_in=300)
-    with pytest.raises(StorageError, match="Unsupported signed URL method 'DELETE'"):
-        svc.get_signed_url("s.txt", method="DELETE")
+    # Presigned POST is form-based (see test_presigned_post_form_executes) and unsupported here.
+    with pytest.raises(StorageError, match="Unsupported presigned URL method 'POST'"):
+        svc.generate_presigned_url("s.txt", method="POST")
+
+
+def test_generate_presigned_url_signs_upload_conditions(svc: StorageService) -> None:
+    """Typed conditions map to S3 wire headers, provider headers are signed verbatim, and all are returned."""
+    body = b"stage upload"
+    checksum = base64.b64encode(hashlib.sha256(body).digest()).decode()
+    presigned = svc.generate_presigned_url(
+        "up/a.txt",
+        method="PUT",
+        mime_type="text/plain",
+        content_length=len(body),
+        checksum_sha256=checksum,
+        provider_headers={"X-Amz-Checksum-Type": "FULL_OBJECT"},
+    )
+    assert presigned.headers == {
+        "content-length": str(len(body)),
+        "content-type": "text/plain",
+        "x-amz-checksum-sha256": checksum,
+        "x-amz-checksum-type": "FULL_OBJECT",
+    }
+    assert presigned.query_params["X-Amz-SignedHeaders"] == (
+        "content-length;content-type;host;x-amz-checksum-sha256;x-amz-checksum-type"
+    )
+    assert _send(presigned, body).status_code == 200
+    assert svc.download("up/a.txt") == body
+
+
+@pytest.mark.parametrize(
+    ("provider_headers", "match"),
+    [
+        ({"authorization": "x"}, "set by the S3 signer"),
+        ({"x-amz-date": "x"}, "set by the S3 signer"),
+        ({"x-amz-checksum-sha256": "x"}, "conflicts with checksum_sha256"),
+    ],
+)
+def test_generate_presigned_url_rejects_reserved_provider_headers(
+    svc: StorageService, provider_headers: dict[str, str], match: str
+) -> None:
+    """Provider headers must not override signer-owned or typed-condition headers."""
+    checksum = base64.b64encode(hashlib.sha256(b"x").digest()).decode()
+    with pytest.raises(StorageError, match=match):
+        svc.generate_presigned_url("k.txt", method="PUT", checksum_sha256=checksum, provider_headers=provider_headers)
 
 
 def test_presigned_post_form_executes(svc: StorageService, moto_server: str) -> None:
@@ -365,9 +400,9 @@ def test_cdn_rewrites_urls(moto_server: str) -> None:
         service.upload("c.txt", b"x")
         assert service.get_access_url("c.txt").startswith("https://cdn.example.com/")
         assert service.get_preview_url("c.txt").startswith("https://cdn.example.com/")
-        signed = service.get_signed_url("c.txt")
-        assert not signed.startswith("https://cdn.example.com/")
-        assert "test-bucket" in signed
+        presigned = service.generate_presigned_url("c.txt")
+        assert presigned.endpoint.startswith(moto_server)
+        assert "test-bucket" in presigned.endpoint
     finally:
         service.close()
         _reset_bucket(moto_server)

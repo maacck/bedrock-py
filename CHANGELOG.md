@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`bedrock.contrib.storage`** — `storage.generate_presigned_url()` returns a
+  `StoragePresignedUrl(method, endpoint, query_params, headers)` and can sign
+  upload conditions for browser direct uploads: `mime_type`, `content_length`,
+  `checksum_sha256` (base64 digest; S3 maps it to `x-amz-checksum-sha256`), and
+  backend-specific `provider_headers` (e.g. `x-amz-checksum-type`).
+  Backends implement `generate_presigned_url` instead of `get_signed_url`.
+
+### Deprecated
+
+- `storage.get_signed_url()` emits `DeprecationWarning`; use
+  `storage.generate_presigned_url()`.
+
 ## [0.2.1] - 2026-08-19
 
 ### Added
