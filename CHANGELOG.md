@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.2] - 2026-10-01
+
+### Breaking changes
+
+- **Storage backend protocol**: custom backends registered with
+  `register_backend()` must implement `generate_presigned_url()` (returning
+  `StoragePresignedUrl`) instead of `get_signed_url()`. The service-level
+  `storage.get_signed_url()` keeps working through the new method.
+
+### Added
+
+- **`bedrock.contrib.storage`** — `storage.generate_presigned_url()` returns a
+  `StoragePresignedUrl(method, endpoint, query_params, headers)` and can sign
+  upload conditions for browser direct uploads: `mime_type`, `content_length`,
+  `checksum_sha256` (base64 digest; S3 maps it to `x-amz-checksum-sha256`), and
+  backend-specific `provider_headers` (e.g. `x-amz-checksum-type`). Invalid
+  conditions and reserved headers raise `StorageError` before signing.
+- **`bedrock.contrib.cache`** — `CacheSlot.get_or_load()` / `aget_or_load()`
+  return the cached value or call the loader on a miss, store, and return it;
+  `aget_or_load()` accepts sync or async loaders.
+- `cache.configure()` logs the configured backend name and
+  `metrics.register_provider()` logs each newly registered provider at INFO.
+
+### Deprecated
+
+- `storage.get_signed_url()` emits `DeprecationWarning`; use
+  `storage.generate_presigned_url()`.
+
+### Documentation
+
+- Cache playbook expanded with slot, lock, coder, exception, and lifecycle references.
+- Storage guide (en/zh) documents presigned requests, browser upload usage, and bucket CORS requirements.
+
 ## [0.2.1] - 2026-08-19
 
 ### Added

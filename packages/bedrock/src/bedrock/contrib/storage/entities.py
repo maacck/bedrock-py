@@ -30,6 +30,22 @@ class StorageUploadResult(BedrockEntity):
     etag: str | None = None
 
 
+class StoragePresignedUrl(BedrockEntity):
+    """Result of :meth:`generate_presigned_url`: a time-limited request the client replays.
+
+    The client sends ``method`` to ``endpoint`` with ``query_params`` as the
+    query string and every entry of ``headers`` unchanged: both are part of
+    the signature, and the provider rejects the request when one is missing or
+    altered. ``query_params`` values are decoded; ``headers`` uses the
+    backend's lowercase wire names (e.g. ``x-amz-checksum-sha256`` on S3).
+    """
+
+    method: str
+    endpoint: str
+    query_params: dict[str, str] = Field(default_factory=dict)
+    headers: dict[str, str] = Field(default_factory=dict)
+
+
 class StorageListEntry(BedrockEntity):
     """A single entry returned by :meth:`list`.
 

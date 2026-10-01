@@ -119,7 +119,8 @@ The `storage` singleton is a `StorageService` instance. All access goes through 
 | `storage.head()` | `head(storage_key) → StorageObject \| None` | Object metadata, or `None` when it does not exist |
 | `storage.exists()` | `exists(storage_key) → bool` | `True` when the object exists |
 | `storage.delete()` | `delete(storage_key) → bool` | Delete the object; `True` when it existed |
-| `storage.get_signed_url()` | `get_signed_url(storage_key, method="GET", expires_in=3600) → str` | Presigned URL for `method` (`GET`/`PUT`) |
+| `storage.generate_presigned_url()` | `generate_presigned_url(storage_key, method="GET", expires_in=3600, *, mime_type=None, content_length=None, checksum_sha256=None, provider_headers=None) → StoragePresignedUrl` | Presigned request for `method` (`GET`/`PUT`), optionally signing upload conditions |
+| `storage.get_signed_url()` | `get_signed_url(storage_key, method="GET", expires_in=3600) → str` | **Deprecated** — use `generate_presigned_url()` |
 | `storage.get_access_url()` | `get_access_url(storage_key, acl=None, expires_in=3600) → str` | Direct download URL (CDN-rewritten when configured) |
 | `storage.get_preview_url()` | `get_preview_url(storage_key, acl=None, expires_in=3600) → str` | Inline preview URL (CDN-rewritten when configured) |
 
@@ -156,7 +157,7 @@ S3 can hand out three kinds of URLs:
 
 - `get_access_url()` — a direct download URL.
 - `get_preview_url()` — an inline preview URL (browser-safe, `ResponseContentDisposition=inline`), for embedding in `<img>`/`<video>` and similar.
-- `get_signed_url()` — a raw presigned URL for a specific method.
+- `generate_presigned_url()` — a raw presigned request for a specific method (see [Presigned Requests](#presigned-requests)).
 
 The `acl` switch on the access/preview helpers decides whether the URL is signed: explicit `acl=` parameter, else the bucket-level `STORAGE_S3_DEFAULT_ACL`, else none. Only public resolved ACLs (`public-read`, `public-read-write`) yield unsigned URLs; everything else (including `private`) is presigned.
 
@@ -164,7 +165,7 @@ The `acl` switch on the access/preview helpers decides whether the URL is signed
 Pass a public `acl` to the URL helpers only for objects that are actually public — the resulting URL is unsigned and anonymously readable.
 </Callout>
 
-The CDN origin is configured on the S3 backend's settings — `S3StorageSettings(cdn_base_url=...)` or the `STORAGE_S3_CDN_BASE_URL` env var — not as a `configure()` argument. Rewriting is a service-level behavior that reads the CDN origin from the active backend's settings: when set, the hosts of `get_access_url()` / `get_preview_url()` results are rewritten to it — signed or unsigned — with the query string preserved. `get_signed_url()` is **never** rewritten.
+The CDN origin is configured on the S3 backend's settings — `S3StorageSettings(cdn_base_url=...)` or the `STORAGE_S3_CDN_BASE_URL` env var — not as a `configure()` argument. Rewriting is a service-level behavior that reads the CDN origin from the active backend's settings: when set, the hosts of `get_access_url()` / `get_preview_url()` results are rewritten to it — signed or unsigned — with the query string preserved. `generate_presigned_url()` is **never** rewritten.
 
 ```python
 storage.configure(
@@ -178,17 +179,67 @@ storage.get_access_url("media/avatar/a1.png", acl="public-read")
 storage.get_access_url("media/avatar/a1.png")
 # https://cdn.example.com/my-bucket/media/avatar/a1.png?X-Amz-...  (signed, host rewritten)
 
-storage.get_signed_url("media/avatar/a1.png")
-# https://my-bucket.s3.amazonaws.com/media/avatar/a1.png?X-Amz-...  (never rewritten)
+storage.generate_presigned_url("media/avatar/a1.png").endpoint
+# https://my-bucket.s3.amazonaws.com/media/avatar/a1.png  (never rewritten)
 ```
 
 <Callout type="warning">
 The CDN must be a reverse proxy to the bucket that preserves the query string and the origin `Host` header — a CloudFront distribution with an S3 origin, or `nginx proxy_pass` to the bucket/endpoint. Otherwise presigned query parameters are stripped and public URLs break.
 </Callout>
 
-`get_signed_url()` supports `method="GET"` and `method="PUT"` only. Presigned POST uploads are not supported in v1: the multipart form protocol needs a `{url, fields}` pair, which a single-URL API cannot express — use `upload()` or a future presigned-post API; any other method raises `StorageError`.
-
 The local backend has no URL operations: all three raise `StorageUrlUnsupportedError`. Build URLs in your application instead.
+
+### Presigned Requests
+
+`generate_presigned_url()` returns a `StoragePresignedUrl` describing the whole request the client must send:
+
+| Field | Meaning |
+|-------|---------|
+| `method` | `GET` or `PUT` (uppercased) |
+| `endpoint` | Object URL without a query string |
+| `query_params` | Decoded query parameters (the signature lives here); encode them when building the URL |
+| `headers` | Every signed header except `host`, lowercase wire names; send all of them unchanged |
+
+For browser direct (stage) uploads, sign the expected upload so the provider rejects anything else:
+
+- `mime_type` — signed as `content-type`.
+- `content_length` — exact body size in bytes, signed as `content-length`.
+- `checksum_sha256` — **base64** of the raw 32-byte SHA-256 digest of the body (hex is rejected). Each backend maps it to its own header; on S3 it becomes `x-amz-checksum-sha256`.
+- `provider_headers` — backend-specific headers signed verbatim, e.g. `{"x-amz-checksum-type": "FULL_OBJECT"}` or `x-amz-meta-*`. Names are returned lowercased.
+
+```python
+presigned = storage.generate_presigned_url(
+    "uploads/a1.png",
+    method="PUT",
+    expires_in=300,
+    mime_type="image/png",
+    content_length=size,
+    checksum_sha256=sha256_b64,
+    provider_headers={"x-amz-checksum-type": "FULL_OBJECT"},
+)
+# presigned.headers == {"content-length": "...", "content-type": "image/png",
+#                       "x-amz-checksum-sha256": "...", "x-amz-checksum-type": "FULL_OBJECT"}
+```
+
+```js
+// Browser: fetch() sets content-length from the body itself and ignores a manual value.
+const url = new URL(presigned.endpoint);
+for (const [k, v] of Object.entries(presigned.query_params)) url.searchParams.set(k, v);
+const { "content-length": _, ...headers } = presigned.headers;
+await fetch(url, { method: presigned.method, headers, body: file });
+```
+
+Rules, all enforced with `StorageError` before any request is signed:
+
+- Only `GET` and `PUT` are supported. Presigned POST uploads need the multipart form protocol (`{url, fields}`) and are not supported.
+- Upload conditions are `PUT`-only.
+- `provider_headers` must not set `content-type` / `content-length` (use the typed arguments), must not repeat a name case-insensitively, and must not contain CR/LF/NUL. The S3 backend also rejects signer-owned headers (`host`, `authorization`, `x-amz-date`, `x-amz-content-sha256`, `x-amz-security-token`, `x-amz-algorithm`, `x-amz-signature*`) and `x-amz-checksum-sha256` when `checksum_sha256` is set.
+
+<Callout type="warning">
+Allow every signed header in the bucket's CORS `AllowedHeaders` (e.g. `content-type`, `x-amz-checksum-*`), or the browser preflight fails before the upload is sent.
+</Callout>
+
+`get_signed_url()` is deprecated: it emits `DeprecationWarning` and returns only `endpoint?query` without the headers, so it cannot carry upload conditions. Migrate to `generate_presigned_url()`.
 
 ## Streaming
 
@@ -255,7 +306,7 @@ from bedrock.contrib.storage import (
 
 **Don't expect async methods.** The v1 API is sync-only — there are no `a`-prefixed methods, and that is permanent. Async support, if added, will be a separate additive layer, never a replacement.
 
-**Don't use the local backend for URLs.** `get_signed_url()` / `get_access_url()` / `get_preview_url()` raise `StorageUrlUnsupportedError`. Build URLs in your application (e.g. a static route or a reverse proxy) instead.
+**Don't use the local backend for URLs.** `generate_presigned_url()` / `get_access_url()` / `get_preview_url()` raise `StorageUrlUnsupportedError`. Build URLs in your application (e.g. a static route or a reverse proxy) instead.
 
 **Don't assume `move()` is atomic on S3.** The S3 backend implements move as copy + delete. A failure between the two leaves both objects present.
 

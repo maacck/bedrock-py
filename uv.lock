@@ -52,7 +52,7 @@ wheels = [
 
 [[package]]
 name = "bedrock-cli"
-version = "0.2.1"
+version = "0.2.2"
 source = { editable = "packages/bedrock-cli" }
 dependencies = [
     { name = "click" },
@@ -87,7 +87,7 @@ dev = [
 
 [[package]]
 name = "bedrock-core"
-version = "0.2.1"
+version = "0.2.2"
 source = { editable = "packages/bedrock" }
 dependencies = [
     { name = "alembic" },
@@ -161,7 +161,7 @@ dev = [
 
 [[package]]
 name = "bedrock-mono"
-version = "0.2.1"
+version = "0.2.2"
 source = { virtual = "." }
 
 [package.dev-dependencies]

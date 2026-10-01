@@ -2,12 +2,15 @@
 
 import mimetypes
 from collections.abc import Iterable
+from contextvars import ContextVar
+from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO
+from typing import Any, BinaryIO
+from urllib.parse import parse_qsl
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from ..entities import StorageListEntry, StorageListResult, StorageObject, StorageUploadResult
+from ..entities import StorageListEntry, StorageListResult, StorageObject, StoragePresignedUrl, StorageUploadResult
 from ..exc import (
     StorageConnectionError,
     StorageDownloadError,
@@ -33,6 +36,36 @@ _S3_CANNED_ACLS = frozenset(
 _PUBLIC_ACLS = frozenset({"public-read", "public-read-write"})
 
 _METHOD_TO_CLIENT = {"GET": "get_object", "PUT": "put_object"}
+
+#: S3 wire header for ``generate_presigned_url(checksum_sha256=...)``.
+_CHECKSUM_SHA256_HEADER = "x-amz-checksum-sha256"
+
+#: Headers the SigV4 signer or boto3 owns; ``provider_headers`` must not override them.
+_SIGNER_OWNED_HEADERS = frozenset(
+    {"host", "authorization", "x-amz-date", "x-amz-content-sha256", "x-amz-security-token", "x-amz-algorithm"}
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _PresignContext:
+    """Per-call presign state: headers to inject before signing and the headers seen by the signer."""
+
+    inject: dict[str, str]
+    captured: dict[str, str]
+
+
+#: Scopes header injection to the current ``generate_presigned_url`` call (thread- and task-safe).
+_PRESIGN_CONTEXT: ContextVar[_PresignContext | None] = ContextVar("bedrock_storage_s3_presign", default=None)
+
+
+def _inject_presign_headers(request: Any, **_: Any) -> None:
+    """``before-sign`` handler: add ``provider_headers`` and record the headers about to be signed."""
+    context = _PRESIGN_CONTEXT.get()
+    if context is None:
+        return
+    for name, value in context.inject.items():
+        request.headers[name] = value
+    context.captured.update({name.lower(): str(value) for name, value in request.headers.items()})
 
 
 class S3StorageSettings(BaseSettings):
@@ -80,6 +113,7 @@ class S3Backend:
             # is required by most S3-compatible endpoints (MinIO, etc.).
             config=Config(signature_version="s3v4"),
         )
+        self._client.meta.events.register("before-sign.s3", _inject_presign_headers)
         self._bucket = self._settings.bucket_name
 
     @property
@@ -252,31 +286,64 @@ class S3Backend:
         self._client.delete_object(Bucket=self._bucket, Key=storage_key)
         return True
 
-    def get_signed_url(self, storage_key: str, method: str = "GET", expires_in: int = 3600) -> str:
-        """Return a presigned URL for ``method`` (``GET`` or ``PUT`` only).
+    def generate_presigned_url(
+        self,
+        storage_key: str,
+        method: str = "GET",
+        expires_in: int = 3600,
+        *,
+        mime_type: str | None = None,
+        content_length: int | None = None,
+        checksum_sha256: str | None = None,
+        provider_headers: dict[str, str] | None = None,
+    ) -> StoragePresignedUrl:
+        """Return a SigV4 query-presigned request for ``method`` (``GET`` or ``PUT``).
 
-        Presigned POST uploads are unsupported here: boto3 exposes no
-        ``post_object`` client method — presigned POST uploads use the multipart
-        form protocol (``generate_presigned_post`` returns ``{url, fields}``),
-        which a single-URL API cannot express. Use :meth:`upload` instead, or a
-        future presigned-post API.
+        Typed conditions map to ``PutObject`` parameters (``content-type``,
+        ``content-length``, ``x-amz-checksum-sha256``). ``provider_headers``
+        (e.g. ``x-amz-checksum-type``) are injected into the request right
+        before signing, so headers boto3 has no parameter for are signed too.
+        The returned ``headers`` are read back from ``X-Amz-SignedHeaders``.
+
+        Presigned POST uploads are unsupported: they use the multipart form
+        protocol (``generate_presigned_post`` returns ``{url, fields}``).
         """
-        client_method = _METHOD_TO_CLIENT.get(method.upper())
+        client_method = _METHOD_TO_CLIENT.get(method)
         if client_method is None:
-            raise StorageError(
-                msg=f"Unsupported signed URL method '{method}'. Supported: GET, PUT. "
-                "Presigned POST uploads need the form protocol (url + fields) which "
-                "get_signed_url cannot express in v1; use upload() instead, or a "
-                "future presigned-post API."
-            )
+            raise StorageError(msg=f"Unsupported presigned URL method '{method}'. Supported: GET, PUT.")
+        params: dict = {"Bucket": self._bucket, "Key": storage_key}
+        if mime_type is not None:
+            params["ContentType"] = mime_type
+        if content_length is not None:
+            params["ContentLength"] = content_length
+        if checksum_sha256 is not None:
+            params["ChecksumSHA256"] = checksum_sha256
+        extra_headers = provider_headers or {}
+        for name in extra_headers:
+            if name in _SIGNER_OWNED_HEADERS or name.startswith("x-amz-signature"):
+                raise StorageError(msg=f"Provider header '{name}' is set by the S3 signer and cannot be overridden.")
+            if name == _CHECKSUM_SHA256_HEADER and checksum_sha256 is not None:
+                raise StorageError(msg=f"Provider header '{name}' conflicts with checksum_sha256; pass only one.")
+        captured: dict[str, str] = {}
+        token = _PRESIGN_CONTEXT.set(_PresignContext(inject=extra_headers, captured=captured))
         try:
-            return self._client.generate_presigned_url(
-                client_method,
-                Params={"Bucket": self._bucket, "Key": storage_key},
-                ExpiresIn=expires_in,
-            )
-        except Exception as exc:  # noqa: BLE001 - surface boto3 client limitations as StorageError
+            url = self._client.generate_presigned_url(client_method, Params=params, ExpiresIn=expires_in)
+        except Exception as exc:  # noqa: BLE001 - surface boto3 validation/client errors as StorageError
             raise StorageError(msg=f"Failed to presign '{method}' for '{storage_key}': {exc}") from exc
+        finally:
+            _PRESIGN_CONTEXT.reset(token)
+        endpoint, _, query = url.partition("?")
+        query_params = dict(parse_qsl(query, keep_blank_values=True))
+        signed = [name for name in query_params.get("X-Amz-SignedHeaders", "").split(";") if name and name != "host"]
+        missing = [name for name in signed if name not in captured]
+        if missing:
+            raise StorageError(msg=f"Presigned request for '{storage_key}' signed unknown headers: {missing}.")
+        return StoragePresignedUrl(
+            method=method,
+            endpoint=endpoint,
+            query_params=query_params,
+            headers={name: captured[name] for name in signed},
+        )
 
     def get_access_url(self, storage_key: str, acl: str | None = None, expires_in: int = 3600) -> str:
         """Return a direct access URL: unsigned for public ACLs, signed otherwise."""
@@ -285,7 +352,11 @@ class S3Backend:
             self._validate_acl(resolved_acl)
         if resolved_acl in _PUBLIC_ACLS:
             return self._plain_url(storage_key)
-        return self.get_signed_url(storage_key, method="GET", expires_in=expires_in)
+        return self._client.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": self._bucket, "Key": storage_key},
+            ExpiresIn=expires_in,
+        )
 
     def get_preview_url(self, storage_key: str, acl: str | None = None, expires_in: int = 3600) -> str:
         """Return an inline preview URL (browser-safe, ``ResponseContentDisposition=inline``).

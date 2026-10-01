@@ -119,7 +119,8 @@ storage.configure("custom")
 | `storage.head()` | `head(storage_key) → StorageObject \| None` | 对象元数据，不存在时返回 `None` |
 | `storage.exists()` | `exists(storage_key) → bool` | 对象存在时返回 `True` |
 | `storage.delete()` | `delete(storage_key) → bool` | 删除对象；存在时返回 `True` |
-| `storage.get_signed_url()` | `get_signed_url(storage_key, method="GET", expires_in=3600) → str` | 指定 `method`（`GET`/`PUT`）的预签名 URL |
+| `storage.generate_presigned_url()` | `generate_presigned_url(storage_key, method="GET", expires_in=3600, *, mime_type=None, content_length=None, checksum_sha256=None, provider_headers=None) → StoragePresignedUrl` | 指定 `method`（`GET`/`PUT`）的预签名请求，可签入上传条件 |
+| `storage.get_signed_url()` | `get_signed_url(storage_key, method="GET", expires_in=3600) → str` | **已弃用**——请改用 `generate_presigned_url()` |
 | `storage.get_access_url()` | `get_access_url(storage_key, acl=None, expires_in=3600) → str` | 直接下载 URL（配置 CDN 时会被重写） |
 | `storage.get_preview_url()` | `get_preview_url(storage_key, acl=None, expires_in=3600) → str` | 内联预览 URL（配置 CDN 时会被重写） |
 
@@ -156,7 +157,7 @@ S3 可以提供三种 URL：
 
 - `get_access_url()`——直接下载 URL。
 - `get_preview_url()`——内联预览 URL（浏览器安全，`ResponseContentDisposition=inline`），用于 `<img>`/`<video>` 等嵌入场景。
-- `get_signed_url()`——针对特定方法的原始预签名 URL。
+- `generate_presigned_url()`——针对特定方法的原始预签名请求（见[预签名请求](#预签名请求)）。
 
 访问/预览助手上的 `acl` 开关决定 URL 是否签名：显式 `acl=` 参数，否则使用桶级别的 `STORAGE_S3_DEFAULT_ACL`，否则不解析 ACL。只有解析为公开 ACL（`public-read`、`public-read-write`）时才生成未签名 URL；其他一切情况（包括 `private`）都生成预签名 URL。
 
@@ -164,7 +165,7 @@ S3 可以提供三种 URL：
 只有对真正公开的对象才向 URL 助手传入公开 `acl`——生成的 URL 未签名，可被匿名读取。
 </Callout>
 
-CDN 源站配置在 S3 后端的设置上——`S3StorageSettings(cdn_base_url=...)` 或 `STORAGE_S3_CDN_BASE_URL` 环境变量——而不是 `configure()` 的参数。重写是服务层行为，从当前后端的设置中读取 CDN 源站：配置后，`get_access_url()` / `get_preview_url()` 结果的 host 会被重写到 CDN——无论签名与否——查询字符串保持不变。`get_signed_url()` **永不**被重写。
+CDN 源站配置在 S3 后端的设置上——`S3StorageSettings(cdn_base_url=...)` 或 `STORAGE_S3_CDN_BASE_URL` 环境变量——而不是 `configure()` 的参数。重写是服务层行为，从当前后端的设置中读取 CDN 源站：配置后，`get_access_url()` / `get_preview_url()` 结果的 host 会被重写到 CDN——无论签名与否——查询字符串保持不变。`generate_presigned_url()` **永不**被重写。
 
 ```python
 storage.configure(
@@ -178,17 +179,67 @@ storage.get_access_url("media/avatar/a1.png", acl="public-read")
 storage.get_access_url("media/avatar/a1.png")
 # https://cdn.example.com/my-bucket/media/avatar/a1.png?X-Amz-...  （签名，host 已重写）
 
-storage.get_signed_url("media/avatar/a1.png")
-# https://my-bucket.s3.amazonaws.com/media/avatar/a1.png?X-Amz-...  （永不重写）
+storage.generate_presigned_url("media/avatar/a1.png").endpoint
+# https://my-bucket.s3.amazonaws.com/media/avatar/a1.png  （永不重写）
 ```
 
 <Callout type="warning">
 CDN 必须是到桶的反向代理，且要保留查询字符串与源站 `Host` 头——例如以 S3 为源的 CloudFront 分发，或 `nginx proxy_pass` 到桶/端点。否则预签名查询参数会被剥离，公开 URL 也会失效。
 </Callout>
 
-`get_signed_url()` 仅支持 `method="GET"` 与 `method="PUT"`。v1 不支持预签名 POST 上传：multipart 表单协议需要 `{url, fields}` 成对返回，单一 URL 的 API 无法表达——请改用 `upload()` 或未来的 presigned-post API；其他方法会抛出 `StorageError`。
-
 本地后端没有 URL 操作：三种 URL 方法都会抛出 `StorageUrlUnsupportedError`。请在应用层构建 URL。
+
+### 预签名请求
+
+`generate_presigned_url()` 返回 `StoragePresignedUrl`，描述客户端必须发送的完整请求：
+
+| 字段 | 含义 |
+|------|------|
+| `method` | `GET` 或 `PUT`（大写） |
+| `endpoint` | 不含查询字符串的对象 URL |
+| `query_params` | 已解码的查询参数（签名在其中）；拼 URL 时需编码 |
+| `headers` | 除 `host` 外所有被签名的请求头，小写线上名称；必须原样全部发送 |
+
+前端直传（stage upload）时，把预期的上传条件签进请求，提供方会拒绝不符合的请求：
+
+- `mime_type`——签为 `content-type`。
+- `content_length`——请求体的精确字节数，签为 `content-length`。
+- `checksum_sha256`——请求体 SHA-256 原始 32 字节摘要的 **base64**（拒绝 hex）。各后端映射为自己的请求头；S3 上为 `x-amz-checksum-sha256`。
+- `provider_headers`——后端特定请求头，原样签名，例如 `{"x-amz-checksum-type": "FULL_OBJECT"}` 或 `x-amz-meta-*`。名称以小写返回。
+
+```python
+presigned = storage.generate_presigned_url(
+    "uploads/a1.png",
+    method="PUT",
+    expires_in=300,
+    mime_type="image/png",
+    content_length=size,
+    checksum_sha256=sha256_b64,
+    provider_headers={"x-amz-checksum-type": "FULL_OBJECT"},
+)
+# presigned.headers == {"content-length": "...", "content-type": "image/png",
+#                       "x-amz-checksum-sha256": "...", "x-amz-checksum-type": "FULL_OBJECT"}
+```
+
+```js
+// 浏览器：fetch() 会根据 body 自行设置 content-length，并忽略手动设置的值。
+const url = new URL(presigned.endpoint);
+for (const [k, v] of Object.entries(presigned.query_params)) url.searchParams.set(k, v);
+const { "content-length": _, ...headers } = presigned.headers;
+await fetch(url, { method: presigned.method, headers, body: file });
+```
+
+以下规则在签名前统一以 `StorageError` 强制：
+
+- 仅支持 `GET` 与 `PUT`。预签名 POST 上传需要 multipart 表单协议（`{url, fields}`），不支持。
+- 上传条件仅限 `PUT`。
+- `provider_headers` 不得设置 `content-type` / `content-length`（使用类型化参数），不得出现大小写不敏感的重名，不得包含 CR/LF/NUL。S3 后端还会拒绝签名器占用的请求头（`host`、`authorization`、`x-amz-date`、`x-amz-content-sha256`、`x-amz-security-token`、`x-amz-algorithm`、`x-amz-signature*`），以及在设置 `checksum_sha256` 时再传入 `x-amz-checksum-sha256`。
+
+<Callout type="warning">
+在桶的 CORS `AllowedHeaders` 中放行所有被签名的请求头（如 `content-type`、`x-amz-checksum-*`），否则浏览器预检会在上传前失败。
+</Callout>
+
+`get_signed_url()` 已弃用：会发出 `DeprecationWarning`，且只返回不含请求头的 `endpoint?query`，无法携带上传条件。请迁移到 `generate_presigned_url()`。
 
 ## 流式读取
 
@@ -255,7 +306,7 @@ from bedrock.contrib.storage import (
 
 **不要期待异步方法。** v1 API 仅同步——不存在 `a` 前缀方法，而且这是永久性的。未来即使增加异步支持，也会是独立的增量层，绝不会替代现有 API。
 
-**不要用本地后端生成 URL。** `get_signed_url()` / `get_access_url()` / `get_preview_url()` 会抛出 `StorageUrlUnsupportedError`。请在应用层构建 URL（例如静态路由或反向代理）。
+**不要用本地后端生成 URL。** `generate_presigned_url()` / `get_access_url()` / `get_preview_url()` 会抛出 `StorageUrlUnsupportedError`。请在应用层构建 URL（例如静态路由或反向代理）。
 
 **不要假设 S3 上的 `move()` 是原子的。** S3 后端将移动实现为复制 + 删除。两步之间失败会同时留下两个对象。
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from bedrock.contrib.cache.coder import BytesCoder, Coder
 from bedrock.contrib.cache.service import CacheService
 from pydantic import BaseModel
@@ -75,3 +77,60 @@ class TestCacheNamespace:
         slot.set(b"opaque-token", token_id="abc")
 
         assert slot.get(token_id="abc") == b"opaque-token"
+
+    def test_slot_get_or_load_populates_on_miss(self) -> None:
+        cache = CacheService()
+        slot = cache.namespace("idp:application").slot(
+            "entity:{app_id}",
+            value_type=ExampleEntity,
+            ttl=123,
+        )
+        entity = ExampleEntity(id=1, payload={"count": 7})
+        calls = {"count": 0}
+
+        def loader() -> ExampleEntity:
+            calls["count"] += 1
+            return entity
+
+        loaded = slot.get_or_load(loader, app_id="demo")
+        again = slot.get_or_load(loader, app_id="demo")
+
+        assert loaded == entity
+        assert again == entity
+        assert calls["count"] == 1
+        assert slot.get(app_id="demo") == entity
+
+    def test_slot_get_or_load_keeps_cached_falsy_values(self) -> None:
+        cache = CacheService()
+        slot = cache.namespace("counters").slot("hits:{user_id}", value_type=int)
+        slot.set(0, user_id="demo")
+        calls = {"count": 0}
+
+        def loader() -> int:
+            calls["count"] += 1
+            return 7
+
+        assert slot.get_or_load(loader, user_id="demo") == 0
+        assert calls["count"] == 0
+
+    def test_slot_aget_or_load_supports_async_loader(self) -> None:
+        cache = CacheService()
+        slot = cache.namespace("idp:application").slot(
+            "entity:{app_id}",
+            value_type=ExampleEntity,
+        )
+        entity = ExampleEntity(id=2, payload={"count": 9})
+        calls = {"count": 0}
+
+        async def loader() -> ExampleEntity:
+            calls["count"] += 1
+            return entity
+
+        async def scenario() -> None:
+            loaded = await slot.aget_or_load(loader, app_id="demo")
+            again = await slot.aget_or_load(loader, app_id="demo")
+            assert loaded == entity
+            assert again == entity
+            assert calls["count"] == 1
+
+        asyncio.run(scenario())

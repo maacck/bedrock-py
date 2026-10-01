@@ -1,17 +1,24 @@
 """Storage service: singleton facade over pluggable backends."""
 
+import base64
+import binascii
+import re
+import warnings
 from collections.abc import Iterable
 from pathlib import Path
 from typing import BinaryIO
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import quote, urlencode, urlparse, urlunparse
 
 from pydantic_settings import BaseSettings
 
 from bedrock.common.registry import ClassRegistry
+from bedrock.logging import get_logger
 
 from .base import StorageBackend
-from .entities import StorageListResult, StorageObject, StorageUploadResult
+from .entities import StorageListResult, StorageObject, StoragePresignedUrl, StorageUploadResult
 from .exc import StorageBackendNotConfiguredError, StorageError, StorageKeyError
+
+logger = get_logger(__name__)
 
 _BACKEND_REGISTRY = ClassRegistry(
     {
@@ -62,6 +69,55 @@ def normalize_storage_key(key: str) -> str:
     return "/".join(parts)
 
 
+_PRESIGN_METHODS = frozenset({"GET", "PUT"})
+
+#: RFC 9110 ``token`` characters allowed in a header field name.
+_HEADER_NAME_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
+
+#: Headers owned by typed :meth:`StorageService.generate_presigned_url` arguments.
+_TYPED_HEADERS = frozenset({"content-type", "content-length"})
+
+
+def _validate_header_value(label: str, value: object) -> None:
+    """Reject non-string values and values that would split or truncate the header line."""
+    if not isinstance(value, str):
+        raise StorageError(msg=f"{label} must be a string, got {type(value).__name__}.")
+    if any(char in value for char in "\r\n\x00"):
+        raise StorageError(msg=f"{label} must not contain CR, LF, or NUL characters.")
+
+
+def _validate_checksum_sha256(value: object) -> None:
+    """Require the base64 encoding of a 32-byte SHA-256 digest (the S3 wire format)."""
+    if not isinstance(value, str):
+        raise StorageError(msg="checksum_sha256 must be a base64 string.")
+    try:
+        digest = base64.b64decode(value, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise StorageError(msg="checksum_sha256 must be valid base64 (not hex).") from exc
+    if len(digest) != 32:
+        raise StorageError(msg=f"checksum_sha256 must encode a 32-byte SHA-256 digest, got {len(digest)} bytes.")
+
+
+def _normalize_provider_headers(provider_headers: dict[str, str] | None) -> dict[str, str]:
+    """Validate provider headers and return them with lowercased, unique names."""
+    if not provider_headers:
+        return {}
+    normalized: dict[str, str] = {}
+    for name, value in provider_headers.items():
+        if not isinstance(name, str) or not _HEADER_NAME_RE.match(name):
+            raise StorageError(msg=f"Invalid provider header name {name!r}.")
+        _validate_header_value(f"provider header {name!r}", value)
+        lowered = name.lower()
+        if lowered in _TYPED_HEADERS:
+            raise StorageError(
+                msg=f"Provider header {name!r} is set through a typed argument (mime_type / content_length)."
+            )
+        if lowered in normalized:
+            raise StorageError(msg=f"Duplicate provider header {name!r} (header names are case-insensitive).")
+        normalized[lowered] = value
+    return normalized
+
+
 class StorageService:
     """Unified storage service with dynamic backend loading.
 
@@ -98,7 +154,7 @@ class StorageService:
                 on :class:`~bedrock.contrib.storage.S3StorageSettings`), the
                 hosts of URLs from :meth:`get_access_url` and
                 :meth:`get_preview_url` are rewritten to it (query params
-                kept); :meth:`get_signed_url` is never rewritten.
+                kept); :meth:`generate_presigned_url` is never rewritten.
 
         Returns:
             The newly configured backend instance.
@@ -119,6 +175,7 @@ class StorageService:
             raise StorageBackendNotConfiguredError(f"Failed to load backend '{backend_name}'.")
 
         self._backend = backend_cls(settings=settings)
+        logger.info("Storage backend configured: {}", backend_name)
         return self._backend
 
     def get_backend(self) -> StorageBackend:
@@ -216,15 +273,83 @@ class StorageService:
         key = normalize_storage_key(storage_key)
         return self.get_backend().delete(key)
 
-    def get_signed_url(self, storage_key: str, method: str = "GET", expires_in: int = 3600) -> str:
-        """Return a time-limited URL for ``method`` (``GET``/``PUT``; ``POST`` form uploads are not supported in v1).
+    def generate_presigned_url(
+        self,
+        storage_key: str,
+        method: str = "GET",
+        expires_in: int = 3600,
+        *,
+        mime_type: str | None = None,
+        content_length: int | None = None,
+        checksum_sha256: str | None = None,
+        provider_headers: dict[str, str] | None = None,
+    ) -> StoragePresignedUrl:
+        """Return a presigned request: send ``method`` to ``endpoint`` with ``query_params`` and every ``headers`` entry.
+
+        Upload conditions are signed into the request, so the provider rejects
+        an upload whose matching header is missing or differs:
+
+        Args:
+            storage_key: Object key (normalized).
+            method: ``GET`` or ``PUT``.
+            expires_in: Lifetime in seconds (positive int).
+            mime_type: ``PUT`` only; signed as ``content-type``.
+            content_length: ``PUT`` only; exact body size in bytes, signed as ``content-length``.
+            checksum_sha256: ``PUT`` only; base64 of the 32-byte SHA-256 digest of the body,
+                mapped to the backend's header (``x-amz-checksum-sha256`` on S3).
+            provider_headers: Backend-specific headers signed verbatim (e.g.
+                ``{"x-amz-checksum-type": "FULL_OBJECT"}``). Names are returned lowercased.
 
         Never rewritten by CDN; backends without support raise
         StorageUrlUnsupportedError.
+
+        Raises:
+            StorageError: On invalid arguments or a header the backend refuses to sign.
         """
         self._validate_expires_in(expires_in)
         key = normalize_storage_key(storage_key)
-        return self.get_backend().get_signed_url(key, method=method, expires_in=expires_in)
+        method = method.upper() if isinstance(method, str) else method
+        if method not in _PRESIGN_METHODS:
+            raise StorageError(msg=f"Unsupported presigned URL method {method!r}. Supported: GET, PUT.")
+        has_conditions = mime_type is not None or content_length is not None or checksum_sha256 is not None
+        if has_conditions and method != "PUT":
+            raise StorageError(msg="mime_type, content_length, and checksum_sha256 can only be signed for PUT.")
+        if mime_type is not None:
+            _validate_header_value("mime_type", mime_type)
+            if not mime_type:
+                raise StorageError(msg="mime_type must not be empty.")
+        if content_length is not None and (
+            not isinstance(content_length, int) or isinstance(content_length, bool) or content_length < 0
+        ):
+            raise StorageError(msg=f"content_length must be a non-negative integer, got {content_length!r}.")
+        if checksum_sha256 is not None:
+            _validate_checksum_sha256(checksum_sha256)
+        headers = _normalize_provider_headers(provider_headers)
+        return self.get_backend().generate_presigned_url(
+            key,
+            method=method,
+            expires_in=expires_in,
+            mime_type=mime_type,
+            content_length=content_length,
+            checksum_sha256=checksum_sha256,
+            provider_headers=headers,
+        )
+
+    def get_signed_url(self, storage_key: str, method: str = "GET", expires_in: int = 3600) -> str:
+        """Deprecated: use :meth:`generate_presigned_url`, which also returns the headers to send.
+
+        Return ``endpoint?query`` of an unconditioned presigned request for
+        ``method`` (``GET``/``PUT``). Never rewritten by CDN.
+        """
+        warnings.warn(
+            "storage.get_signed_url() is deprecated; use storage.generate_presigned_url() instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        presigned = self.generate_presigned_url(storage_key, method=method, expires_in=expires_in)
+        if not presigned.query_params:
+            return presigned.endpoint
+        return f"{presigned.endpoint}?{urlencode(presigned.query_params, quote_via=quote, safe='-_.~')}"
 
     def get_access_url(self, storage_key: str, acl: str | None = None, expires_in: int = 3600) -> str:
         """Return a direct access (download) URL, rewritten through the CDN when configured.
