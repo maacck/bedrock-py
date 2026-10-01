@@ -135,6 +135,7 @@ class MetricsManager:
         """Register a provider; every event is broadcast to all providers."""
         if not any(existing is provider for existing in self._providers):
             self._providers.append(provider)
+            self._logger.info("Metrics provider registered: %s", type(provider).__name__)
 
     def list_providers(self) -> list[str]:
         """Return the registered provider class names, in order."""

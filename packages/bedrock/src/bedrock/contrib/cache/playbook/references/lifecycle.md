@@ -58,7 +58,7 @@ unconfigured  --configure()/get_backend()-->  active  --close()/aclose()-->  unc
 
 | Method | Behavior |
 |--------|----------|
-| `configure(name="memory", settings=None)` | Instantiate the named backend and store it. Unknown name → `BackendNotConfiguredError`. **Does not** close a previous backend. |
+| `configure(name="memory", settings=None)` | Instantiate the named backend and store it. Logs `Cache backend configured: {name}` at INFO. Unknown name → `BackendNotConfiguredError`. **Does not** close a previous backend. |
 | `get_backend()` | Return the active backend, or `configure("memory")` if none. |
 | `close()` | `backend.close()` then `_backend = None`. Safe if already unconfigured. |
 | `aclose()` | Async close, then `_backend = None`. |

@@ -37,6 +37,7 @@ from bedrock.contrib.cache import cache
 
 cache.configure("memory")  # default; also used lazily on first operation
 cache.configure("redis")   # requires: uv add bedrock-core[cache-redis]
+# INFO: Cache backend configured: memory / redis
 
 cache.set("user:1", {"name": "Alice"}, ex=300)
 value = cache.get("user:1")  # -> {"name": "Alice"}
@@ -112,7 +113,7 @@ Memory is process-local. Use Redis for multiple processes. Redis `clear()` scans
 | `ready` | `cache.configure()` → memory backend |
 | `on_shutdown` | `cache.close()` |
 | `on_load` | not implemented |
-| `cache.configure(name, settings=None)` | Replace the active backend |
+| `cache.configure(name, settings=None)` | Replace the active backend; logs the backend name at INFO |
 | `cache.get_backend()` | Lazy memory configure if unset |
 | `cache.close()` / `aclose()` | Close connections and clear the backend |
 

@@ -7,9 +7,12 @@ from typing import TYPE_CHECKING, Any
 from pydantic_settings import BaseSettings
 
 from ...common.registry import ClassRegistry
+from ...logging import get_logger
 from .base import CacheBackend
 from .coder import CacheCoder, Coder
 from .exc import BackendNotConfiguredError
+
+logger = get_logger(__name__)
 
 if TYPE_CHECKING:
     from .lock import CacheLock
@@ -89,6 +92,7 @@ class CacheService:
             raise BackendNotConfiguredError(f"Failed to load backend '{backend_name}'.")
 
         self._backend = backend_cls(settings=settings)
+        logger.info("Cache backend configured: {}", backend_name)
         return self._backend
 
     def get_backend(self) -> CacheBackend:

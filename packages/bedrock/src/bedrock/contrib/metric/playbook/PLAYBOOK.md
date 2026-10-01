@@ -16,9 +16,10 @@ Application metrics instrumentation: counter/gauge/timer handles with decorators
 from bedrock.contrib.metric import metrics, StatsDProvider, StatsDSettings
 
 metrics.register_provider(StatsDProvider(settings=StatsDSettings(host="127.0.0.1")))
+# INFO: Metrics provider registered: StatsDProvider
 ```
 
-Every emit writes a log record to the `bedrock.contrib.metric` logger (`INFO` by default), then fans out to all registered providers. There is no `configure()` and no default provider.
+Every emit writes a log record to the `bedrock.contrib.metric` logger (`INFO` by default), then fans out to all registered providers. There is no `configure()` and no default provider. `register_provider()` logs the provider class at INFO when a new instance is added.
 
 ## Handles
 
