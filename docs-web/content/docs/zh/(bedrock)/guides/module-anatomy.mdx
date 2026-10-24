@@ -271,6 +271,16 @@ shutdown()
 | `ready` | 就绪 | 所有模块都已加载。可以安全访问其他模块并执行跨模块初始化。 |
 | `on_shutdown` | 关闭 | 优雅拆除。关闭连接、刷新缓冲区、释放资源。 |
 
+### 失败语义
+
+生命周期步骤失败时，registry 会保持状态一致：启动可以重试，关闭会尽力释放所有资源。
+
+- **安装具备失败原子性。** `install()`（或 `populate()` 的安装阶段）失败时，本次调用引入的所有模块都会从 registry 和安装顺序中移除；调用之前已安装的模块不会被移除。已完成 `on_load` 的新模块会尽力回滚：按安装顺序的逆序调用其 `on_shutdown` 并触发 `module_shutdown`。如果回滚也失败，则抛出 `ModuleStartupRollbackError`（`ModuleLifecycleError` 的子类），其 `failures` 先是原始失败，随后是回滚失败。
+- **就绪状态按模块记录。** 每个模块依次经历 `loading → loaded → ready → shutdown`（`ModuleLifecycleState`）。某个 `ready` 钩子失败后，已就绪的模块保持就绪；再次调用 `mark_ready()`（或用相同路径调用 `populate()`）会跳过它们并继续，只有所有模块就绪后才会触发 `registry_ready`。
+- **关闭会尝试每个模块。** `shutdown()` 按逆序对尚未完成关闭的每个模块调用 `on_shutdown`，即使中途失败也会继续，最后抛出一个 `ModuleLifecycleError`，其 `failures` 列出所有失败模块及其原始原因，且不会触发 `registry_shutdown`。已完成关闭的模块不会再次关闭，因此重复调用 `shutdown()` 是安全的；钩子失败的模块会被重试。
+- **`mark_ready()` 和 `shutdown()` 不可重入。** 在其中一个运行期间，从钩子或信号接收器再次调用任一方法会抛出 `ModuleLifecycleError`，而不会重复执行钩子。请在钩子之外触发停止（例如设置标志位），不要在 `on_shutdown` / `ready` 中调用 `shutdown()`。
+- **失败带有归因。** `failures` 中的每一项都标明模块和步骤（`on_load`、`manifest`、`ready`、`on_shutdown`、`module_loaded` 等），错误的 `__cause__` 是包含全部失败的 `ExceptionGroup`。
+
 ### Signals
 
 每次生命周期转换都会发出一个外部代码可观察的 signal：

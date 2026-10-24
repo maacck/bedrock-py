@@ -314,7 +314,9 @@ def on_all_ready(sender, **kwargs):
 在 `registry.shutdown()` 期间：
 
 4. 按**逆序**调用每个模块的 `on_shutdown` 钩子 → 每个模块触发一次 `module_shutdown`
-5. 注册表发出完成信号 → 触发一次 `registry_shutdown`
+5. 注册表发出完成信号 → 仅在所有模块都已关闭后触发一次 `registry_shutdown`
+
+如果某一步失败，信号只反映实际完成的步骤：`on_load` 失败不会触发 `module_loaded`，安装会被回滚（已加载的模块在回滚时触发 `module_shutdown`）；只要仍有模块未就绪或未关闭，就不会触发 `registry_ready` / `registry_shutdown`。重复调用 `mark_ready()` 或 `shutdown()` 不会为已完成的模块重复触发信号。
 
 ## 同步/异步互操作
 

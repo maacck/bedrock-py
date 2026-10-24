@@ -314,7 +314,9 @@ During `registry.populate(modules)`:
 During `registry.shutdown()`:
 
 4. Each module's `on_shutdown` hook is called in **reverse** order → `module_shutdown` per module
-5. Registry signals completion → `registry_shutdown` once
+5. Registry signals completion → `registry_shutdown` once, only after every module has shut down
+
+If a step fails, signals follow what actually completed: a failed `on_load` emits no `module_loaded` and the install is rolled back (modules that had loaded emit `module_shutdown` while being unwound); `registry_ready` and `registry_shutdown` are never emitted while a module is not ready or not shut down. A repeated `mark_ready()` or `shutdown()` does not re-emit signals for modules that already completed.
 
 ## Sync/Async Interop
 
