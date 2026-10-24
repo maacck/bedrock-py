@@ -32,8 +32,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- `ModuleRegistry.install()`, `populate()`, `mark_ready()` and `shutdown()` now hold the registry lock for
-  the whole operation, so concurrent calls cannot run a hook twice.
+- `ModuleRegistry.install()`, `populate()`, `mark_ready()` and `shutdown()` hold the registry lock for the
+  whole operation (`populate()` keeps it across both its install and ready phases), so other threads wait
+  until the operation finishes and cannot run a hook twice.
+- `mark_ready()` and `shutdown()` are not re-entrant: calling either from a bootstrap hook or a lifecycle
+  signal receiver while one of them is running raises `ModuleLifecycleError` instead of re-running hooks
+  (previously this recursed until `RecursionError`). The guard is registry state, not a thread lock.
+- A failed `ready` hook now raises a `ModuleLifecycleError` whose `failures` name the module, like
+  `shutdown()`. `failures` are always attributed to the module and step where they happened
+  (`on_load`, `manifest`, `dependency`, `module_loaded`, `ready`, `on_shutdown`, ...), and the `__cause__` of
+  every aggregated lifecycle error is an `ExceptionGroup` of all its failures.
+- `AppConfig` validates assignments, so assigning a plain string to `lifecycle_state` is coerced to
+  `ModuleLifecycleState` (invalid values raise `ValidationError`).
 
 ## [0.2.2] - 2026-10-01
 

@@ -23,22 +23,25 @@ _BOOTSTRAP = """
 import builtins
 
 
-def _record(hook, app):
+def _record(hook, app, registry):
     builtins._lifecycle_calls.append(f"{hook}:{app.name}")
+    reenter = builtins._lifecycle_reenter.get((hook, app.name))
+    if reenter is not None:
+        getattr(registry, reenter)()
     if (hook, app.name) in builtins._lifecycle_failures:
         raise RuntimeError(f"{hook} boom in {app.name}")
 
 
-def on_load(*, app):
-    _record("on_load", app)
+def on_load(*, app, registry):
+    _record("on_load", app, registry)
 
 
-def ready(*, app):
-    _record("ready", app)
+def ready(*, app, registry):
+    _record("ready", app, registry)
 
 
-def on_shutdown(*, app):
-    _record("on_shutdown", app)
+def on_shutdown(*, app, registry):
+    _record("on_shutdown", app, registry)
 """
 
 
@@ -48,6 +51,7 @@ def lifecycle_log(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     calls: list[str] = []
     monkeypatch.setattr(builtins, "_lifecycle_calls", calls, raising=False)
     monkeypatch.setattr(builtins, "_lifecycle_failures", set(), raising=False)
+    monkeypatch.setattr(builtins, "_lifecycle_reenter", {}, raising=False)
     return calls
 
 
@@ -55,6 +59,12 @@ def lifecycle_log(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 def fail_hooks() -> set[tuple[str, str]]:
     """Mutable set of ``(hook, module)`` pairs whose hook currently raises."""
     return builtins._lifecycle_failures  # type: ignore[attr-defined, no-any-return]
+
+
+@pytest.fixture
+def reenter_hooks() -> dict[tuple[str, str], str]:
+    """Mutable map of ``(hook, module)`` to the registry method that hook calls back into."""
+    return builtins._lifecycle_reenter  # type: ignore[attr-defined, no-any-return]
 
 
 @pytest.fixture
@@ -208,6 +218,8 @@ class TestFailureAtomicInstall:
         assert str(error.failures[1].cause) == "on_shutdown boom in two"
         assert "on_load boom in three" in str(error)
         assert "on_shutdown boom in two" in str(error)
+        assert isinstance(error.__cause__, ExceptionGroup)
+        assert list(error.__cause__.exceptions) == [f.error for f in error.failures]
         assert registry.list_installed() == []
         assert lifecycle_log[-2:] == ["on_shutdown:two", "on_shutdown:one"]
 
@@ -466,3 +478,282 @@ class TestLifecycleStates:
             app.transition_to(target)
 
         assert app.lifecycle_state is start
+
+
+class TestFailureAttribution:
+    def _break_unwind(self, fail_hooks: set[tuple[str, str]], module: str) -> None:
+        fail_hooks.add(("on_shutdown", module))
+
+    def test_failure_in_later_populate_path_is_attributed_to_that_path(
+        self, fake_package: Path, fail_hooks: set[tuple[str, str]]
+    ) -> None:
+        _make_chain(fake_package, "alpha")
+        _make_chain(fake_package, "beta")
+        fail_hooks.update({("on_load", "beta"), ("on_shutdown", "alpha")})
+        registry = ModuleRegistry()
+
+        with pytest.raises(ModuleStartupRollbackError) as exc_info:
+            registry.populate(["alpha", "beta"])
+
+        assert [(f.module, f.phase) for f in exc_info.value.failures] == [
+            ("beta", "on_load"),
+            ("alpha", "on_shutdown"),
+        ]
+
+    def test_manifest_failure_is_attributed_to_the_broken_dependency(
+        self, fake_package: Path, fail_hooks: set[tuple[str, str]]
+    ) -> None:
+        _make_chain(fake_package, "healthy")
+        make_fake_module(
+            fake_package,
+            "parent",
+            manifest={"title": "parent", "version": "1", "depends_on": ["healthy", "no_such_module"]},
+        )
+        fail_hooks.add(("on_shutdown", "healthy"))
+        registry = ModuleRegistry()
+
+        with pytest.raises(ModuleStartupRollbackError) as exc_info:
+            registry.install("parent")
+
+        failures = exc_info.value.failures
+        assert (failures[0].module, failures[0].phase) == ("no_such_module", "manifest")
+        assert (failures[1].module, failures[1].phase) == ("healthy", "on_shutdown")
+
+    def test_dependency_cycle_is_attributed_with_dependency_phase(
+        self, fake_package: Path, fail_hooks: set[tuple[str, str]]
+    ) -> None:
+        _make_chain(fake_package, "base")
+        make_fake_module(
+            fake_package, "ring_a", manifest={"title": "a", "version": "1", "depends_on": ["base", "ring_b"]}
+        )
+        make_fake_module(fake_package, "ring_b", manifest={"title": "b", "version": "1", "depends_on": ["ring_a"]})
+        fail_hooks.add(("on_shutdown", "base"))
+        registry = ModuleRegistry()
+
+        with pytest.raises(ModuleStartupRollbackError) as exc_info:
+            registry.install("ring_a")
+
+        first = exc_info.value.failures[0]
+        assert (first.module, first.phase) == ("ring_a", "dependency")
+
+    def test_module_loaded_receiver_failure_is_attributed_and_the_module_unwound(
+        self, fake_package: Path, fail_hooks: set[tuple[str, str]], lifecycle_log: list[str]
+    ) -> None:
+        _make_chain(fake_package, "watched")
+        fail_hooks.add(("on_shutdown", "watched"))
+        registry = ModuleRegistry()
+
+        def broken_receiver(sender: Any, **kwargs: Any) -> None:
+            if kwargs["registry"] is registry:
+                raise RuntimeError("receiver boom")
+
+        module_loaded.connect(broken_receiver, weak=False)
+        try:
+            with pytest.raises(ModuleStartupRollbackError) as exc_info:
+                registry.install("watched")
+        finally:
+            module_loaded.disconnect(broken_receiver)
+
+        failures = exc_info.value.failures
+        assert [(f.module, f.phase) for f in failures] == [("watched", "module_loaded"), ("watched", "on_shutdown")]
+        assert str(failures[0].cause) == "receiver boom"
+        assert lifecycle_log == ["on_load:watched", "on_shutdown:watched"]
+        assert registry.list_installed() == []
+
+
+class TestReadyFailureReporting:
+    def test_ready_failure_exposes_failures_like_shutdown(
+        self, fake_package: Path, fail_hooks: set[tuple[str, str]]
+    ) -> None:
+        _make_chain(fake_package, "a", "b")
+        fail_hooks.add(("ready", "b"))
+        registry = ModuleRegistry()
+        registry.install("b")
+
+        with pytest.raises(ModuleLifecycleError, match="ready.*raised an error") as exc_info:
+            registry.mark_ready()
+
+        error = exc_info.value
+        assert error.failed_modules == ["b"]
+        assert [(f.module, f.phase) for f in error.failures] == [("b", "ready")]
+        assert str(error.failures[0].cause) == "ready boom in b"
+        assert isinstance(error.__cause__, ExceptionGroup)
+
+
+class TestReentrancy:
+    def test_ready_hook_calling_mark_ready_is_rejected_without_recursion(
+        self, fake_package: Path, reenter_hooks: dict[tuple[str, str], str], lifecycle_log: list[str]
+    ) -> None:
+        _make_chain(fake_package, "a", "b")
+        reenter_hooks[("ready", "a")] = "mark_ready"
+        registry = ModuleRegistry()
+        registry.install("b")
+
+        with pytest.raises(
+            ModuleLifecycleError, match="Cannot call mark_ready\\(\\) while mark_ready\\(\\) is running"
+        ):
+            registry.mark_ready()
+
+        assert lifecycle_log == ["on_load:a", "on_load:b", "ready:a"]
+        assert registry.ready is False
+
+        reenter_hooks.clear()
+        registry.mark_ready()
+
+        assert lifecycle_log.count("ready:a") == 2
+        assert lifecycle_log.count("ready:b") == 1
+        assert registry.ready is True
+
+    def test_ready_hook_calling_shutdown_is_rejected_without_calling_hooks(
+        self, fake_package: Path, reenter_hooks: dict[tuple[str, str], str], lifecycle_log: list[str]
+    ) -> None:
+        _make_chain(fake_package, "a")
+        reenter_hooks[("ready", "a")] = "shutdown"
+        registry = ModuleRegistry()
+        registry.install("a")
+
+        with pytest.raises(ModuleLifecycleError, match="Cannot call shutdown\\(\\) while mark_ready\\(\\) is running"):
+            registry.mark_ready()
+
+        assert "on_shutdown:a" not in lifecycle_log
+
+    def test_shutdown_hook_calling_shutdown_does_not_recurse_and_others_still_run(
+        self, fake_package: Path, reenter_hooks: dict[tuple[str, str], str], lifecycle_log: list[str]
+    ) -> None:
+        _make_chain(fake_package, "a", "b", "c")
+        registry = ModuleRegistry()
+        registry.populate(["c"])
+        lifecycle_log.clear()
+        reenter_hooks[("on_shutdown", "b")] = "shutdown"
+
+        with pytest.raises(
+            ModuleLifecycleError, match="Cannot call shutdown\\(\\) while shutdown\\(\\) is running"
+        ) as exc_info:
+            registry.shutdown()
+
+        assert lifecycle_log == ["on_shutdown:c", "on_shutdown:b", "on_shutdown:a"]
+        assert exc_info.value.failed_modules == ["b"]
+
+        reenter_hooks.clear()
+        registry.shutdown()
+
+        assert lifecycle_log == ["on_shutdown:c", "on_shutdown:b", "on_shutdown:a", "on_shutdown:b"]
+
+    def test_shutdown_hook_calling_mark_ready_is_rejected(
+        self, fake_package: Path, reenter_hooks: dict[tuple[str, str], str], lifecycle_log: list[str]
+    ) -> None:
+        _make_chain(fake_package, "a")
+        registry = ModuleRegistry()
+        registry.populate(["a"])
+        lifecycle_log.clear()
+        reenter_hooks[("on_shutdown", "a")] = "mark_ready"
+
+        with pytest.raises(ModuleLifecycleError, match="Cannot call mark_ready\\(\\) while shutdown\\(\\) is running"):
+            registry.shutdown()
+
+        assert lifecycle_log == ["on_shutdown:a"]
+
+    def test_signal_receiver_calling_back_into_the_registry_is_rejected(
+        self, fake_package: Path, lifecycle_log: list[str]
+    ) -> None:
+        _make_chain(fake_package, "a", "b")
+        registry = ModuleRegistry()
+        registry.install("b")
+        lifecycle_log.clear()
+
+        def receiver(sender: Any, **kwargs: Any) -> None:
+            if kwargs["registry"] is registry:
+                registry.shutdown()
+
+        module_ready.connect(receiver, weak=False)
+        try:
+            with pytest.raises(
+                ModuleLifecycleError, match="Cannot call shutdown\\(\\) while mark_ready\\(\\) is running"
+            ):
+                registry.mark_ready()
+        finally:
+            module_ready.disconnect(receiver)
+
+        assert lifecycle_log == ["ready:a"]
+
+    def test_guard_is_released_after_a_failed_operation(
+        self, fake_package: Path, fail_hooks: set[tuple[str, str]], lifecycle_log: list[str]
+    ) -> None:
+        _make_chain(fake_package, "a")
+        fail_hooks.add(("ready", "a"))
+        registry = ModuleRegistry()
+        registry.install("a")
+
+        with pytest.raises(ModuleLifecycleError):
+            registry.mark_ready()
+        fail_hooks.clear()
+        registry.mark_ready()
+        registry.shutdown()
+
+        assert lifecycle_log.count("on_shutdown:a") == 1
+
+    def test_nested_install_from_on_load_hook_is_still_supported(self, fake_package: Path) -> None:
+        make_fake_module(fake_package, "inner", manifest={"title": "inner", "version": "1"})
+        make_fake_module(
+            fake_package,
+            "outer",
+            manifest={"title": "outer", "version": "1"},
+            bootstrap="def on_load(*, registry): registry.install('inner')\n",
+        )
+        registry = ModuleRegistry()
+
+        registry.install("outer")
+
+        assert registry.list_installed() == ["outer", "inner"]
+
+
+class TestPlainStringStates:
+    def test_assigning_a_plain_string_state_is_coerced(self, fake_package: Path, lifecycle_log: list[str]) -> None:
+        _make_chain(fake_package, "a", "b")
+        registry = ModuleRegistry()
+        apps = {app.name: app for app in [registry.install("b")]}
+        registry.install("a")
+        lifecycle_log.clear()
+
+        apps["b"].lifecycle_state = "shutdown"  # type: ignore[assignment]
+        registry.shutdown()
+
+        assert apps["b"].lifecycle_state is ModuleLifecycleState.SHUTDOWN
+        assert lifecycle_log == ["on_shutdown:a"]
+
+    def test_invalid_state_string_is_rejected(self, fake_package: Path) -> None:
+        _make_chain(fake_package, "a")
+        app = ModuleRegistry().install("a")
+
+        with pytest.raises(ValueError, match="lifecycle_state"):
+            app.lifecycle_state = "bogus"  # type: ignore[assignment]
+
+
+class TestPopulateHoldsLock:
+    def test_other_threads_wait_for_the_whole_populate(self, fake_package: Path, lifecycle_log: list[str]) -> None:
+        import threading
+        import time
+
+        make_fake_module(
+            fake_package,
+            "slow",
+            manifest={"title": "slow", "version": "1"},
+            bootstrap=(
+                "import builtins\nimport time\n\n\n"
+                "def on_load(*, app):\n    time.sleep(0.2)\n    builtins._lifecycle_calls.append('on_load:slow')\n\n\n"
+                "def ready(*, app):\n    builtins._lifecycle_calls.append('ready:slow')\n"
+            ),
+        )
+        _make_chain(fake_package, "other")
+        registry = ModuleRegistry()
+
+        def competitor() -> None:
+            time.sleep(0.05)
+            registry.install("other")
+
+        thread = threading.Thread(target=competitor)
+        thread.start()
+        registry.populate(["slow"])
+        thread.join()
+
+        assert lifecycle_log == ["on_load:slow", "ready:slow", "on_load:other"]

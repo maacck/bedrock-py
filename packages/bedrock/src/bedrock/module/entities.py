@@ -6,7 +6,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any
 
-from pydantic import Field
+from pydantic import ConfigDict, Field
 from typer import Typer
 
 from ..constants import StrEnum
@@ -68,6 +68,8 @@ class AppConfig(BedrockEntity):
             ``transition_to`` so that invalid transitions are rejected.
     """
 
+    model_config = ConfigDict(validate_assignment=True)
+
     name: str
     manifest: ModuleManifest
     package_module: ModuleType
@@ -85,7 +87,8 @@ class AppConfig(BedrockEntity):
         Raises:
             ModuleLifecycleError: If ``target`` is not a valid next state from the current one.
         """
-        current = self.lifecycle_state
+        current = ModuleLifecycleState(self.lifecycle_state)
+        target = ModuleLifecycleState(target)
         if target not in _ALLOWED_TRANSITIONS[current]:
             raise ModuleLifecycleError(
                 f"Module '{self.name}' cannot move from lifecycle state '{current.value}' to '{target.value}'."

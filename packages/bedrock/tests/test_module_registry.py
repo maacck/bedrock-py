@@ -180,10 +180,11 @@ class TestPopulate:
 class TestMarkReady:
     """Lifecycle transition from *loaded* to *ready*."""
 
-    def test_calls_ready_hooks_and_emits_signals(self, fake_package: Path) -> None:
+    def test_calls_ready_hooks_and_emits_signals(self, fake_package: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         import builtins
 
-        builtins._ready_calls = []
+        ready_calls: list[str] = []
+        monkeypatch.setattr(builtins, "_ready_calls", ready_calls, raising=False)
         make_fake_module(
             fake_package,
             "ready_mod",
@@ -211,7 +212,7 @@ class TestMarkReady:
         registry.mark_ready()
 
         assert registry.ready is True
-        assert builtins._ready_calls == ["ready:ready_mod"]
+        assert ready_calls == ["ready:ready_mod"]
         assert "module_ready" in sig_calls
         assert "registry_ready" in reg_calls
 

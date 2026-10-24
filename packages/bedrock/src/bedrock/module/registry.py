@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import inspect
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 
 from .entities import AppConfig, ModuleLifecycleState
@@ -18,6 +20,23 @@ from .exc import (
 )
 from .manifest import build_app_config
 from .signals import module_loaded, module_ready, module_shutdown, registry_ready, registry_shutdown
+
+
+class _InstallAttempt:
+    """Records the first failure of one installation operation and the module step it came from."""
+
+    def __init__(self) -> None:
+        self.failure: ModuleFailure | None = None
+
+    @contextmanager
+    def guard(self, module: str, phase: str) -> Iterator[None]:
+        """Attribute an exception raised inside the block to ``module`` and ``phase`` if none was recorded yet."""
+        try:
+            yield
+        except Exception as exc:
+            if self.failure is None:
+                self.failure = ModuleFailure(module=module, phase=phase, error=exc)
+            raise
 
 
 class ModuleRegistry:
@@ -46,6 +65,11 @@ class ModuleRegistry:
       install order even when some hooks fail, then raises a single
       ``ModuleLifecycleError`` listing all failures. A module whose shutdown
       completed is never shut down again.
+    * ``mark_ready`` and ``shutdown`` are not re-entrant. While one of them is
+      running, a call to either from a hook or a signal receiver raises
+      ``ModuleLifecycleError`` instead of re-running hooks. The guard is plain
+      registry state rather than a thread lock, so it also protects against
+      interleaving on a single thread.
 
     Args:
         config: Optional host application configuration passed to hook callables.
@@ -57,6 +81,7 @@ class ModuleRegistry:
         self._install_order: list[str] = []
         self._ready = False
         self._shut_down = False
+        self._operation: str | None = None
         self._lock = threading.RLock()
         self._loading = False
 
@@ -152,6 +177,9 @@ class ModuleRegistry:
         ``populate`` again with the same paths) can resume without re-running
         ready hooks that already succeeded.
 
+        The registry lock is held for the whole call, so other threads wait
+        until it finishes.
+
         Args:
             import_paths: Ordered list of import paths to install.
 
@@ -168,13 +196,10 @@ class ModuleRegistry:
                 raise ModuleLifecycleError("populate() is not reentrant.")
             self._loading = True
 
-        try:
-            with self._lock:
+            try:
                 self._install_atomically(import_paths)
-
-            return self.mark_ready()
-        finally:
-            with self._lock:
+                return self.mark_ready()
+            finally:
                 self._loading = False
 
     def mark_ready(self) -> list[AppConfig]:
@@ -189,10 +214,12 @@ class ModuleRegistry:
             All installed modules in install order.
 
         Raises:
-            ModuleLifecycleError: If any ``ready`` hook raises, or if a module is
-                still loading or has already been shut down.
+            ModuleLifecycleError: If any ``ready`` hook raises (``failures`` names the
+                module and holds the hook's exception), if a module is still loading or
+                has already been shut down, or if called from a hook or signal receiver
+                while ``mark_ready`` or ``shutdown`` is already running.
         """
-        with self._lock:
+        with self._lock, self._lifecycle_operation("mark_ready"):
             modules = [self._app_configs[name] for name in self._install_order]
             blocked = [
                 app.name
@@ -206,9 +233,15 @@ class ModuleRegistry:
 
             newly_ready = 0
             for app in modules:
-                if app.lifecycle_state is not ModuleLifecycleState.LOADED:
+                if app.lifecycle_state != ModuleLifecycleState.LOADED:
                     continue
-                self._call_hook(app, "ready")
+                try:
+                    self._call_hook(app, "ready")
+                except ModuleLifecycleError as exc:
+                    error = self._aggregate_error(
+                        "Readiness failed", [ModuleFailure(module=app.name, phase="ready", error=exc)]
+                    )
+                    raise error from error.__cause__
                 app.transition_to(ModuleLifecycleState.READY)
                 newly_ready += 1
                 module_ready.send(app, registry=self, module=app, config=self.config)
@@ -234,13 +267,15 @@ class ModuleRegistry:
         Raises:
             ModuleLifecycleError: After all attempts, if any hook or ``module_shutdown``
                 receiver failed. ``failures`` lists every failure with its original cause.
+                Also raised if called from a hook or signal receiver while ``mark_ready``
+                or ``shutdown`` is already running.
         """
-        with self._lock:
+        with self._lock, self._lifecycle_operation("shutdown"):
             modules = [self._app_configs[name] for name in reversed(self._install_order)]
             failures: list[ModuleFailure] = []
 
             for app in modules:
-                if app.lifecycle_state is ModuleLifecycleState.SHUTDOWN:
+                if app.lifecycle_state == ModuleLifecycleState.SHUTDOWN:
                     continue
                 failures.extend(self._shutdown_module(app))
 
@@ -256,12 +291,13 @@ class ModuleRegistry:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _install(self, import_path: str, _chain: list[str]) -> AppConfig:
+    def _install(self, import_path: str, _chain: list[str], attempt: _InstallAttempt) -> AppConfig:
         """Recursive install implementation (must be called under lock).
 
         Args:
             import_path: Import path to install.
             _chain: Current dependency chain for cycle detection.
+            attempt: Collects where the first failure of the surrounding operation happened.
 
         Returns:
             The installed ``AppConfig``.
@@ -273,25 +309,30 @@ class ModuleRegistry:
         if import_path in self._app_configs:
             return self._app_configs[import_path]
 
-        if import_path in _chain:
-            cycle = " -> ".join(_chain + [import_path])
-            raise ModuleDependencyError(f"Circular dependency detected: {cycle}")
+        with attempt.guard(import_path, "dependency"):
+            if import_path in _chain:
+                cycle = " -> ".join(_chain + [import_path])
+                raise ModuleDependencyError(f"Circular dependency detected: {cycle}")
 
-        app = build_app_config(import_path)
+        with attempt.guard(import_path, "manifest"):
+            app = build_app_config(import_path)
 
         chain = _chain + [import_path]
         for dep in app.manifest.depends_on:
-            self._install(dep, chain)
+            self._install(dep, chain, attempt)
 
-        if import_path in self._app_configs:
-            raise DuplicateModuleError(f"Module '{import_path}' was already installed by a concurrent dependency.")
+        with attempt.guard(import_path, "install"):
+            if import_path in self._app_configs:
+                raise DuplicateModuleError(f"Module '{import_path}' was already installed by a concurrent dependency.")
 
         self._app_configs[import_path] = app
         self._install_order.append(import_path)
 
-        self._call_hook(app, "on_load")
+        with attempt.guard(import_path, "on_load"):
+            self._call_hook(app, "on_load")
         app.transition_to(ModuleLifecycleState.LOADED)
-        module_loaded.send(app, registry=self, module=app, config=self.config)
+        with attempt.guard(import_path, "module_loaded"):
+            module_loaded.send(app, registry=self, module=app, config=self.config)
 
         return app
 
@@ -309,39 +350,29 @@ class ModuleRegistry:
             ModuleStartupRollbackError: If rollback itself failed for some modules.
         """
         preexisting = set(self._app_configs)
+        attempt = _InstallAttempt()
         try:
-            return [self._install(import_path, _chain=[]) for import_path in import_paths]
+            return [self._install(import_path, [], attempt) for import_path in import_paths]
         except BaseException as exc:
             introduced = [name for name in self._install_order if name not in preexisting]
-            failed_load = next(
-                (
-                    name
-                    for name in introduced
-                    if self._app_configs[name].lifecycle_state is ModuleLifecycleState.LOADING
-                ),
-                None,
-            )
             unwind_failures = self._rollback(introduced)
             if not unwind_failures or not isinstance(exc, Exception):
                 raise
 
-            original = ModuleFailure(
-                module=failed_load or import_paths[0],
-                phase="on_load" if failed_load else "install",
-                error=exc,
-            )
-            raise self._aggregate_error(
+            original = attempt.failure or ModuleFailure(module=import_paths[0], phase="install", error=exc)
+            error = self._aggregate_error(
                 f"Installation of {', '.join(import_paths)} failed ({exc}) and cleanup was incomplete",
                 [original, *unwind_failures],
                 error_type=ModuleStartupRollbackError,
-            ) from exc
+            )
+            raise error from error.__cause__
 
     def _rollback(self, introduced: list[str]) -> list[ModuleFailure]:
         """Remove modules introduced by a failed installation (must be called under lock).
 
         Modules that completed ``on_load`` are unwound best-effort with their
         ``on_shutdown`` hook in reverse install order. A module that never
-        finished loading has nothing to release. Every introduced module is
+        finished loading, or that was already shut down, has nothing to release. Every introduced module is
         removed from membership and install order, whatever the unwind outcome.
 
         Args:
@@ -354,7 +385,7 @@ class ModuleRegistry:
         try:
             for name in reversed(introduced):
                 app = self._app_configs[name]
-                if app.lifecycle_state is ModuleLifecycleState.LOADING:
+                if app.lifecycle_state in (ModuleLifecycleState.LOADING, ModuleLifecycleState.SHUTDOWN):
                     continue
                 failures.extend(self._shutdown_module(app))
         finally:
@@ -408,7 +439,9 @@ class ModuleRegistry:
             error_type: Concrete error class to build.
 
         Returns:
-            The aggregate error. Its ``__cause__`` is an ``ExceptionGroup`` of all failures.
+            The aggregate error. It always has ``failures`` set, and its ``__cause__``
+            is always an ``ExceptionGroup`` holding the error of every failure, in order.
+            Each hook failure error chains to the exception the module's own code raised.
         """
         details = "; ".join(f"{failure.error}" for failure in failures)
         error = error_type(f"{summary}: {details}", failures=tuple(failures))
@@ -416,6 +449,34 @@ class ModuleRegistry:
             summary, [failure.error for failure in failures if isinstance(failure.error, Exception)]
         )
         return error
+
+    @contextmanager
+    def _lifecycle_operation(self, name: str) -> Iterator[None]:
+        """Mark ``mark_ready`` or ``shutdown`` as running and reject nested calls (call under lock).
+
+        The guard is plain registry state: it is not a lock, so hooks and signal
+        receivers that call back into the registry fail fast instead of re-running
+        hooks, and an async implementation can reuse it between coroutines.
+
+        Args:
+            name: Public method starting the operation.
+
+        Yields:
+            Nothing; the guard is released on exit, including on failure.
+
+        Raises:
+            ModuleLifecycleError: If ``mark_ready`` or ``shutdown`` is already running.
+        """
+        if self._operation is not None:
+            raise ModuleLifecycleError(
+                f"Cannot call {name}() while {self._operation}() is running; "
+                "lifecycle hooks and signal receivers must not call back into it."
+            )
+        self._operation = name
+        try:
+            yield
+        finally:
+            self._operation = None
 
     def _call_hook(self, app: AppConfig, hook_name: str) -> None:
         """Call a bootstrap hook if present using keyword injection only.

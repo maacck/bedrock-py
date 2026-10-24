@@ -93,10 +93,12 @@ class ModuleLifecycleError(ModuleError):
 class ModuleStartupRollbackError(ModuleLifecycleError):
     """Raised when a failed installation could not be fully unwound.
 
-    The installation failure itself is the first entry of ``failures`` and the
-    ``__cause__`` of this error; the remaining entries are the modules whose
-    ``on_shutdown`` hook failed while unwinding. Membership is rolled back
-    regardless: no module introduced by the failed operation stays installed.
+    ``failures`` lists the installation failure first, attributed to the module
+    and step where it happened, followed by the modules whose ``on_shutdown``
+    hook (or ``module_shutdown`` receiver) failed while unwinding. ``__cause__``
+    is an ``ExceptionGroup`` of all of them, and the original exception is also
+    available as ``__context__``. Membership is rolled back regardless: no module
+    introduced by the failed operation stays installed.
     """
 
     detail: str = "Module installation failed and its cleanup was incomplete."
