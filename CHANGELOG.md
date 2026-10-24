@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Breaking changes
+
+- **Module lifecycle**: a failed `install()` / `populate()` no longer leaves modules registered.
+  Every module introduced by the failed call is removed (modules installed earlier are kept), so
+  code that relied on a module staying installed after its `on_load` raised must now retry
+  the install instead.
+- **Module lifecycle**: `shutdown()` no longer stops at the first failing hook. It attempts every
+  module that has not completed shutdown and then raises one `ModuleLifecycleError` listing all
+  failures; `registry_shutdown` is only emitted when every module shut down.
+- **Module lifecycle**: `mark_ready()` skips modules that are already ready (their `ready` hook and
+  `module_ready` signal are not repeated) and raises `ModuleLifecycleError` if a module was already
+  shut down. `AppConfig.lifecycle_state` is now a `ModuleLifecycleState` string enum (values still compare
+  equal to `"loaded"`, `"ready"`, `"shutdown"`) with a new initial value `"loading"`.
+
+### Added
+
+- `ModuleLifecycleState`, `AppConfig.transition_to()` (validated forward transitions), `ModuleFailure`,
+  and `ModuleStartupRollbackError`, exported from `bedrock.module`.
+- `ModuleLifecycleError.failures` / `.failed_modules` expose every module failure with its original cause.
+- Installed modules that had loaded before a later startup failure are unwound best-effort with
+  `on_shutdown` (reverse order, `module_shutdown` emitted); if cleanup also fails,
+  `ModuleStartupRollbackError` carries both the original failure and the cleanup failures.
+
+### Changed
+
+- `ModuleRegistry.install()`, `populate()`, `mark_ready()` and `shutdown()` now hold the registry lock for
+  the whole operation, so concurrent calls cannot run a hook twice.
+
 ## [0.2.2] - 2026-10-01
 
 ### Breaking changes

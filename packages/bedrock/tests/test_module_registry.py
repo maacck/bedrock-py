@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from bedrock.module.entities import AppConfig
 from bedrock.module.exc import (
     AppRegistryNotReady,
     ModuleDependencyError,
@@ -170,45 +169,30 @@ class TestPopulate:
             registry.populate(["bad_load"])
 
         assert registry._loading is False
-        assert registry.is_installed("bad_load") is True
+        assert registry.is_installed("bad_load") is False
 
         result = registry.populate(["good_load"])
 
         assert registry.ready is True
-        assert [app.name for app in result] == ["bad_load", "good_load"]
+        assert [app.name for app in result] == ["good_load"]
 
 
 class TestMarkReady:
     """Lifecycle transition from *loaded* to *ready*."""
 
     def test_calls_ready_hooks_and_emits_signals(self, fake_package: Path) -> None:
-        calls: list[str] = []
+        import builtins
 
-        def ready_hook(*, registry: ModuleRegistry, app: AppConfig) -> None:
-            calls.append(f"ready:{app.name}")
-
+        builtins._ready_calls = []
         make_fake_module(
             fake_package,
             "ready_mod",
             manifest={"title": "Ready", "version": "1"},
-            bootstrap="def ready(*, app): __import__('builtins')._test_calls.append(f'ready:{app.name}')\n",
+            bootstrap="def ready(*, app): __import__('builtins')._ready_calls.append(f'ready:{app.name}')\n",
         )
-
-        # Patch the hook into the bootstrap module after import
-        import importlib
 
         registry = ModuleRegistry()
         registry.install("ready_mod")
-
-        # Manually inject the hook by reloading bootstrap
-        mod = importlib.import_module("ready_mod.bootstrap")
-        mod.ready = ready_hook  # type: ignore[attr-defined]
-
-        # Rebuild app config so the hook is picked up
-        from bedrock.module.manifest import build_app_config
-
-        app = build_app_config("ready_mod")
-        registry._app_configs["ready_mod"] = app
 
         sig_calls: list[str] = []
 
@@ -227,7 +211,7 @@ class TestMarkReady:
         registry.mark_ready()
 
         assert registry.ready is True
-        assert "ready:ready_mod" in calls
+        assert builtins._ready_calls == ["ready:ready_mod"]
         assert "module_ready" in sig_calls
         assert "registry_ready" in reg_calls
 
