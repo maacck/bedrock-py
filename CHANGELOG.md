@@ -18,6 +18,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   handler when it is still installed, then installs Bedrock's sink, so `LOG_*` controls CLI stderr
   and log lines are not duplicated. Handlers added by the host are kept. Repeated calls replace only
   the sink Bedrock installed; configuration never calls `logger.remove()` without a handler id.
+- **Database connection ceiling.** `DATABASE_MAX_CONNECTIONS` is the per-process cap.
+  Non-SQLite engines set SQLAlchemy `max_overflow` to `MAX_CONNECTIONS - POOL_SIZE`.
+  The defaults (`POOL_SIZE=10`, `MAX_CONNECTIONS=10`) now allow 10 connections.
+  They previously allowed SQLAlchemy's implicit overflow and capped at 20.
+  Raise `DATABASE_MAX_CONNECTIONS` when a deployment needs that extra capacity.
+  `MAX_CONNECTIONS < POOL_SIZE` raises `DatabaseConfigurationError` and names both settings.
+  SQLite engines still ignore pool settings.
+- **Database passwords are secrets.** `DbSettings.PASSWORD` is a Pydantic `SecretStr`.
+  Settings `repr` and validation errors do not include the password. Call
+  `get_secret_value()` only at the edge that opens a connection. The URL is built
+  with `sqlalchemy.engine.URL.create`, so reserved characters in each component are escaped.
 
 ### Added
 
@@ -26,6 +37,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `LOG_SERIALIZE` set after import are honored.
 - `configure_cli_logging()` is the process-owned CLI initializer. It retires Loguru's preconfigured
   stderr handler, then calls `configure_logging()`.
+- **Async database sessions.** Set `DATABASE_ASYNC_DRIVER` and install
+  `bedrock-core[async-sqlite]`, `bedrock-core[async-postgresql]`, or
+  `bedrock-core[async-mysql]`. `db.aengine`, `db.asession`, `db.asession_scope()`,
+  and `db.aindependent_session()` follow the sync session rules and use a separate
+  context variable. A missing driver raises `DatabaseConfigurationError` naming the extra.
+  The SQLAlchemy asyncio extra (`greenlet`) is now a core dependency.
+- **`db.close()` and `db.aclose()`** dispose one side each. `close()` disposes the
+  synchronous engine and leaves an already built async engine usable. `await aclose()`
+  disposes the async engine and leaves the synchronous engine usable. If both were
+  built, call both. Each call is safe to repeat. They do not shut down the module
+  registry. `init()` disposes the previous synchronous engine. It does not
+  synchronously dispose an async engine that has already opened a connection;
+  `await aclose()` before `init()` when that engine should be closed.
+- **Migration lock.** `upgrade` and `downgrade`, including uninstall and `ensure_schema`,
+  take a PostgreSQL advisory lock or a MySQL/MariaDB `GET_LOCK`. SQLite stays unlocked
+  and must be migrated from one process. `DATABASE_MIGRATION_LOCK_TIMEOUT` (default 30
+  seconds; `0` does not wait) bounds the wait. MySQL rounds a positive timeout up to
+  whole seconds. A timeout raises `MigrationError`.
+- **`bedrock db check <app>`** prints each loaded branch's current and head revisions
+  without changing the database. It exits with status 1 when any branch is behind head
+  or the revision is unknown, including a database that has never been migrated.
+
+### Fixed
+
+- Async engines use the URL already resolved by `db.init()`, including an explicit
+  `url=` argument. Only the DBAPI driver is swapped for `DATABASE_ASYNC_DRIVER`.
+  An explicit SQLite path no longer falls back to the default `bedrock.db`.
+- `db.close()` no longer disposes the async engine, and `db.aclose()` no longer
+  disposes the sync engine. `init()` no longer sync-disposes an async engine that
+  has already opened a connection, which failed with `MissingGreenlet`.
 
 ## [0.3.1] - 2026-11-07
 

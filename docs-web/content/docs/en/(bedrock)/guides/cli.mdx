@@ -207,6 +207,8 @@ bedrock db upgrade myapp.users abc123def456
 
 **Important:** Only the specified app's branch is upgraded. Other branches are untouched.
 
+Upgrade and downgrade take a migration lock. PostgreSQL uses an advisory lock, MySQL and MariaDB use `GET_LOCK`, and the wait is `DATABASE_MIGRATION_LOCK_TIMEOUT` seconds (default 30). SQLite migrations are not locked; run them from one process. A timeout fails the command.
+
 ---
 
 ### `bedrock db downgrade`
@@ -269,6 +271,36 @@ bedrock db current <app_import_path>
 $ bedrock db current myapp.users
 
 Current revision: abc123def456
+```
+
+---
+
+### `bedrock db check`
+
+Report whether each loaded migration branch is at head. The command reads the database and does not change it.
+
+```bash
+bedrock db check <app_import_path>
+```
+
+The table lists the branch, the applied revision, the script head, and a state:
+
+| State | Meaning | Exit code |
+|-------|---------|-----------|
+| `at-head` | Applied revisions match the branch head | Contributes to exit 0 |
+| `behind` | An older revision from the branch is applied | Exit 1 |
+| `unknown` | Nothing is applied, the branch has no scripts, or the applied revision is not in the branch | Exit 1 |
+
+The process exits 0 only when every reported branch is `at-head`.
+
+**Example:**
+
+```bash
+$ bedrock db check myapp.users
+
+Branch        Current       Head          State
+myapp.users   abc123def456  abc123def456  at-head
+✓ All migration branches are at head.
 ```
 
 ---

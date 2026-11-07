@@ -151,7 +151,7 @@ Apply migrations.
 bedrock db upgrade <app> [target]
 ```
 
-Only the specified app's migration branch is upgraded.
+Only the specified app's migration branch is upgraded. Upgrade and downgrade take a PostgreSQL advisory lock or MySQL/MariaDB `GET_LOCK` and wait up to `DATABASE_MIGRATION_LOCK_TIMEOUT` seconds (default 30). SQLite migrations are not locked; run them from one process.
 
 **Targets**: `head` (default), `+N` (upgrade N steps), `<revision_id>`
 
@@ -198,6 +198,18 @@ Show current database revision.
 ```bash
 bedrock db current myapp.users
 ```
+
+---
+
+## bedrock db check
+
+Report each loaded branch's current and head revisions without changing the database. Exits non-zero when any branch is `behind` or `unknown`.
+
+```bash
+bedrock db check myapp.users
+```
+
+States: `at-head` (applied revisions match head), `behind` (an older revision is applied), `unknown` (nothing applied, no scripts, or the applied revision is not in the branch).
 
 ---
 
