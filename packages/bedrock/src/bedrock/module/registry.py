@@ -65,11 +65,17 @@ class ModuleRegistry:
       install order even when some hooks fail, then raises a single
       ``ModuleLifecycleError`` listing all failures. A module whose shutdown
       completed is never shut down again.
-    * ``mark_ready`` and ``shutdown`` are not re-entrant. While one of them is
-      running, a call to either from a hook or a signal receiver raises
-      ``ModuleLifecycleError`` instead of re-running hooks. The guard is plain
-      registry state rather than a thread lock, so it also protects against
-      interleaving on a single thread.
+    * ``install``, ``mark_ready`` and ``shutdown`` each run as one registry
+      operation, and the only nesting allowed is ``install`` from an ``on_load``
+      hook or a ``module_loaded`` receiver (including during its rollback, which
+      rejects new modules). Any other call from a hook or a signal receiver
+      raises ``ModuleLifecycleError`` before it changes anything: ``shutdown`` or
+      ``mark_ready`` while a module is installing, ``mark_ready`` or ``shutdown``
+      inside each other, and ``install`` of a new module while ``mark_ready`` or
+      ``shutdown`` runs. A hook that must abort an installation raises an error,
+      which rolls the installation back. The guard is plain registry state
+      rather than a thread lock, so it also protects against interleaving on a
+      single thread.
 
     Args:
         config: Optional host application configuration passed to hook callables.
@@ -150,6 +156,12 @@ class ModuleRegistry:
         is removed again and modules installed earlier are left untouched.
         Rollback callbacks cannot introduce new modules through ``install()`` or
         ``populate()``; attempts raise ``ModuleLifecycleError`` before loading them.
+        The same applies to hooks and signal receivers running inside ``mark_ready()``
+        or ``shutdown()``: install modules before readiness starts, or call
+        ``install()`` and then ``mark_ready()`` again afterwards. Installing a module
+        that is already installed is always a no-op. ``on_load`` hooks and
+        ``module_loaded`` receivers may install further modules, but cannot call
+        ``mark_ready()`` or ``shutdown()``; raise an error to abort the installation.
 
         This method is thread-safe.
 
@@ -162,8 +174,9 @@ class ModuleRegistry:
         Raises:
             DuplicateModuleError: If a dependency produces a naming conflict.
             InvalidManifestError: If a manifest is missing or invalid.
-            ModuleLifecycleError: If the ``on_load`` hook raises or a new module is
-                requested while installation rollback is running.
+            ModuleLifecycleError: If the ``on_load`` hook raises, or a new module is
+                requested while installation rollback, ``mark_ready()`` or ``shutdown()``
+                is running.
             ModuleStartupRollbackError: If installation failed and unwinding modules
                 that had already loaded also failed. Its ``failures`` hold the original
                 failure first, followed by the cleanup failures.
@@ -224,7 +237,7 @@ class ModuleRegistry:
             ModuleLifecycleError: If any ``ready`` hook raises (``failures`` names the
                 module and holds the hook's exception), if a module is still loading or
                 has already been shut down, or if called from a hook or signal receiver
-                while ``mark_ready`` or ``shutdown`` is already running.
+                while ``install``, ``mark_ready`` or ``shutdown`` is already running.
         """
         with self._lock, self._lifecycle_operation("mark_ready"):
             modules = [self._app_configs[name] for name in self._install_order]
@@ -279,8 +292,8 @@ class ModuleRegistry:
         Raises:
             ModuleLifecycleError: After all attempts, if any hook or ``module_shutdown``
                 receiver failed. ``failures`` lists every failure with its original cause.
-                Also raised if called from a hook or signal receiver while ``mark_ready``
-                or ``shutdown`` is already running.
+                Also raised if called from a hook or signal receiver while ``install``,
+                ``mark_ready`` or ``shutdown`` is already running.
         """
         with self._lock, self._lifecycle_operation("shutdown"):
             modules = [self._app_configs[name] for name in reversed(self._install_order)]
@@ -361,25 +374,30 @@ class ModuleRegistry:
             ModuleLifecycleError: The original failure when rollback was clean.
             ModuleStartupRollbackError: If rollback itself failed for some modules.
         """
-        if self._rolling_back and any(path not in self._app_configs for path in import_paths):
+        introduces_modules = any(path not in self._app_configs for path in import_paths)
+        if self._rolling_back and introduces_modules:
             raise ModuleLifecycleError("Cannot install new modules while installation rollback is running.")
-        preexisting = set(self._app_configs)
-        attempt = _InstallAttempt()
-        try:
-            return [self._install(import_path, [], attempt) for import_path in import_paths]
-        except BaseException as exc:
-            introduced = [name for name in self._install_order if name not in preexisting]
-            unwind_failures = self._rollback(introduced)
-            if not unwind_failures or not isinstance(exc, Exception):
-                raise
+        if not introduces_modules:
+            return [self._app_configs[import_path] for import_path in import_paths]
 
-            original = attempt.failure or ModuleFailure(module=import_paths[0], phase="install", error=exc)
-            error = self._aggregate_error(
-                f"Installation of {', '.join(import_paths)} failed ({exc}) and cleanup was incomplete",
-                [original, *unwind_failures],
-                error_type=ModuleStartupRollbackError,
-            )
-            raise error from error.__cause__
+        with self._lifecycle_operation("install"):
+            preexisting = set(self._app_configs)
+            attempt = _InstallAttempt()
+            try:
+                return [self._install(import_path, [], attempt) for import_path in import_paths]
+            except BaseException as exc:
+                introduced = [name for name in self._install_order if name not in preexisting]
+                unwind_failures = self._rollback(introduced)
+                if not unwind_failures or not isinstance(exc, Exception):
+                    raise
+
+                original = attempt.failure or ModuleFailure(module=import_paths[0], phase="install", error=exc)
+                error = self._aggregate_error(
+                    f"Installation of {', '.join(import_paths)} failed ({exc}) and cleanup was incomplete",
+                    [original, *unwind_failures],
+                    error_type=ModuleStartupRollbackError,
+                )
+                raise error from error.__cause__
 
     def _rollback(self, introduced: list[str]) -> list[ModuleFailure]:
         """Remove modules introduced by a failed installation (must be called under lock).
@@ -468,31 +486,41 @@ class ModuleRegistry:
 
     @contextmanager
     def _lifecycle_operation(self, name: str) -> Iterator[None]:
-        """Mark ``mark_ready`` or ``shutdown`` as running and reject nested calls (call under lock).
+        """Mark ``install``, ``mark_ready`` or ``shutdown`` as running and reject calls that must not nest.
 
         The guard is plain registry state: it is not a lock, so hooks and signal
         receivers that call back into the registry fail fast instead of re-running
-        hooks, and an async implementation can reuse it between coroutines.
+        hooks, and an async implementation can reuse it between coroutines. Only
+        ``install`` may nest inside ``install``, because ``on_load`` hooks and
+        ``module_loaded`` receivers may install further modules. The outer operation
+        is restored on exit. Must be called under the registry lock.
 
         Args:
-            name: Public method starting the operation.
+            name: Operation starting: ``"install"``, ``"mark_ready"`` or ``"shutdown"``.
 
         Yields:
             Nothing; the guard is released on exit, including on failure.
 
         Raises:
-            ModuleLifecycleError: If ``mark_ready`` or ``shutdown`` is already running.
+            ModuleLifecycleError: If another operation is running and ``name`` may not nest in it.
         """
-        if self._operation is not None:
-            raise ModuleLifecycleError(
-                f"Cannot call {name}() while {self._operation}() is running; "
-                "lifecycle hooks and signal receivers must not call back into it."
-            )
+        outer = self._operation
+        if outer is not None and not (name == "install" and outer == "install"):
+            if name == "install":
+                advice = (
+                    "install modules before readiness or shutdown starts, "
+                    "then call mark_ready() again to ready the new modules."
+                )
+            elif outer == "install":
+                advice = "raise an error from the hook to abort the installation and roll it back instead."
+            else:
+                advice = "lifecycle hooks and signal receivers must not call back into it."
+            raise ModuleLifecycleError(f"Cannot call {name}() while {outer}() is running; {advice}")
         self._operation = name
         try:
             yield
         finally:
-            self._operation = None
+            self._operation = outer
 
     def _call_hook(self, app: AppConfig, hook_name: str) -> None:
         """Call a bootstrap hook if present using keyword injection only.

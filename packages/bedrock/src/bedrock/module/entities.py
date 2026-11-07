@@ -6,7 +6,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any
 
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, PrivateAttr, computed_field
 from typer import Typer
 
 from ..constants import StrEnum
@@ -64,11 +64,12 @@ class AppConfig(BedrockEntity):
         package_module: The imported top-level Python module.
         bootstrap_module: The imported ``bootstrap`` submodule, if present.
         models_module: The imported ``models`` submodule, if present.
-        lifecycle_state: Current lifecycle stage of this module. Change it only through
-            ``transition_to`` so that invalid transitions are rejected.
+        lifecycle_state: Current lifecycle stage of this module. Read-only: it starts at
+            ``LOADING`` and changes only through ``transition_to``, which rejects invalid
+            transitions. Assigning to it raises ``AttributeError``.
     """
 
-    model_config = ConfigDict(validate_assignment=True)
+    model_config = ConfigDict(extra="forbid")
 
     name: str
     manifest: ModuleManifest
@@ -76,24 +77,31 @@ class AppConfig(BedrockEntity):
     package_dir: Path
     bootstrap_module: ModuleType | None = None
     models_module: ModuleType | None = None
-    lifecycle_state: ModuleLifecycleState = ModuleLifecycleState.LOADING
+    _lifecycle_state: ModuleLifecycleState = PrivateAttr(default=ModuleLifecycleState.LOADING)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def lifecycle_state(self) -> ModuleLifecycleState:
+        """Return the current lifecycle stage of this module."""
+        return self._lifecycle_state
 
     def transition_to(self, target: ModuleLifecycleState) -> None:
         """Move this module to a later lifecycle state.
 
         Args:
-            target: The state to move to.
+            target: The state to move to, as a ``ModuleLifecycleState`` or its string value.
 
         Raises:
             ModuleLifecycleError: If ``target`` is not a valid next state from the current one.
+            ValueError: If ``target`` is not the name of a lifecycle state.
         """
-        current = ModuleLifecycleState(self.lifecycle_state)
+        current = self._lifecycle_state
         target = ModuleLifecycleState(target)
         if target not in _ALLOWED_TRANSITIONS[current]:
             raise ModuleLifecycleError(
                 f"Module '{self.name}' cannot move from lifecycle state '{current.value}' to '{target.value}'."
             )
-        self.lifecycle_state = target
+        self._lifecycle_state = target
 
     def get_hook(self, hook_name: str) -> Any | None:
         """Return a bootstrap hook function by name, or ``None`` if absent.
