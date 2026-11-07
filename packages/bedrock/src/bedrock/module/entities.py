@@ -4,13 +4,15 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import ModuleType
-from typing import Any, Literal
+from typing import Any
 
-from pydantic import Field
+from pydantic import ConfigDict, Field
 from typer import Typer
 
+from ..constants import StrEnum
 from ..entities import BedrockEntity
 from ..utils.lazyload import load_string
+from .exc import ModuleLifecycleError
 
 
 class ModuleManifest(BedrockEntity):
@@ -31,6 +33,28 @@ class ModuleManifest(BedrockEntity):
     commands: str | None = None
 
 
+class ModuleLifecycleState(StrEnum):
+    """Lifecycle stage of an installed module.
+
+    A module only moves forward through ``LOADING -> LOADED -> READY -> SHUTDOWN``.
+    ``READY`` may be skipped when a loaded module is shut down (or unwound after
+    a failed startup) before it was readied.
+    """
+
+    LOADING = "loading"
+    LOADED = "loaded"
+    READY = "ready"
+    SHUTDOWN = "shutdown"
+
+
+_ALLOWED_TRANSITIONS: dict[ModuleLifecycleState, frozenset[ModuleLifecycleState]] = {
+    ModuleLifecycleState.LOADING: frozenset({ModuleLifecycleState.LOADED}),
+    ModuleLifecycleState.LOADED: frozenset({ModuleLifecycleState.READY, ModuleLifecycleState.SHUTDOWN}),
+    ModuleLifecycleState.READY: frozenset({ModuleLifecycleState.SHUTDOWN}),
+    ModuleLifecycleState.SHUTDOWN: frozenset(),
+}
+
+
 class AppConfig(BedrockEntity):
     """Fully loaded module registered in the Bedrock runtime.
 
@@ -40,8 +64,11 @@ class AppConfig(BedrockEntity):
         package_module: The imported top-level Python module.
         bootstrap_module: The imported ``bootstrap`` submodule, if present.
         models_module: The imported ``models`` submodule, if present.
-        lifecycle_state: Current lifecycle stage of this module.
+        lifecycle_state: Current lifecycle stage of this module. Change it only through
+            ``transition_to`` so that invalid transitions are rejected.
     """
+
+    model_config = ConfigDict(validate_assignment=True)
 
     name: str
     manifest: ModuleManifest
@@ -49,7 +76,24 @@ class AppConfig(BedrockEntity):
     package_dir: Path
     bootstrap_module: ModuleType | None = None
     models_module: ModuleType | None = None
-    lifecycle_state: Literal["loaded", "ready", "shutdown"] = "loaded"
+    lifecycle_state: ModuleLifecycleState = ModuleLifecycleState.LOADING
+
+    def transition_to(self, target: ModuleLifecycleState) -> None:
+        """Move this module to a later lifecycle state.
+
+        Args:
+            target: The state to move to.
+
+        Raises:
+            ModuleLifecycleError: If ``target`` is not a valid next state from the current one.
+        """
+        current = ModuleLifecycleState(self.lifecycle_state)
+        target = ModuleLifecycleState(target)
+        if target not in _ALLOWED_TRANSITIONS[current]:
+            raise ModuleLifecycleError(
+                f"Module '{self.name}' cannot move from lifecycle state '{current.value}' to '{target.value}'."
+            )
+        self.lifecycle_state = target
 
     def get_hook(self, hook_name: str) -> Any | None:
         """Return a bootstrap hook function by name, or ``None`` if absent.
@@ -90,5 +134,6 @@ class AppConfig(BedrockEntity):
 
 __all__ = [
     "AppConfig",
+    "ModuleLifecycleState",
     "ModuleManifest",
 ]

@@ -182,7 +182,7 @@ Hook responsibilities:
 
 - `on_load`: register this module's providers, hook implementations, or lightweight configuration after dependencies load.
 - `ready`: start work that requires the complete dependency graph.
-- `on_shutdown`: release owned resources; shutdown runs in reverse install order.
+- `on_shutdown`: release owned resources; shutdown runs in reverse install order and attempts every module even if another module's hook fails. A failed `on_load` rolls the whole install back, and a module whose shutdown completed is never shut down again.
 
 Do not put request handling, seed data, migrations, or ordinary business workflows in bootstrap hooks. Current runtime hooks are synchronous; do not declare `async def` hooks until the runtime contract explicitly supports awaiting them.
 

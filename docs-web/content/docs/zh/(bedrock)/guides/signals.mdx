@@ -286,7 +286,7 @@ Bedrock 会在模块生命周期的关键节点发出信号。这些信号定义
 | `module_ready` | 模块的 `ready` 钩子执行完成后 | `AppConfig` 实例 | `registry`, `module`, `config` |
 | `module_shutdown` | 优雅关闭期间（逆序） | `AppConfig` 实例 | `registry`, `module`, `config` |
 | `registry_ready` | 所有模块都被标记为 ready 后 | `ModuleRegistry` | `registry`, `config` |
-| `registry_shutdown` | registry 开始关闭时 | `ModuleRegistry` | `registry`, `config` |
+| `registry_shutdown` | 所有模块都已关闭后 | `ModuleRegistry` | `registry`, `config` |
 
 ### 用法
 
@@ -314,7 +314,11 @@ def on_all_ready(sender, **kwargs):
 在 `registry.shutdown()` 期间：
 
 4. 按**逆序**调用每个模块的 `on_shutdown` 钩子 → 每个模块触发一次 `module_shutdown`
-5. 注册表发出完成信号 → 触发一次 `registry_shutdown`
+5. 注册表发出完成信号 → 仅在所有模块都已关闭后触发一次 `registry_shutdown`
+
+如果某一步失败，信号只反映实际完成的步骤：`on_load` 失败不会触发 `module_loaded`，安装会被回滚（已加载的模块在回滚时触发 `module_shutdown`）；只要仍有模块未就绪或未关闭，就不会触发 `registry_ready` / `registry_shutdown`。重复调用 `mark_ready()` 或 `shutdown()` 不会为已完成的模块重复触发信号。
+
+如果 `registry_ready` 或 `registry_shutdown` 接收器抛出异常，下次调用 `mark_ready()` 或 `shutdown()` 会重试该注册表级通知，不会重新执行已完成的模块钩子。就绪通知失败会将 `registry.ready` 重置为 `False`，因此也可以重试 `bedrock.setup()`；就绪接收器在通知期间仍可查询注册表。重试会重新发送整个信号，之前成功的接收器可能再次执行，必须能够安全重试。
 
 ## 同步/异步互操作
 
