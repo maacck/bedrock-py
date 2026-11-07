@@ -90,6 +90,17 @@ class ModuleLifecycleError(ModuleError):
         return list(dict.fromkeys(failure.module for failure in self.failures))
 
 
+class ModuleAsyncRequiredError(ModuleLifecycleError):
+    """Raised when a synchronous lifecycle entrypoint would have to run async work inside a running event loop.
+
+    Synchronous entrypoints adapt asynchronous hooks and receivers only when the calling thread has no running
+    event loop. Inside a loop they raise this error, naming the async entrypoint to await instead, rather than
+    nesting loops or leaving a coroutine unawaited.
+    """
+
+    detail: str = "Asynchronous lifecycle work needs the async entrypoint inside a running event loop."
+
+
 class ModuleStartupRollbackError(ModuleLifecycleError):
     """Raised when a failed installation could not be fully unwound.
 
