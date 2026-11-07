@@ -46,7 +46,7 @@ from bedrock.di import Container, Lifetime, container, provider, inject
 
 | Lifetime | Behavior | Use Case |
 |----------|----------|----------|
-| `SINGLETON` | Create once, cache forever | shared managers, clients, service singletons |
+| `SINGLETON` | Create on first resolution and cache until reset | shared managers, clients, service singletons |
 | `TRANSIENT` | Create on every `resolve()` | stateless helpers |
 | `SCOPED` | Reuse within active `container.scope()` | request-local sessions, unit-of-work objects |
 
@@ -63,7 +63,7 @@ from bedrock.di import Container, Lifetime, container, provider, inject
 
 ### `container.register(key, *, factory, lifetime=Lifetime.SINGLETON)`
 
-Register a factory under a type key or string key.
+Register a factory under a type key or string key. Factories are called with no arguments; the container does not automatically resolve constructor parameters. Use a zero-argument factory to wire dependencies explicitly.
 
 ```python
 from bedrock.di import Lifetime, container
@@ -153,7 +153,7 @@ with container.scope("request"):
 
 ### Cleanup
 
-When the scope exits, Bedrock calls `.close()` on scoped objects that provide it.
+When the scope exits, Bedrock calls `.close()` synchronously on scoped objects that provide it; asynchronous cleanup methods are not awaited. Scopes are context-local and nest: an inner scope has a separate cache, and exiting it restores the outer scope.
 
 ---
 
@@ -236,7 +236,7 @@ class AuditName:
 Resolve named keyword-only dependencies from the default global container.
 
 ```python
-from bedrock.di import inject
+from bedrock.di import container, inject
 
 
 class Mailer:
@@ -244,12 +244,15 @@ class Mailer:
         print(to)
 
 
+container.register_instance(Mailer, Mailer())
+
+
 @inject(mailer=Mailer)
 def send_welcome(user_email: str, *, mailer: Mailer) -> None:
     mailer.send(user_email, "Welcome", "Hello")
 ```
 
-Explicit kwargs override injected values.
+Explicit kwargs override injected values. Injectable parameters should be keyword-only: the wrapper checks explicit keyword arguments, not positional arguments. Resolution happens at each call; async functions receive dependencies when called, before their coroutine is awaited.
 
 ### `custom.inject(**mappings)`
 
@@ -310,7 +313,7 @@ Declare only the parameters you need — the registry injects only what it finds
 
 **Package**: `bedrock.testing`
 
-Available DI fixtures:
+Register fixtures with `pytest_plugins = ["bedrock.testing"]` in `conftest.py`, or import them from `bedrock.testing`:
 
 - `clean_container`
 - `di_container`

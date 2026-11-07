@@ -59,6 +59,7 @@ from bedrock.hooks import HookRegistry, HookNamespace, hooks, hookspec, hookimpl
 ### Priority and firstresult
 
 - Lower `priority` values run first
+- Equal priorities run in registration order
 - `firstresult=True` stops dispatch after the first non-`None` result
 
 ---
@@ -85,6 +86,7 @@ def get_permissions(user_id: str) -> list[str]:
 
 - The spec owner defines the namespace
 - Specs document the extension contract
+- Implementations are matched by function name, and receive all dispatch kwargs; their signatures must accept them
 - Use `firstresult=True` only when the caller wants exactly one winning implementation
 
 ---
@@ -107,6 +109,8 @@ def process(method: str, amount: int) -> str | None:
 ```
 
 ### Marker-based registration with `@hookimpl`
+
+`@hookimpl` only marks a method; call `add_impls_from()` to register it.
 
 ```python
 from bedrock.hooks import hookimpl
@@ -132,6 +136,8 @@ results = auth_hooks.call("get_permissions", user_id="user-1")
 
 ### `await namespace.acall(name, **kwargs)`
 
+Async implementations are awaited; synchronous implementations run via `asyncio.to_thread`. `call()` invokes implementations directly and does not await async implementations.
+
 ```python
 results = await auth_hooks.acall("get_permissions", user_id="user-1")
 ```
@@ -145,8 +151,9 @@ results = auth_hooks.call_robust("get_permissions", user_id="user-1")
 ### Return behavior
 
 - normal hook: returns a list of all results in priority order
-- `firstresult=True`: returns a list containing the first non-`None` result only
-- robust calls: return `(callable, result_or_exception)` tuples
+- `firstresult=True`: returns a list containing the first non-`None` result, or an empty list
+- `call_robust()` returns `(callable, result_or_exception)` tuples; with `firstresult=True`, exceptions are retained and dispatch continues until a non-`None` result
+- Calling a hook without a registered spec raises `HookSpecNotFoundError`
 
 ---
 
@@ -194,9 +201,11 @@ Hooks are usually wired in `bootstrap.py`.
 
 ```python
 from modules.auth.hookspecs import auth_hooks
+from bedrock.hooks import hookimpl
 
 
 class ApiKeyHooks:
+    @hookimpl
     def authenticate(self, token: str) -> str | None:
         if token == "api-key":
             return "user-2"
@@ -233,6 +242,8 @@ Warnings are emitted for:
 - implementations without a matching spec
 - specs with zero implementations
 
+`validate()` returns warnings; registry startup also logs them during readiness.
+
 ### Introspection
 
 ```python
@@ -249,6 +260,8 @@ auth_hooks.reset()   # one namespace
 hooks.reset()        # all namespaces
 ```
 
+Namespace reset removes implementations associated with registered specs; orphan implementations without specs remain until the entire registry is reset.
+
 ---
 
 ## Signals vs Hooks
@@ -257,7 +270,7 @@ hooks.reset()        # all namespaces
 |------|-----|
 | Fire-and-forget notification | Signals |
 | Ordered call/response extension point | Hooks |
-| Receiver return values | Hooks |
+| Ordered receiver return values | Hooks |
 | Decoupled event broadcast | Signals |
 
 ### Rule of thumb
@@ -271,7 +284,7 @@ hooks.reset()        # all namespaces
 
 **Package**: `bedrock.testing`
 
-Available hook fixtures:
+Register fixtures with `pytest_plugins = ["bedrock.testing"]` in `conftest.py`, or import them from `bedrock.testing`:
 
 - `clean_hooks`
 - `hook_registry`

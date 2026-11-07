@@ -2,7 +2,7 @@
 
 Blinker-derived event system with sync/async support and lifecycle signals. Implementation: `bedrock.signal`.
 
-> **Need call/response with return values?** Use the hook system (`bedrock.hooks`) instead. Signals are notification-only.
+> **Need ordered call/response?** Use the hook system (`bedrock.hooks`). Signals are intended for notifications, although dispatch returns receiver results.
 
 ## Table of Contents
 
@@ -92,7 +92,7 @@ user_created.connect(log_user)
 # Connect to a specific sender only
 user_created.connect(log_user, sender=admin_module)
 
-# Disable weak referencing (required for closures/lambdas)
+# Retain the receiver strongly when it has no other strong reference
 user_created.connect(log_user, weak=False)
 ```
 
@@ -149,7 +149,7 @@ for receiver, result in results:
 
 ### `signal.send_robust(sender, **kwargs)`
 
-Like `send()`, but catches `Exception` subclasses from receivers. Returns exceptions in the result list instead of propagating:
+Like `send()`, but catches `Exception` subclasses from receivers. Returns exceptions in the result list instead of propagating. In a running event loop, the default async wrapper's `RuntimeError` is also captured per async receiver:
 
 ```python
 results = order_placed.send_robust(current_app, order_id="ORD-042")
@@ -262,6 +262,8 @@ user_created.send(app, username="bob")
 assert len(received) == 1  # Still 1
 ```
 
+On exit, `connected_to()` disconnects that receiver from **all** senders, including any pre-existing connections.
+
 ### `signal.muted()`
 
 Temporarily suppresses all signal dispatch. No receivers are called while muted:
@@ -285,6 +287,8 @@ with audit.muted():
 audit.send(importer, action="complete")  # This fires
 ```
 
+Muting uses a single boolean, so nested `muted()` blocks do not preserve the outer muted state after the inner block exits.
+
 ---
 
 ## Lifecycle Signals
@@ -299,7 +303,7 @@ Defined in `bedrock.module.signals`. Emitted by the `ModuleRegistry` during star
 | `module_ready` | After a module's `ready` hook completes | `AppConfig` instance | `registry`, `module`, `config` |
 | `module_shutdown` | During graceful shutdown (reverse order) | `AppConfig` instance | `registry`, `module`, `config` |
 | `registry_ready` | After all modules are marked ready | `ModuleRegistry` | `registry`, `config` |
-| `registry_shutdown` | When the registry begins shutdown | `ModuleRegistry` | `registry`, `config` |
+| `registry_shutdown` | After all modules have shut down successfully | `ModuleRegistry` | `registry`, `config` |
 
 ### Import
 
@@ -342,6 +346,8 @@ During `registry.shutdown()`:
 4. Each module's `on_shutdown` hook called in **reverse** order, `module_shutdown` per module
 5. Registry signals completion, `registry_shutdown` once
 
+Lifecycle signals use `send()`, so receiver exceptions can interrupt the operation; they are not detached background tasks. Failed `registry_ready` or `registry_shutdown` notifications may be retried, so their receivers should be retry-safe. Module shutdown is also used to unwind modules after a failed installation.
+
 ---
 
 ## Weak References
@@ -353,13 +359,13 @@ By default, receivers are stored as weak references (`weak=True`).
 | Receiver Type | Weak Behavior | Notes |
 |---------------|---------------|-------|
 | Module-level functions | Works fine | Persist for the lifetime of the module |
-| Closures / lambdas | **Garbage collected immediately** | Must use `weak=False` |
+| Closures / lambdas | Collected when no strong reference remains | Use `weak=False` if the connection must retain them |
 | Bound methods | WeakMethod wrapper | Auto-disconnected when owning instance is garbage collected |
 
 ### When to Use `weak=False`
 
 ```python
-# WRONG: closure is immediately garbage collected
+# WRONG: handler can be collected after setup returns
 def setup():
     def handler(sender, **kwargs):
         print("received")
@@ -406,7 +412,7 @@ order_placed.connect(async_handler, weak=False)
 
 # In a running event loop — THIS RAISES RuntimeError!
 order_placed.send(app, order_id="ORD-001")
-# RuntimeError: Cannot send to an async receiver with send().
+# RuntimeError: Cannot send to an async receiver from a running event loop thread.
 # Use await signal.asend(...) or provide _async_wrapper.
 
 # CORRECT: use asend() in async context
@@ -424,7 +430,7 @@ Bedrock offers two distinct mechanisms for cross-module communication:
 | Aspect | Signals (`bedrock.signal`) | Hooks (`bedrock.hooks`) |
 |--------|---------------------------|------------------------|
 | **Pattern** | Notification (fire-and-forget) | Call/response (returns values) |
-| **Return values** | Ignored by sender | Collected and returned to caller |
+| **Return values** | Returned as `(receiver, result)` pairs, usually ignored | Collected and returned to caller |
 | **Ordering** | Unspecified (set-based) | Priority-sorted (lower runs first) |
 | **Short-circuit** | No | `firstresult=True` stops after first non-None result |
 | **Registration** | `signal.connect(receiver)` | `@hookimpl` decorator or `ns.impl()` |
@@ -456,7 +462,7 @@ def authenticate(request):
     """Return user if authenticated, None otherwise."""
 
 @auth.impl(priority=10)
-def check_token(request):
+def authenticate(request):
     if valid_token(request.token):
         return get_user_from_token(request.token)
     return None  # Let next impl try
@@ -476,8 +482,8 @@ user = results[0] if results else None
 
 **Don't connect receivers inside hot loops.** Each `connect()` call updates internal bookkeeping dicts. Connect once at module load time, not per-request.
 
-**Don't forget `weak=False` for closures.** A closure or lambda connected without `weak=False` gets garbage collected before any signal is sent.
+**Don't forget receiver lifetime.** A weakly connected closure or lambda can be collected once no strong references remain; use `weak=False` when the connection must retain it.
 
-**Don't use signals for synchronous control flow.** Signals are notification (fire-and-forget). If you need a return value to drive logic, call the function directly.
+**Don't use signals for ordered control flow.** Signal dispatch returns receiver results but does not define their order. Use hooks or a direct call when results drive logic.
 
 **Don't send lifecycle signals manually.** The `ModuleRegistry` owns lifecycle signal emission. Sending `module_ready` or `registry_ready` yourself breaks invariants.

@@ -24,7 +24,7 @@ All database models extend `BedrockModel` using SQLAlchemy 2.0 `Mapped` syntax.
 
 ```python
 from bedrock.database.base import BedrockModel
-from sqlalchemy import String, Boolean, ForeignKey
+from sqlalchemy import String, Boolean
 from sqlalchemy.orm import Mapped, mapped_column
 
 
@@ -57,16 +57,17 @@ Initialize the database once per process before any database access:
 ```python
 from bedrock.database import db
 
-# With explicit URL
+# Choose one initialization method:
 db.init(url="postgresql://user:pass@localhost/mydb")
 
-# With settings object
-from bedrock.database.config import DbSettings
-settings = DbSettings()  # Reads from environment variables
-db.init(settings=settings)
+# Or use settings from environment variables:
+# from bedrock.database.config import DbSettings
+# db.init(settings=DbSettings())
 ```
 
-**Important**: Call `db.init()` exactly once per process. It is not idempotent.
+**Important**: Initialize before database access. A later `db.init()` replaces the engine and session factory, closes the session bound in the current context, and disposes the previous engine. Failed engine construction leaves the previous configuration usable.
+
+An explicit URL selects the connection URL; engine pool options still come from `DbSettings`, including its configured database type.
 
 ---
 
@@ -116,6 +117,8 @@ except ValueError:
 - Always closes session and resets `ContextVar` on exit
 - Raises `RuntimeError` if called while a session is already bound
 
+Accessing `db.session` before entering the scope binds a session, so call `db.clear_session()` first if necessary. Commit expires ORM instances and the scope closes the session; return plain data or refresh and load required values before detaching instances.
+
 ### Independent Sessions with `independent_session()`
 
 For side-effect writes that must not interfere with the current transaction:
@@ -139,7 +142,7 @@ with db.session_scope() as session:
 
 **Use cases:**
 - Audit logging (persists even if main transaction rolls back)
-- Event publishing or outbox patterns
+- Independent side effects that must persist even if the caller rolls back (a transactional outbox should instead share the caller's transaction)
 - Reads that must not see uncommitted data from the caller
 - Background tasks with their own transaction lifecycle
 
@@ -177,6 +180,9 @@ Bedrock uses per-app Alembic branches via `MigrationsManager`. Each app gets its
 
 ```python
 from bedrock.database import MigrationsManager
+from bedrock.module import apps
+
+# Populate apps with the target app and its dependencies before creating the manager.
 
 mgr = MigrationsManager(
     registry=apps,          # Populated ModuleRegistry
@@ -226,6 +232,8 @@ bedrock db current <app>
 bedrock db history <app>
 bedrock db uninstall <app>
 ```
+
+The CLI populates the registry for `<app>` and builds its database URL from `DATABASE_` settings. Use `--` before a negative positional target, for example `bedrock db downgrade myproject.modules.users -- -1`.
 
 ### Migration Directory Layout
 
@@ -290,25 +298,31 @@ result = search_filter_sort_paginate(
 |-----------|------|---------|-------------|
 | `db_session` | `Session` | **required** | SQLAlchemy session |
 | `model` | `Type[BedrockModel]` | **required** | Target model class |
-| `limit` | `int` | `10` | Results per page |
+| `limit` | `int` | `10` | Results per page; integer from 1 through 1000, excluding booleans |
 | `page` | `int` | `1` | Page number (1-indexed) |
-| `sort_key` | `str \| None` | `None` | Column name to sort by |
-| `sort_dir` | `str \| None` | `None` | `"asc"` or `"desc"` |
-| `q` | `str \| None` | `None` | Full-text search query |
-| `filter_specs` | `list[dict]` | `None` | Filter spec list (see Filter Syntax) |
+| `sort_key` | `str \| list[tuple[str, str]] \| None` | `None` | Column name or list of column/direction pairs |
+| `sort_dir` | `str \| None` | `None` | Direction for a string `sort_key`; `"desc"` descends, otherwise ascending |
+| `q` | `str \| None` | `None` | Search term passed to `model.text_search()` |
+| `filter_specs` | `dict \| list[dict] \| None` | `None` | Filter specification or list (see Filter Syntax) |
 | `sqla_filters` | `list` | `None` | Pre-built SQLAlchemy filter clauses |
 | `join_models` | `list` | `None` | Explicit join targets |
 | `options` | `list` | `None` | SQLAlchemy query options (e.g. `joinedload`) |
+| `additional_select` | `list \| None` | `None` | Extra selected expressions; use `return_raw=True` to access them |
 | `show_all` | `bool` | `False` | Disable pagination (return all results) |
+| `count_pk` | `str \| None` | `None` | Column to count; defaults to the first primary key |
 | `return_raw` | `bool` | `False` | Return raw rows instead of scalars |
 | `group_by` | `str \| None` | `None` | Column or expression to GROUP BY |
 | `auto_join_` | `bool` | `True` | Auto-join relationships from filters |
+
+`limit` is validated even with `show_all=True`; invalid values raise `bedrock.exc.InvalidQueryLimitError`. With `show_all=True`, pagination is disabled but `page_info.has_more` is still calculated from `offset` and `limit`.
+
+`q` searches the model's `__searchable_columns__` using `__search_op__` (default `ilike`); an empty searchable-column list produces a no-op filter. Counts reflect joined rows, not distinct model instances. With `group_by`, the count query is grouped and only its first scalar is returned.
 
 ---
 
 ## Filter Syntax
 
-Filters are JSON-serializable dicts passed as `filter_specs` to `search_filter_sort_paginate`.
+Filters are JSON-serializable dicts passed as `filter_specs` to `search_filter_sort_paginate`. A single dict or a list is accepted; list entries are combined with AND. The default operator is `eq`. Filter trees are limited to depth 50 and deeper trees raise `FilterDepthExceededError`.
 
 ### Basic Filter
 
@@ -334,15 +348,19 @@ Filters are JSON-serializable dicts passed as `filter_specs` to `search_filter_s
 | `between` | — | Value between two bounds | `[18, 65]` |
 | `is_null` | — | Field is NULL | *(no value)* |
 | `is_not_null` | — | Field is not NULL | *(no value)* |
-| `any` | — | Relationship list contains match | *(nested filter)* |
-| `not_any` | — | Negated any | *(nested filter)* |
-| `has` | — | Relationship scalar matches | *(nested filter)* |
-| `text_search` | — | Full-text search on relationship | `"search term"` |
+| `any` | — | Relationship collection test | *(nested filter; see limitation below)* |
+| `not_any` | — | Negated relationship collection test | *(nested filter; see limitation below)* |
+| `has` | — | Relationship scalar test | *(nested filter; see limitation below)* |
+| `text_search` | — | Search a related model's configured columns | `"search term"` |
 | `fuzzy_search` | — | ILIKE with automatic `%` wrapping | `"alic"` |
+
+`text_search` targets a relationship and calls the related model's `text_search()`; it uses `any()` or `has()` according to relationship cardinality. `like` case sensitivity depends on the database dialect. Other than `is_null` and `is_not_null`, operators require a `value` key.
+
+The current generic filter formatter attempts column type lookup on relationship attributes. Consequently `any`, `not_any`, `has`, and colon traversal can raise `BadFilterFormatError` instead of producing a query; use explicit SQLAlchemy relationship clauses in `sqla_filters` until this is fixed. `text_search` handles relationships separately.
 
 ### Negation
 
-Prefix the field name with `!` to negate any operator:
+Prefix a field name with `!` to negate its operator (for relationship paths, prefer explicit SQLAlchemy clauses):
 
 ```python
 {"field": "!is_active", "op": "==", "value": True}  # WHERE NOT is_active = True
@@ -377,14 +395,11 @@ Use `.` to traverse relationships via SQL JOIN:
 
 ### Nested Filters — Colon Notation (any/has)
 
-Use `:` to traverse relationships via `any()` or `has()` (auto-detected from relationship type):
+The parser accepts `:` paths and selects `any()` or `has()` from relationship cardinality, but the current formatter's relationship type lookup can fail as described above. Use SQLAlchemy clauses instead:
 
 ```python
-# Filter users who have any order with status "shipped"
-{"field": "orders:status", "op": "==", "value": "shipped"}
-
-# Multi-level nesting
-{"field": "orders:items:product_name", "op": "ilike", "value": "%widget%"}
+# Filter users who have an order with status "shipped"
+sqla_filters = [UserModel.orders.any(Order.status == "shipped")]
 ```
 
 ### Filter Examples
@@ -409,7 +424,7 @@ result = search_filter_sort_paginate(
 )
 
 # Between filter
-{"field": "created_at", "op": "between", "value": ["2025-01-01", "2025-12-31"]}
+{"field": "age", "op": "between", "value": [18, 65]}
 
 # Fuzzy search (wraps value with %)
 {"field": "name", "op": "fuzzy_search", "value": "alic"}
@@ -453,14 +468,14 @@ class UserModel(BedrockModel):
 
 ### Querying Across Relationships
 
-Once relationships are defined, use dot/colon notation in filters:
+Use dot notation for JOIN-based filters and explicit SQLAlchemy relationship clauses for any/has queries:
 
 ```python
 # JOIN-based: filter users in "Engineering" department
 filter_specs=[{"field": "department.name", "op": "==", "value": "Engineering"}]
 
 # any/has-based: departments that have any active user
-filter_specs=[{"field": "users:is_active", "op": "==", "value": True}]
+sqla_filters=[DepartmentModel.users.any(UserModel.is_active == True)]
 ```
 
 ---
@@ -504,6 +519,8 @@ def create_user(name: str, email: str) -> UserModel:
 def update_user(user_id: int, **kwargs) -> UserModel:
     """Update a user's fields."""
     user = db.session.get(UserModel, user_id)
+    if user is None:
+        raise LookupError(f"User {user_id} not found")
     user.update(**kwargs)  # CrudMixin method
     db.session.commit()
     return user
@@ -512,6 +529,8 @@ def update_user(user_id: int, **kwargs) -> UserModel:
 def delete_user(user_id: int) -> None:
     """Delete a user."""
     user = db.session.get(UserModel, user_id)
+    if user is None:
+        raise LookupError(f"User {user_id} not found")
     db.session.delete(user)
     db.session.commit()
 ```
@@ -543,6 +562,8 @@ result = search_filter_sort_paginate(
 all_users = result["items"]
 ```
 
+`show_all=True` does not bypass limit validation, and `has_more` remains based on the requested page and limit rather than the number of returned items.
+
 ---
 
 ## Configuration
@@ -559,7 +580,7 @@ Database settings use environment variables with the `DATABASE_` prefix. `DbSett
 | `DATABASE_PORT` | `int \| None` | `None` | Database port (required for non-SQLite) |
 | `DATABASE_USERNAME` | `str \| None` | `None` | Database username |
 | `DATABASE_PASSWORD` | `str \| None` | `None` | Database password |
-| `DATABASE_MAX_CONNECTIONS` | `int` | `10` | Maximum connection pool size |
+| `DATABASE_MAX_CONNECTIONS` | `int` | `10` | Setting exists but is not used by engine construction |
 | `DATABASE_POOL_TIMEOUT` | `int` | `30` | Seconds to wait for a connection |
 | `DATABASE_POOL_SIZE` | `int` | `10` | Number of connections to maintain |
 | `DATABASE_POOL_RECYCLE` | `int` | `1800` | Seconds before recycling a connection |
@@ -635,9 +656,9 @@ The observer system hooks into SQLAlchemy's `before_flush` event to invoke callb
 
 | Identifier | Fires When |
 |------------|------------|
-| `on_insert` | A new instance is added to the session |
-| `on_update` | An existing instance is modified |
-| `on_delete` | An instance is marked for deletion |
+| `on_insert` | A new instance is pending in the session at flush |
+| `on_update` | An existing instance is dirty at flush |
+| `on_delete` | An instance is marked for deletion at flush |
 
 ### Registering Observers
 
@@ -652,6 +673,7 @@ class Catalog(BedrockModel):
     __tablename__ = "catalog"
     id = Column(Integer, primary_key=True)
     name = Column(String(100))
+    __observers__ = None  # Required by observes_model registration
 
 @observes_model(Catalog, "on_insert", "on_delete")
 def log_catalog_changes(session, target, identifier):
@@ -659,6 +681,8 @@ def log_catalog_changes(session, target, identifier):
 ```
 
 The callback receives three arguments: the session, the model instance, and the event identifier string.
+
+Callbacks run before SQL is flushed; database-generated IDs may not yet be assigned on insert.
 
 ### Callback Signature
 
@@ -672,7 +696,7 @@ callback(session, target, identifier) -> None
 
 ### Custom Observer Instances
 
-Pass a custom `ModelObserver` via the `observer` keyword:
+Pass a custom `ModelObserver` via the `observer` keyword. Registrations are stored on the model class, not isolated per observer; multiple registered observer instances listen to the same session flush and can invoke the same callbacks more than once.
 
 ```python
 from bedrock.database.observer import ModelObserver
@@ -681,13 +705,13 @@ custom_observer = ModelObserver()
 
 @observes_model(Catalog, "on_insert", observer=custom_observer)
 def handle_insert(session, target, identifier):
-    # Only fires on the custom observer
+    # Registered through custom_observer
     pass
 ```
 
 ### Weak References
 
-Observer callbacks are stored as weak references. Bound methods use a `WeakMethod` wrapper to prevent memory leaks. If the object owning a bound method is garbage collected, the callback is silently skipped.
+Observer callbacks are stored as weak references; keep a strong reference to callbacks and their owning objects for as long as they are registered. A collected function or bound-method owner is not silently skipped by the current implementation and can cause a flush-time error.
 
 ---
 
@@ -697,7 +721,7 @@ The `db` singleton is a `DatabaseManager` instance. It owns the engine, session 
 
 | Method / Property | Description |
 |-------------------|-------------|
-| `db.init(url, settings)` | Initialize engine and session factory. Call once at process start. |
+| `db.init(url, settings)` | Initialize or replace the engine and session factory. |
 | `db.engine` | The SQLAlchemy engine. Raises `DatabaseNotConfiguredError` if not initialized. |
 | `db.session` | The current context-local session. Creates one on first access within a context. |
 | `db.session_factory` | The underlying session factory. |
@@ -709,4 +733,4 @@ The `db` singleton is a `DatabaseManager` instance. It owns the engine, session 
 
 ### Error Handling
 
-Accessing `db.engine`, `db.session`, or `db.settings` before calling `db.init()` raises `DatabaseNotConfiguredError`. Always initialize the database before using any of these properties.
+Accessing `db.engine`, `db.session`, `db.session_factory`, or `db.settings`, or using session management methods, before calling `db.init()` raises `DatabaseNotConfiguredError`. Always initialize the database before using them.

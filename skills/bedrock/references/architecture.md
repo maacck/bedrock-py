@@ -67,7 +67,7 @@ import time → apps exists (empty), db exists (unconfigured), container exists,
     ↓
 bedrock.setup() → apps.populate(module_list)
     ↓
-on_load hooks → modules call db.init(url) if needed
+on_load hooks → modules may initialize resources such as db
     ↓
 apps.mark_ready() → ready hooks fire
     ↓
@@ -78,7 +78,9 @@ registry_ready signal emitted
 
 ### Shutdown
 
-Reverse install order: each module's `on_shutdown` hook runs, then `registry_shutdown` signal fires. Close connections and release resources here.
+Reverse install order: shutdown attempts each module's `on_shutdown` and reports failures together in `ModuleLifecycleError.failures`; `registry_shutdown` fires after all modules shut down. Failed shutdown hooks can be retried; completed shutdowns are skipped. `mark_ready()` and `shutdown()` are not re-entrant.
+
+Installation is failure-atomic: newly installed modules are removed on failure and successfully loaded modules receive best-effort reverse shutdown. `populate()` rolls back its whole installation phase, but a ready failure retains installed modules for retry. Cleanup failures raise `ModuleStartupRollbackError`. Each module's `lifecycle_state` is a `ModuleLifecycleState` (`loading`, `loaded`, `ready`, `shutdown`).
 
 ---
 
@@ -98,13 +100,15 @@ The container is injected into bootstrap hooks that declare a `container` parame
 
 ### Hook System (`bedrock.hooks`)
 
-Structured call/response protocol for multi-implementation extension points. Unlike signals (notification-only), hooks return values and support priority ordering and `firstresult` short-circuit.
+Structured call/response protocol for multi-implementation extension points. Signals also return receiver results, but hooks provide priority ordering and `firstresult` short-circuit.
 
-- **`@hookspec`** / **`@hookimpl(priority=0)`** — Marker decorators for global registration.
+- **`@hookspec`** / **`@hookimpl(priority=0)`** — Marker decorators for scanning into a namespace.
 - **`HookNamespace(name)`** — Module-facing scoped API: `ns.spec()`, `ns.impl()`, `ns.call()`, `ns.acall()`.
 - **`hooks.call(fqn, **kwargs)`** / **`hooks.acall(fqn, **kwargs)`** — Dispatch to all implementations.
 
 The hook registry is injected into bootstrap hooks that declare a `hooks` parameter.
+
+For selecting a concrete implementation class by name, use `ClassRegistry` rather than a hook or DI instance registration; see `references/class-registry-guide.md`.
 
 ---
 

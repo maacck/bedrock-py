@@ -25,8 +25,8 @@ Do **not** use this skill for runtime migrations, module inspection, or lifecycl
 | Command | Purpose | Caveat |
 |---|---|---|
 | `bedrock-cli init <name>` | Scaffold a new project | Minimal starter |
-| `bedrock-cli add submodule <name> <path>` | Add a lifecycle module | Prefer explicit flags |
-| `bedrock-cli add domain <name> <path>` | Add an internal domain module | No `manifest.yaml` |
+| `bedrock-cli add submodule <name> <path>` | Add a Bedrock module | Prefer explicit flags |
+| `bedrock-cli add domain <name> <path>` | Add an internal domain package | No `manifest.yaml` |
 | `bedrock-cli gen <template> <model_ref> <path>` | Generate from a SQLAlchemy model | Run from project root |
 | `_bedrock_gen/<template>.py.j2` | Override/add generation templates | Checked before built-ins |
 
@@ -59,7 +59,7 @@ my-saas-app/
     └── exc.py
 ```
 
-Treat this as a starter scaffold, not a complete app.
+This is the CLI's starter scaffold, not the canonical project anatomy. It makes the project package a Bedrock module and creates placeholder files. Follow `docs/bedrock-anatomy.md`: add host `settings.py` and an `app.py` entry point as needed, keep a root manifest only if the project owns lifecycle or dependency behavior, and remove placeholder files for concerns the project does not own.
 
 ### 2. Add modules explicitly
 
@@ -70,20 +70,23 @@ bedrock-cli add submodule users src/my_saas_app --bootstrap --installation
 bedrock-cli add domain profile src/my_saas_app/users
 ```
 
-- `add submodule` creates `__init__.py`, `manifest.yaml`, `models.py`, `entities.py`, `exc.py`, plus optional `bootstrap.py` and `installation.py`
-- `add domain` creates `__init__.py`, `entities.py`, `service.py`, and `exc.py`
+- `add submodule` creates `__init__.py`, `manifest.yaml`, `models.py`, `entities.py`, `exc.py`, plus optional `bootstrap.py` and `installation.py`; omitted flags prompt interactively with a default of no
+- `add domain` creates `__init__.py`, `entities.py`, `service.py`, and `exc.py`; it is an internal domain package, not a Bedrock module
+- Generated files are starters: follow `docs/bedrock-anatomy.md`, adding a module `service.py` for business logic and removing optional placeholders for concerns the module does not own.
 
 ### 3. Generate code from models
 
 ```bash
-bedrock-cli gen entity my_saas_app.users.models:User src/my_saas_app/users/profile
-bedrock-cli gen service my_saas_app.users.models:User src/my_saas_app/users/profile
+bedrock-cli gen entity my_saas_app.users.models:User src/my_saas_app/users/profile --overwrite
+bedrock-cli gen service my_saas_app.users.models:User src/my_saas_app/users/profile --overwrite
 ```
 
-- Run from project root so `.` and `./src` are importable
+- Define `User` in `my_saas_app.users.models` first; the scaffold's `models.py` contains no model.
+- Run from project root so `.` and `./src` are importable; the model's dependencies must also be installed.
 - `model_ref` must be `<module.path>:<ClassName>`
 - Built-ins are `entity` and `service`
-- Output file is always `<template>.py`
+- Output file is always `<template>.py`; `entity` therefore writes `entity.py`, not the canonical `entities.py`. Move its contents into `entities.py` and remove `entity.py`.
+- `--overwrite` is needed here because `add domain` made the destination non-empty; it also replaces the domain's existing `service.py`. The generated service returns ORM objects, so adapt it to the entity-based service interface described in `docs/bedrock-anatomy.md`.
 
 Template resolution order:
 
@@ -108,4 +111,4 @@ bedrock app info my_saas_app.users
 | Using docs as authority when they disagree with implementation | Prefer `packages/bedrock-cli/src/bedrock_cli/commands/*.py` and templates |
 | Omitting explicit add flags in scripted examples | Use `--bootstrap/--no-bootstrap` and `--installation/--no-installation` |
 | Running `gen` outside project root | Run it where `_bedrock_gen/`, `src/`, and your model package are visible |
-| Forgetting overwrite semantics | Without `--overwrite`, non-empty destinations and existing files fail |
+| Forgetting overwrite semantics | Without `--overwrite`, any non-empty destination fails, even if the target file does not exist |

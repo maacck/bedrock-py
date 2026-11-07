@@ -4,7 +4,7 @@ This file is optional — delete it if the module is not installable.
 """
 
 def pre_install() -> None:
-    """Run before database migrations."""
+    """Run after database migrations, before install()."""
     pass
 
 
@@ -17,7 +17,3 @@ def post_install() -> None:
     """Run after install()."""
     pass
 
-
-def uninstall() -> None:
-    """Run during module uninstall."""
-    pass

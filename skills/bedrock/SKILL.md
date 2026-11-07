@@ -22,10 +22,13 @@ Bedrock is a modular Python framework for building applications with manifest-dr
 | Hook Registry | `hooks` | `from bedrock.hooks import hooks` |
 | Settings | `settings` | `from bedrock.settings import settings` |
 
+Named implementation classes: `from bedrock.common.registry import ClassRegistry` (a class, not a singleton).
+
 ## When to Read References
 
 - **Creating or modifying a module** → Read `references/module-guide.md`
 - **Using dependency injection** → Read `references/di-guide.md`
+- **Selecting named implementation classes** → Read `references/class-registry-guide.md`
 - **Using the hook system** → Read `references/hooks-guide.md`
 - **Using database features** → Read `references/database-guide.md`
 - **Using CLI commands** → Read `references/cli-guide.md`
@@ -65,7 +68,7 @@ myproject/
 ```python
 import bedrock
 
-bedrock.setup("myproject.modules.users")
+bedrock.setup("myproject")
 ```
 
 Settings (`settings.py`):
@@ -84,7 +87,7 @@ class AppSettings(BaseSettings):
 app_settings: AppSettings = SettingsProxy(AppSettings)  # type: ignore[assignment]
 ```
 
-First module (`my_app/users/manifest.yaml`):
+Application manifest (`myproject/manifest.yaml`):
 
 ```yaml
 title: User Management
@@ -96,7 +99,7 @@ description: User authentication and profiles
 
 To add a module to an existing Bedrock project:
 
-1. Create `manifest.yaml` with title and version (required)
+1. Create `manifest.yaml` with a title (version defaults to `"unknown"`)
 2. Create `__init__.py` package marker (required)
 3. Create `entities.py` for domain data models
 4. Create `exc.py` for module exceptions
@@ -124,7 +127,7 @@ Call once at process start. Safe to call multiple times.
 ```
 <name>/
 ├── __init__.py          # Package marker
-├── manifest.yaml        # Required: title, version, depends_on
+├── manifest.yaml        # Required: title; optional: version, depends_on
 ├── entities.py          # Pydantic models (extend BedrockEntity)
 ├── service.py           # Business logic (sync + async pairs)
 ├── exc.py               # Module exceptions (extend BedrockExc)
@@ -140,7 +143,7 @@ Not every module needs every file. Minimum viable module: `__init__.py` + `manif
 
 ```yaml
 title: My Module           # Required: display name
-version: "0.1.0"           # Required: module version
+version: "0.1.0"           # Optional: defaults to "unknown"
 description: Short desc    # Optional
 depends_on:                # Optional: import paths of dependencies
   - myproject.users
@@ -172,7 +175,7 @@ class UserResponse(BedrockEntity):
 
 `BedrockEntity` is a Pydantic `BaseModel` with `arbitrary_types_allowed=True`. Use Pydantic v2 syntax.
 
-### 6. Exception Pattern
+### 5. Exception Pattern
 
 Create module-level exceptions by subclassing `BedrockExc`:
 
@@ -188,7 +191,7 @@ class UserError(BedrockExc):
 
 Every exception MUST set a `detail` class attribute with a default message. Constructor accepts optional `msg` to override. Create a module-level base exception (e.g. `UserError`) for catching all module errors.
 
-### 7. Bootstrap Hooks
+### 6. Bootstrap Hooks
 
 Lifecycle hooks execute at specific points during module loading. Bedrock always calls hooks with keyword arguments — use keyword-only signatures:
 
@@ -219,9 +222,11 @@ def on_shutdown(*, registry: ModuleRegistry, app: AppConfig) -> None:
 | `ready` | After ALL modules are installed | Configure services, initialization      |
 | `on_shutdown` | During `shutdown()`, in REVERSE order | Cleanup, close connections              |
 
-Hooks use keyword-only signatures. The registry inspects each hook's parameters and injects only what it declares: `registry` (ModuleRegistry), `app` (AppConfig), `container` (DI container), `hooks` (HookRegistry).
+Hooks should use keyword-only signatures. The registry injects the supported parameters they declare: `registry` (ModuleRegistry), `app` (AppConfig), `container` (DI container), `hooks` (HookRegistry); declare at least one or `**kwargs`.
 
-### 8. Database Models
+Installation is failure-atomic: newly introduced modules are removed on failure, with best-effort reverse shutdown of modules that completed `on_load`. `populate()` rolls back its entire installation phase; a later readiness failure leaves modules installed for retry. Modules track `ModuleLifecycleState` (`loading`, `loaded`, `ready`, `shutdown`). Shutdown attempts all modules and reports failures in `ModuleLifecycleError.failures`; rollback cleanup failures raise `ModuleStartupRollbackError`. `mark_ready()` and `shutdown()` are not re-entrant. See `references/module-guide.md`.
+
+### 7. Database Models
 
 Extend `BedrockModel` for database tables:
 
@@ -245,7 +250,7 @@ class UserModel(BedrockModel):
 - `.update(**kwargs)` — Update fields
 - `.delete()` — Delete instance
 
-### 9. Database Queries
+### 8. Database Queries
 
 Use `search_filter_sort_paginate` for filtered, paginated queries:
 
@@ -265,7 +270,7 @@ result = search_filter_sort_paginate(
 # Returns: {"items": [...], "total": N, "page_info": {"page": 1, "limit": 10, "has_more": True}}
 ```
 
-**Filter operators**: `==`, `!=`, `>`, `<`, `>=`, `<=`, `like`, `ilike`, `in`, `not_in`, `between`, `has`, `any`, `text_search`, `fuzzy_search`
+**Filter operators**: `is_null`, `is_not_null`, `==`/`eq`, `!=`/`neq`, `>`/`gt`, `<`/`lt`, `>=`/`ge`, `<=`/`le`, `like`, `ilike`, `not_ilike`, `in`, `not_in`, `between`, `has`, `any`, `not_any`, `text_search`, `fuzzy_search`. `limit` must be an integer from 1 to 1000 inclusive, even with `show_all=True`.
 
 **Boolean combinators**: `or`, `and`
 
@@ -274,9 +279,9 @@ result = search_filter_sort_paginate(
 {"or": [{"field": "age", "op": ">", "value": 30}, {"field": "name", "op": "==", "value": "Bob"}]}
 ```
 
-**Nested filters**: Use `.` (join) or `:` (any/has) notation for related models.
+**Nested filters**: `.` traverses relationships via joins; `:` selects any/has but the current formatter can fail on relationship type lookup. Prefer explicit SQLAlchemy relationship clauses in `sqla_filters`; see `references/database-guide.md`.
 
-### 10. Settings
+### 9. Settings
 
 Create module-level settings using `BaseSettings`. Wrap with `SettingsProxy` when you need deferred initialization (module-level singletons where env vars may not be ready at import time):
 
@@ -301,8 +306,8 @@ When environment variables are guaranteed to be ready at construction time (e.g.
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-class DbSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="DATABASE_")
+class MyDbSettings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="MYDB_")
     URL: str = "sqlite:///app.db"
     ECHO: bool = False
 ```
@@ -312,7 +317,7 @@ class DbSettings(BaseSettings):
 - Use `BaseSettings` directly when env vars are guaranteed ready at construction time
 - Always use `env_prefix` in `model_config` to namespace environment variables
 
-### 11. Signal System
+### 10. Signal System
 
 Bedrock provides lifecycle signals for cross-module notification (fire-and-forget):
 
@@ -362,7 +367,7 @@ from bedrock.module.signals import (
 | `registry_ready` | Run setup that needs ALL modules available |
 | `module_shutdown` | Coordinate cleanup across modules |
 
-### 12. Hook System (Call/Response)
+### 11. Hook System (Call/Response)
 
 For structured, multi-implementation extension points that return values, use the hook system instead of signals:
 
@@ -376,22 +381,43 @@ def authenticate(request):
     """Hook spec: first non-None result wins."""
 
 @auth.impl(priority=10)
-def default_auth(request):
-    return verify_token(request.token)
+def authenticate(request):
+    return verify_token(request["token"])
 
 # Dispatch
 request = {"token": "..."}
 results = auth.call("authenticate", request=request)
 ```
 
-**Signals vs Hooks**: Signals are notification-only (no return value). Hooks are call/response (implementations return values, ordered by priority, with optional `firstresult` short-circuit).
+**Signals vs Hooks**: Signals notify receivers and also return their results; hooks provide ordered call/response with optional `firstresult` short-circuit.
+
+### 12. Named Implementation Classes
+
+Use a class registry to choose implementations by name; use DI for instances and lifetimes:
+
+```python
+from bedrock.common.registry import ClassRegistry
+
+class Codec:
+    pass
+
+class Utf8Codec(Codec):
+    pass
+
+codecs = ClassRegistry[Codec](base_class=Codec)
+codecs.register("utf8", Utf8Codec)
+codec = codecs.get("utf8")()
+```
+
+Register extensions explicitly in `bootstrap.py:on_load`. See `references/class-registry-guide.md` for lazy registration and errors.
 
 ## Anti-Patterns (Avoid These)
 
 1. **Don't put HTTP types in service/entity layers** — keep Request/Response at adapter boundaries or in separate `schemas.py`
 2. **Don't subclass `BedrockExc` without `detail`** — error messages depend on it
 3. **Don't bypass `ModuleRegistry.install()`** to load modules manually — dependency resolution and hooks will be skipped
-4. **Don't call `db.init()` or `apps.populate()` more than once** per process
+4. **Don't recursively call `mark_ready()` or `shutdown()`** from lifecycle hooks or signal receivers
+5. **Don't register extensions via import-time side effects or accept import paths from requests** — register trusted paths in `on_load`
 
 ## Commands Reference
 
@@ -399,7 +425,7 @@ See `references/cli-guide.md` for the complete CLI command reference.
 
 Key commands:
 `<module>` is app import path (e.g. `my_erp.oms`)
-- `bedrock run --app <module>` — Run app commands
+- `bedrock run --app <app> <module> <command>` — Run a command from `<module>`'s Typer app (commands are grouped by module import path)
 - `bedrock manage install` — Install modules with migrations + hooks
 - `bedrock db revision <module> -m "msg"` — Create migration
 - `bedrock db upgrade <module>` — Apply migrations
