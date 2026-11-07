@@ -17,6 +17,12 @@ class CacheConnectionError(CacheError):
     detail: str = "Failed to connect to the cache backend."
 
 
+class CacheCloseError(CacheError):
+    """Raised when closing one or more cache backends failed; every backend was still attempted."""
+
+    detail: str = "Failed to close the cache backend."
+
+
 class CacheSerializationError(CacheError):
     """Raised when data cannot be serialized or deserialized."""
 

@@ -67,7 +67,7 @@ The shared `ClassRegistry[CacheBackend]` loads built-in paths on demand. `config
 | `clear(prefix=None) → int` | Redis requires a prefix; see exceptions. |
 | `namespace(prefix) → CacheNamespace` | Typed key family. Prefer this over raw strings. |
 | `lock(name, expire=30, ...) → CacheLock` | See `references/locks.md`. |
-| `close()` / `aclose()` | Release the backend. |
+| `close()` / `aclose()` | `close()` releases the sync client of every backend the service created (replaced ones included); `aclose()` releases the async client. Redis needs both. `has_async_resources()` tells whether `aclose()` still has work. |
 
 There is no service-level `get_or_set`. Populate-on-miss belongs on a slot: `CacheSlot.get_or_load`. Atomic set-if-absent (`add`) is a backend primitive used by locks, not a `CacheService` method.
 
@@ -117,11 +117,11 @@ Memory is process-local. Use Redis for multiple processes. Redis `clear()` scans
 | Hook / method | What happens |
 |---------------|----------------|
 | `ready` | `cache.configure()` → memory backend |
-| `on_shutdown` | `cache.close()` |
+| `on_shutdown` | `cache.close()`, then returns `cache.aclose()` when a backend still holds async clients (Redis); the registry awaits it before the module counts as shut down |
 | `on_load` | not implemented |
 | `cache.configure(name, settings=None)` | Replace the active backend; logs the backend name at INFO |
 | `cache.get_backend()` | Lazy memory configure if unset |
-| `cache.close()` / `aclose()` | Close connections and clear the backend |
+| `cache.close()` / `aclose()` | Close the sync / async clients; failures raise `CacheCloseError` after every backend was attempted |
 
 Details: `references/lifecycle.md`.
 
@@ -144,7 +144,8 @@ Details: `references/exceptions.md`.
 
 ## Anti-Patterns
 
-- Don't call `configure()` again without `close()` — the previous backend is dropped without cleanup.
+- Reconfiguring keeps the previous backend tracked, so shutdown still closes it, but it keeps its connections until then. Call `close()` / `aclose()` first to release them early.
+- Shut down through one family: `bedrock.shutdown()` or `await bedrock.ashutdown()`. A sync `shutdown()` inside a running event loop raises `ModuleAsyncRequiredError` when Redis async clients are open.
 - Don't call Redis `clear()` without `CACHE_REDIS_KEY_PREFIX` or an explicit `prefix=`.
 - Don't use the in-memory backend for cross-process locks.
 - Don't hold a lock longer than `expire` — the key vanishes and `release()` raises `CacheLockOwnershipError`.

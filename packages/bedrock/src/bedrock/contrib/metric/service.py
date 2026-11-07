@@ -126,6 +126,7 @@ class MetricsManager:
         self._logger = logging.getLogger("bedrock.contrib.metric")
         self._log_level = log_level
         self._warning_counts: dict[tuple[int, str], int] = {}
+        self._async_pending: list[MetricProvider] = []
 
     def set_log_level(self, level: int) -> None:
         """Set the severity assigned to each metric log record (e.g. ``logging.DEBUG`` on hot paths)."""
@@ -179,14 +180,59 @@ class MetricsManager:
             )
 
     def close(self) -> None:
-        """Release provider resources. The framework never calls this automatically."""
+        """Flush and release the synchronous side of every provider.
+
+        For each provider, ``flush()`` (when it defines one) runs before ``close()``. A provider that also
+        defines ``aflush()`` or ``aclose()`` stays pending until :meth:`aclose` releases its async resources;
+        see :meth:`has_async_resources`. Provider failures are swallowed with a warning, as for emits:
+        shutdown attempts every provider and instrumentation never raises into the application.
+        """
         for provider in self._providers:
-            try:
-                provider.close()
-            except Exception as exc:
-                self._logger.warning("metric provider %s failed to close: %s", type(provider).__name__, exc)
+            self._release(provider, "flush", "close")
+            if _is_async_capable(provider) and not any(provider is held for held in self._async_pending):
+                self._async_pending.append(provider)
         self._providers.clear()
         self._warning_counts.clear()
+
+    async def aclose(self) -> None:
+        """Flush and release the asynchronous side of every provider that has one.
+
+        For each provider that defines ``aflush()`` or ``aclose()``, ``aflush()`` is awaited before
+        ``aclose()``. Failures are swallowed with a warning, like :meth:`close`. The call is safe to repeat.
+        """
+        targets = [provider for provider in self._providers if _is_async_capable(provider)]
+        targets.extend(provider for provider in self._async_pending if not any(provider is t for t in targets))
+        for provider in targets:
+            await self._arelease(provider)
+        self._async_pending.clear()
+
+    def has_async_resources(self) -> bool:
+        """Return whether :meth:`aclose` still has a provider to release."""
+        return bool(self._async_pending) or any(_is_async_capable(provider) for provider in self._providers)
+
+    def _release(self, provider: MetricProvider, *method_names: str) -> None:
+        for method_name in method_names:
+            method = getattr(provider, method_name, None)
+            if method is None:
+                continue
+            try:
+                method()
+            except Exception as exc:
+                self._logger.warning("metric provider %s failed to %s: %s", type(provider).__name__, method_name, exc)
+
+    async def _arelease(self, provider: MetricProvider) -> None:
+        for method_name in ("aflush", "aclose"):
+            method = getattr(provider, method_name, None)
+            if method is None:
+                continue
+            try:
+                await method()
+            except Exception as exc:
+                self._logger.warning("metric provider %s failed to %s: %s", type(provider).__name__, method_name, exc)
+
+
+def _is_async_capable(provider: MetricProvider) -> bool:
+    return callable(getattr(provider, "aflush", None)) or callable(getattr(provider, "aclose", None))
 
 
 metrics = MetricsManager()

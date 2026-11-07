@@ -259,7 +259,7 @@ db.close()
 
 ### 关闭 Engine
 
-同步 engine 调用 `db.close()`，异步 engine 调用 `await db.aclose()`。两边都创建过时，两个都要调用。对同一侧重复调用不会再做额外释放。`close()` 之后，同步访问会抛出 `DatabaseNotConfiguredError`，直到再次 `db.init()`；已经创建的异步 engine 仍可使用。`aclose()` 之后，同步 engine 仍可使用；若同步配置还在，下一次异步访问会重新构建异步 engine。这两个方法不会关闭模块注册表。持有进程生命周期的调用方应在关闭流程中调用它们。
+同步 engine 调用 `db.close()`，异步 engine 调用 `await db.aclose()`。两边都创建过时，两个都要调用。对同一侧重复调用不会再做额外释放。`close()` 之后，同步访问会抛出 `DatabaseNotConfiguredError`，直到再次 `db.init()`；已经创建的异步 engine 仍可使用。`aclose()` 之后，同步 engine 仍可使用；若同步配置还在，下一次异步访问会重新构建异步 engine。这两个方法不会关闭模块注册表。停止进程时请调用 `bedrock.shutdown()`（或 `await bedrock.ashutdown()`）：它会先停止所有模块，再各调用一次 `db.close()` 以及（存在异步 engine 时）`db.aclose()`，因此即使某个模块失败，两个连接池也会在所有模块钩子之后被释放。从未初始化的数据库不会被处理。在运行中的事件循环里且存在异步 engine 时，请使用 `await bedrock.ashutdown()`；`bedrock.shutdown()` 会在改变任何状态之前抛出 `ModuleAsyncRequiredError`。
 
 `db.init()` 会释放上一个同步 engine。已经打开过连接的异步 engine 不会在这里同步释放：那种关闭发生在事件循环之外，会以 `MissingGreenlet` 失败。需要关闭该异步 engine 时，先 `await db.aclose()` 再调用 `db.init()`。尚未打开连接的异步 engine 会在 `init()` 中释放。
 

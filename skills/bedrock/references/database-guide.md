@@ -744,7 +744,7 @@ The `db` singleton is a `DatabaseManager` instance. It owns the engine, session 
 | `db.asession_scope()` | Async transactional scope. Same commit, rollback, and nesting rules as `session_scope()`. |
 | `db.aindependent_session()` | Async transaction that does not bind `db.asession`. |
 | `db.close()` | Dispose the sync engine. A built async engine stays usable. Idempotent. `init()` works again afterwards. |
-| `db.aclose()` | Dispose the async engine. The sync engine stays usable. Idempotent. Does not shut down the module registry. If both engines were built, call `close()` and `await aclose()`. |
+| `db.aclose()` | Dispose the async engine. The sync engine stays usable. Idempotent. Does not shut down the module registry. If both engines were built, call `close()` and `await aclose()`. `bedrock.shutdown()` / `await bedrock.ashutdown()` call whichever apply after all module hooks. |
 
 Async drivers install as extras: `aiosqlite` → `bedrock-core[async-sqlite]`; `asyncpg` and `psycopg` → `bedrock-core[async-postgresql]`; `asyncmy` and `aiomysql` → `bedrock-core[async-mysql]`. A missing package raises `DatabaseConfigurationError` and names the extra.
 

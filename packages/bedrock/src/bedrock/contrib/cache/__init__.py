@@ -18,6 +18,7 @@ from .coder import CacheCoder
 from .exc import (
     BackendNotConfiguredError,
     CacheClearRequiresPrefixError,
+    CacheCloseError,
     CacheConnectionError,
     CacheError,
     CacheLockAcquisitionError,
@@ -33,6 +34,7 @@ __all__ = [
     "BackendNotConfiguredError",
     "CacheBackend",
     "CacheClearRequiresPrefixError",
+    "CacheCloseError",
     "CacheCoder",
     "CacheConnectionError",
     "CacheError",

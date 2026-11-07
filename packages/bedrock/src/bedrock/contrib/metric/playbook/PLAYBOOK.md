@@ -71,7 +71,7 @@ Prometheus fixes a metric's type and label-key schema at first observation; late
 ## Anti-Patterns
 
 - Don't wrap `inc()`/`set()`/`observe()` in try/except — emits never raise.
-- Don't call `close()` in normal operation; the framework never calls it.
+- Don't call `close()` in normal operation; registry shutdown flushes and closes providers (`flush()`/`aflush()` then `close()`/`aclose()`, all optional beyond `close`), awaiting async ones. Close failures are logged, not raised.
 - Don't change a Prometheus metric's type or tag keys after first observation.
 - Don't emit from inside a custom provider's `emit()` — it recurses.
 

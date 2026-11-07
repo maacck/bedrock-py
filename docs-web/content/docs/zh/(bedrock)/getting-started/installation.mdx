@@ -97,7 +97,11 @@ bedrock.setup("my_app.my_module")
 
 apps = bedrock.apps
 print(f"Registry ready with {len(apps.all())} module(s) loaded")
+
+bedrock.shutdown()
 ```
+
+在异步进程中请改用 `await bedrock.asetup(...)` 和 `await bedrock.ashutdown()`，见[异步生命周期](/docs/guides/module-anatomy#异步生命周期)。
 
 ## 日志
 

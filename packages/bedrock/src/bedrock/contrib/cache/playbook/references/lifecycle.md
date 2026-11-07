@@ -10,7 +10,7 @@ Two layers: the Bedrock **module** hooks, and the `CacheService` / entry lifetim
 |------|-------------|--------|
 | `on_load` | no | — |
 | `ready(*, registry, app)` | yes | `cache.configure()` → **memory** backend |
-| `on_shutdown(*, registry, app)` | yes | `cache.close()` |
+| `on_shutdown(*, registry, app)` | yes | `cache.close()`; returns `cache.aclose()` if a backend still holds async clients, which the registry awaits |
 
 `ready` runs after every module is loaded. `on_shutdown` runs in reverse dependency order when the registry shuts down.
 
@@ -48,7 +48,7 @@ finally:
     cache.close()
 ```
 
-Async shutdown: `await cache.aclose()`.
+Async shutdown: `close()` releases the sync client and `await cache.aclose()` the async one (Redis owns both). Registry shutdown does both: `bedrock.shutdown()` runs the async close on the registry's private loop, `await bedrock.ashutdown()` on the running loop. In a running loop, a sync `registry.shutdown()` raises `ModuleAsyncRequiredError` instead when async clients are open; the module stays retryable. Memory-only apps shut down from any context.
 
 ## Service states
 
@@ -58,12 +58,13 @@ unconfigured  --configure()/get_backend()-->  active  --close()/aclose()-->  unc
 
 | Method | Behavior |
 |--------|----------|
-| `configure(name="memory", settings=None)` | Instantiate the named backend and store it. Logs `Cache backend configured: {name}` at INFO. Unknown name → `BackendNotConfiguredError`. **Does not** close a previous backend. |
+| `configure(name="memory", settings=None)` | Instantiate the named backend and store it. Logs `Cache backend configured: {name}` at INFO. Unknown name → `BackendNotConfiguredError`. The previous backend is kept for shutdown rather than closed now. |
 | `get_backend()` | Return the active backend, or `configure("memory")` if none. |
-| `close()` | `backend.close()` then `_backend = None`. Safe if already unconfigured. |
-| `aclose()` | Async close, then `_backend = None`. |
+| `close()` | Close the sync side of the current and replaced backends, then `_backend = None`. Safe if already unconfigured. Raises `CacheCloseError` after attempting every backend. |
+| `aclose()` | Close the async side of the current and replaced backends (those with `holds_async_resources`), then `_backend = None`. |
+| `has_async_resources()` | `True` while `aclose()` still has a backend to release. |
 
-Calling `configure()` twice without `close()` drops the previous client (Redis connection pool included). Don't.
+Calling `configure()` twice without `close()` keeps the previous client open until `close()` / `aclose()` or registry shutdown; release it earlier if connections matter.
 
 After `close()`, the next operation lazy-configures memory again unless you `configure(...)` first.
 
