@@ -1,5 +1,5 @@
 {
-  "pages": ["index", "getting-started", "guides"],
+  "pages": ["index", "getting-started", "guides", "changelog"],
   "title": "Bedrock",
   "description": "Main Package",
   "root": true,
