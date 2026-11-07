@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Documentation
+
+- Docs site: new Changelog page (en/zh) rendered from `CHANGELOG.md`; Chinese Class Registry guide.
+- Agent skills: new `class-registry-guide.md` reference and ClassRegistry section in the `bedrock` skill;
+  skills, guides, and getting-started pages realigned with the v0.3.0 lifecycle, registry, cache, storage,
+  hooks, database, and CLI APIs (e.g. `bedrock run --app <app> <module> <command>`, `BEDROCK_APP`,
+  `bedrock --help` instead of the unsupported `bedrock -v`).
+
 ## [0.3.0] - 2026-11-07
 
 ### Breaking changes

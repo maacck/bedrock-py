@@ -3,7 +3,7 @@ title: Metrics
 description: Application metrics with counter/gauge/timer, decorators, and pluggable providers — StatsD, Sentry, and Prometheus pushgateway, with hard isolation from business code
 ---
 
-Bedrock ships a first-party metrics subsystem: counter/gauge/timer handles with decorators, a hardcoded logger, and pluggable providers (StatsD, Sentry, Prometheus pushgateway). Instrumentation is synchronous and **never raises** — a failing provider cannot break business code. The whole subsystem lives under `bedrock.contrib.metric`.
+Bedrock ships a first-party metrics subsystem: counter/gauge/timer handles with decorators, a hardcoded logger, and pluggable providers (StatsD, Sentry, Prometheus pushgateway). Instrumentation is synchronous; ordinary provider exceptions are isolated from business code. The whole subsystem lives under `bedrock.contrib.metric`.
 
 ## Quick Start
 
@@ -84,7 +84,7 @@ from bedrock.contrib.metric import metrics
 
 # Decorator (sync or async)
 @metrics.timer("render.duration")
-def render(...):
+def render():
     ...
 
 # Context manager
@@ -177,12 +177,12 @@ Provider failures also log at `WARNING`, rate-limited to the first occurrence an
 
 ## Isolation Guarantee
 
-Instrumentation never raises into business code:
+Provider `Exception` failures are isolated from business code:
 
 - `emit()` failures are caught (`except Exception`, never `BaseException`) and logged as rate-limited warnings — the caller and other providers are unaffected.
 - Failing providers are **not** auto-disabled; they keep receiving events (and keep warning at the 100-occurrence cadence).
 - Emission is synchronous — no background threads, no buffered queues. Providers run their I/O inline on the caller's thread (StatsD `sendto`, Prometheus pushgateway HTTP POST), so a slow or unreachable sink can block the caller. Dispatch has no recursion guard, so a custom provider must **not** emit into the same manager from inside its `emit()` (it would recurse).
-- Exceptions are raised only at configuration time, when constructing a provider (see [Exception Hierarchy](#exception-hierarchy)).
+- Provider configuration can raise exceptions (see [Exception Hierarchy](#exception-hierarchy)). Invalid metric values can also fail during conversion, and logging failures or `BaseException` subclasses are not covered by provider isolation.
 
 ## API Reference
 
@@ -228,11 +228,11 @@ from bedrock.contrib.metric import (
 )
 ```
 
-These are raised only at configuration time, when constructing a provider. Emission itself never raises.
+These exceptions describe provider configuration failures. Ordinary provider exceptions during emission are isolated; errors outside provider dispatch are not covered by that guarantee.
 
 ## Anti-Patterns
 
-**Don't wrap instrumentation in try/except.** Emits never raise — a try/except around `inc()` / `set()` / `observe()` is dead code.
+**Don't wrap instrumentation merely to catch provider `Exception` failures.** The manager isolates those failures; invalid values and logging errors are outside that guarantee.
 
 **Don't call `close()` in normal operation.** It is explicit by design and the framework never calls it; call it once at shutdown if you own long-lived provider resources (e.g. a StatsD socket).
 

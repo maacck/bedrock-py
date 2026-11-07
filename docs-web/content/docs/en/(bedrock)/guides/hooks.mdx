@@ -14,7 +14,7 @@ Use signals when you only want to broadcast that something happened.
 ## Quick Start
 
 ```python
-from bedrock.hooks import HookNamespace
+from bedrock.hooks import HookNamespace, hookimpl
 
 payment_hooks = HookNamespace("payment")
 
@@ -25,7 +25,7 @@ def process(method: str, amount: int) -> str | None:
 
 
 class CardHooks:
-    @payment_hooks.impl(priority=0)
+    @hookimpl(priority=0)
     def process(self, method: str, amount: int) -> str | None:
         if method == "card":
             return "charged"
@@ -101,6 +101,7 @@ auth_hooks.add_impls_from(JwtHooks(), module="jwt_auth")
 ```
 
 Lower priority values run first.
+For standalone functions, `@auth_hooks.impl` registers immediately. For methods scanned with `add_impls_from`, use `@hookimpl` and pass an instance so the method is bound; `@auth_hooks.impl` registers immediately and does not mark methods for scanning.
 
 ## Calling Hooks
 
@@ -125,7 +126,7 @@ implementations with `asyncio.to_thread()`.
 results = auth_hooks.call_robust("get_permissions", user_id="user-1")
 ```
 
-Robust calls collect `Exception` results instead of raising immediately.
+Robust calls return `(implementation, result_or_exception)` tuples, collecting `Exception` instances instead of raising immediately. With `firstresult=True`, exceptions are collected and dispatch continues until the first non-`None` result.
 
 ## Registration by Scanning
 
@@ -159,10 +160,12 @@ search_hooks.add_impls_from(ElasticHooks(), module="elastic")
 Modules usually register implementations in `bootstrap.py`.
 
 ```python
+from bedrock.hooks import hookimpl
 from modules.auth.hookspecs import auth_hooks
 
 
 class ApiKeyHooks:
+    @hookimpl
     def authenticate(self, token: str) -> str | None:
         if token == "api-key":
             return "user-2"

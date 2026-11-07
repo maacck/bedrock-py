@@ -135,12 +135,13 @@ user_created.disconnect(log_user)
 # Disconnect from a specific sender only
 user_created.disconnect(log_user, sender=admin_module)
 ```
+Without a sender argument, `disconnect()` removes the receiver from all senders; specify a sender to remove only that connection.
 
 ## Sending Signals
 
 ### `signal.send(sender, **kwargs)`
 
-Calls all connected receivers synchronously. Returns a list of `(receiver, return_value)` tuples:
+Calls matching receivers through a synchronous API and returns `(receiver, return_value)` tuples. Async receivers are adapted as described below; the first exception stops dispatch.
 
 ```python
 results = order_placed.send(current_app, order_id="ORD-042")
@@ -162,6 +163,7 @@ for receiver, result in results:
     else:
         log.info(f"{receiver.__name__} returned {result}")
 ```
+In a running event loop, a default-wrapper `RuntimeError` for an async receiver is collected too. `BaseException` subclasses propagate.
 
 ### `await signal.asend(sender, **kwargs)`
 
@@ -252,6 +254,7 @@ assert len(received) == 1
 user_created.send(app, username="bob")
 assert len(received) == 1  # Still 1
 ```
+On exit, `connected_to()` disconnects the receiver from all senders, including any prior connections. Use a separate receiver when existing connections must remain.
 
 ### `signal.muted()`
 
@@ -275,6 +278,7 @@ with audit.muted():
 # Normal dispatch resumes here
 audit.send(importer, action="complete")  # This fires
 ```
+`muted()` is a flag on the signal, not a nested or task-local scope: exiting an inner block unmutes it even if an outer block remains active.
 
 ## Lifecycle Signals
 
@@ -291,6 +295,7 @@ Bedrock emits signals at key points in the module lifecycle. These are defined i
 ### Usage
 
 ```python
+from bedrock.signal import Signal
 from bedrock.module.signals import module_ready, registry_ready
 
 @module_ready.connect_via(Signal.ANY, weak=False)
@@ -316,9 +321,10 @@ During `registry.shutdown()`:
 4. Each module's `on_shutdown` hook is called in **reverse** order → `module_shutdown` per module
 5. Registry signals completion → `registry_shutdown` once, only after every module has shut down
 
-If a step fails, signals follow what actually completed: a failed `on_load` emits no `module_loaded` and the install is rolled back (modules that had loaded emit `module_shutdown` while being unwound); `registry_ready` and `registry_shutdown` are never emitted while a module is not ready or not shut down. A repeated `mark_ready()` or `shutdown()` does not re-emit signals for modules that already completed.
+If `on_load` fails, no `module_loaded` is sent and installation rolls back; already loaded modules are unwound, with `module_shutdown` sent only after a successful shutdown hook. A failing `module_ready` receiver propagates after the module is marked ready, so retry skips that module and does not resend its signal. A failing `module_shutdown` receiver is reported after the module is marked shut down; retry does not resend it. A failed shutdown hook is retried, and `registry_shutdown` is not sent on a call with failures.
 
 If a `registry_ready` or `registry_shutdown` receiver raises, the next `mark_ready()` or `shutdown()` retries that registry-level notification without rerunning completed module hooks. A failed ready notification resets `registry.ready` to `False`, allowing `bedrock.setup()` to retry too; ready receivers can still query the registry during delivery. Retrying resends the whole signal, so receivers that already succeeded may run again and must be retry-safe.
+Lifecycle signals use synchronous `send()`. If startup or shutdown runs in an event-loop thread, async lifecycle receivers can therefore raise `RuntimeError`; use synchronous receivers there.
 
 ## Sync/Async Interop
 
@@ -410,13 +416,13 @@ Similarly, `asend()` accepts `_sync_wrapper` to override how sync receivers are 
 By default, receivers are stored as weak references. This means:
 
 - **Module-level functions** work fine — they persist for the lifetime of the module.
-- **Closures and lambdas** will be garbage collected immediately unless you pass `weak=False`.
+- **Closures and lambdas** can be garbage collected when no strong reference remains; use `weak=False` to keep them connected.
 - **Bound methods** are weakly referenced via a `WeakMethod`-style wrapper — the receiver is automatically disconnected when the owning instance is garbage collected.
 
 ### When to Use `weak=False`
 
 ```python
-# WRONG: closure is immediately garbage collected
+# WRONG: closure can be garbage collected after setup returns
 def setup():
     def handler(sender, **kwargs):
         print("received")

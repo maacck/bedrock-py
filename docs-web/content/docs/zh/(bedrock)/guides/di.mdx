@@ -34,6 +34,8 @@ mailer.send("alice@example.com", "Welcome", "Hello")
 - Python 类型，例如 `Mailer`
 - 字符串 key，例如 `"cache.primary"`
 
+可控制接口时适合使用类型 key；动态或配置驱动的注册可以使用字符串 key。
+
 ### 生命周期
 
 | 生命周期 | 行为 | 适合场景 |
@@ -80,7 +82,11 @@ config = container.resolve("app.config")
 
 如果 key 未注册，`resolve()` 会抛出 `ServiceNotFoundError`。
 
+Factory 调用时不传参数，应显式装配依赖。重复注册同一个 key 会抛出 `DuplicateServiceError`。
+
 ## Scoped 服务
+
+Scoped 服务需要活动的 scope；在 scope 外解析会抛出 `ScopeError`。
 
 ```python
 from bedrock.di import Lifetime, container
@@ -204,6 +210,7 @@ def send_welcome(user_email: str, *, mailer: Mailer) -> None:
 ```
 
 显式传入的关键字参数优先级高于自动注入的值。
+覆盖注入参数时请使用关键字参数：装饰器不会检测位置参数。
 
 如果要从隔离容器中注入依赖，请使用绑定在容器实例上的装饰器：
 
@@ -244,6 +251,8 @@ def on_load(*, container) -> None:
 
 bootstrap hook 可以通过参数名直接请求 `container`。完整生命周期可见
 [模块解剖](/docs/guides/module-anatomy)。
+
+安装回滚不会自动移除 bootstrap hook 中的注册。重试可能遇到已有注册时，请显式清理。
 
 ## 测试工具
 

@@ -45,11 +45,12 @@ cache.configure("redis")
 Pass a settings instance to override defaults:
 
 ```python
-from bedrock.contrib.cache import cache, RedisCacheSettings
+from bedrock.contrib.cache import cache
+from bedrock.contrib.cache.backends.redis import RedisCacheSettings
 
 settings = RedisCacheSettings(
-    REDIS_URL="redis://localhost:6379/1",
-    REDIS_PREFIX="myapp",
+    url="redis://localhost:6379/1",
+    key_prefix="myapp:",
 )
 cache.configure("redis", settings=settings)
 ```
@@ -84,8 +85,8 @@ The `cache` singleton is a `CacheService` instance. All access goes through this
 |--------|-----------|-------------|
 | `cache.get()` | `get(key, default=None, type_=None, coder=None) → Any` | Retrieve a cached value |
 | `cache.aget()` | `aget(key, default=None, type_=None, coder=None) → Any` | Async variant of `get` |
-| `cache.set()` | `set(key, value, ex=None, ea=None, coder=None) → None` | Store a value |
-| `cache.aset()` | `aset(key, value, ex=None, ea=None, coder=None) → None` | Async variant of `set` |
+| `cache.set()` | `set(key, value, ex=None, px=None, ea=None, coder=None) → None` | Store a value |
+| `cache.aset()` | `aset(key, value, ex=None, px=None, ea=None, coder=None) → None` | Async variant of `set` |
 | `cache.delete()` | `delete(key) → bool` | Remove a key |
 | `cache.adelete()` | `adelete(key) → bool` | Async variant of `delete` |
 | `cache.exists()` | `exists(key) → bool` | Check if key exists |
@@ -99,8 +100,10 @@ The `cache` singleton is a `CacheService` instance. All access goes through this
 |--------|-----------|-------------|
 | `cache.get_many()` | `get_many(keys) → dict[str, Any]` | Retrieve multiple keys |
 | `cache.aget_many()` | `aget_many(keys) → dict[str, Any]` | Async variant |
-| `cache.set_many()` | `set_many(mapping, ex=None, ea=None, coder=None) → None` | Store multiple pairs |
-| `cache.aset_many()` | `aset_many(mapping, ex=None, ea=None, coder=None) → None` | Async variant |
+| `cache.set_many()` | `set_many(mapping, ex=None, px=None, ea=None, coder=None) → None` | Store multiple pairs |
+| `cache.aset_many()` | `aset_many(mapping, ex=None, px=None, ea=None, coder=None) → None` | Async variant |
+
+`get_many()` and `aget_many()` omit missing keys and always use the default decoder; use individual `get()` calls for custom coders.
 
 ### Numeric Operations
 
@@ -127,7 +130,7 @@ The `cache` singleton is a `CacheService` instance. All access goes through this
 
 ## TTL and Expiration
 
-Cache entries can have time-to-live (TTL) set in two ways:
+Cache entries can have time-to-live (TTL) set in three ways:
 
 ### Relative Expiration (`ex`)
 
@@ -150,7 +153,7 @@ cache.set("session:abc", data, ea=time.time() + 3600)
 ```
 
 <Callout type="warning">
-`ex`, `px`, and `ea` are mutually exclusive. `px` sets a relative expiration in milliseconds. If all are `None`, the entry never expires.
+Use only one of `ex`, `px`, and `ea`: `px` sets a relative expiration in milliseconds. If all are `None`, the entry never expires. The in-memory backend gives `ex` precedence over `px` and `ea` when multiple values are supplied; do not rely on backend-specific behavior.
 </Callout>
 
 ## Coders
@@ -196,7 +199,7 @@ result = cache.get("data:key", coder=MsgPackCoder)
 ```
 
 <Callout type="warning">
-Pass either `type_` or `coder`, not both. Passing both raises `ValueError`.
+Pass either `type_` or `coder` to reads, not both. Passing both for a cached value raises `ValueError`.
 </Callout>
 
 ## Namespaces
@@ -262,15 +265,16 @@ user = user_slot.get_or_load(lambda: User(name="Alice", email="alice@example.com
 |--------|-----------|-------------|
 | `slot.get()` | `get(default=None, **params) → T` | Read the cached value |
 | `slot.aget()` | `aget(default=None, **params) → T` | Async variant |
-| `slot.get_or_load()` | `get_or_load(loader, **params) → T` | Read, or load and store on a miss |
-| `slot.aget_or_load()` | `aget_or_load(loader, **params) → T` | Async variant |
-| `slot.set()` | `set(value, ex=None, ea=None, **params) → None` | Write a value |
-| `slot.aset()` | `aset(value, ex=None, ea=None, **params) → None` | Async variant |
+| `slot.get_or_load()` | `get_or_load(loader, *, ex=None, px=None, ea=None, **params) → T` | Read, or load and store on a miss |
+| `slot.aget_or_load()` | `aget_or_load(loader, *, ex=None, px=None, ea=None, **params) → T` | Async variant |
+| `slot.set()` | `set(value, *, ex=None, px=None, ea=None, **params) → None` | Write a value |
+| `slot.aset()` | `aset(value, *, ex=None, px=None, ea=None, **params) → None` | Async variant |
 | `slot.delete()` | `delete(**params) → bool` | Delete the cached value |
 | `slot.adelete()` | `adelete(**params) → bool` | Async variant |
 | `slot.exists()` | `exists(**params) → bool` | Check if value exists |
 | `slot.aexists()` | `aexists(**params) → bool` | Async variant |
 | `slot.get_with_ttl()` | `get_with_ttl(**params) → tuple[T, int \| None]` | Get value with TTL |
+| `slot.aget_with_ttl()` | `aget_with_ttl(**params) → tuple[T, int \| None]` | Async variant |
 | `slot.build_key()` | `build_key(**params) → str` | Render the fully qualified key |
 
 <Callout type="info">
@@ -344,6 +348,7 @@ cache.configure("memory")
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `CACHE_MEMORY_MAX_SIZE` | `10000` | Maximum number of entries |
+| `CACHE_MEMORY_DEFAULT_TTL` | `300` | Settings value; cache writes do not apply it automatically |
 
 ### RedisBackend
 
@@ -355,9 +360,11 @@ cache.configure("redis")
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `REDIS_URL` | `"redis://localhost:6379"` | Redis connection URL |
+| `CACHE_REDIS_URL` | `"redis://localhost:6379/0"` | Redis connection URL |
+| `CACHE_REDIS_DB` | `0` | Redis database number |
+| `CACHE_REDIS_PASSWORD` | `None` | Redis password |
 | `CACHE_REDIS_KEY_PREFIX` | `""` | Default key namespace. `clear()`/`aclear()` require this **or** an explicit `prefix=` argument |
-| `REDIS_MAX_CONNECTIONS` | `10` | Connection pool size |
+| `CACHE_REDIS_MAX_CONNECTIONS` | `50` | Maximum connections per pool |
 
 <Callout type="warning">
 Redis `clear()` and `aclear()` never flush the Redis database. They scan and delete only keys under a prefix. Pass an explicit `prefix=` argument, or configure `CACHE_REDIS_KEY_PREFIX` to a dedicated non-empty namespace. Clearing fails only when **both** the configured prefix and the explicit argument are empty. Applications that relied on unprefixed `flushdb()` must choose a dedicated prefix.
@@ -384,6 +391,7 @@ from bedrock.contrib.cache import (
     CacheConnectionError,
     CacheSerializationError,
     BackendNotConfiguredError,
+    CacheClearRequiresPrefixError,
     CacheLockError,
     CacheLockAcquisitionError,
     CacheLockOwnershipError,
@@ -396,11 +404,11 @@ from bedrock.contrib.cache import (
 
 **Don't use the in-memory backend for distributed locks.** `InMemoryBackend` is process-local. Locks only coordinate within a single process. Use `RedisBackend` for cross-process coordination.
 
-**Don't forget TTL for temporary data.** Without `ex` or `ea`, entries persist until explicitly deleted or the process restarts. Always set TTL for session data, tokens, and temporary state.
+**Don't forget TTL for temporary data.** Without `ex`, `px`, or `ea`, entries persist until explicitly deleted or the process restarts. Always set TTL for session data, tokens, and temporary state.
 
 **Don't use `bedrock.cache` as import path.** The canonical import is `from bedrock.contrib.cache import cache`. There is no re-export at the `bedrock` package level.
 
-**Don't mix `type_` and `coder` parameters.** Passing both to `get()` or `set()` raises `ValueError`. Choose one serialization strategy per call.
+**Don't mix `type_` and `coder` on reads.** Passing both to a read of a cached value raises `ValueError`. Choose one serialization strategy per call.
 
 **Don't hardcode cache keys.** Use namespaces and slots to organize keys. Raw string concatenation leads to key collisions and makes cache invalidation difficult.
 

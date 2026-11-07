@@ -5,8 +5,7 @@ description: Standard Bedrock module structure
 
 ## Standard Module Structure
 
-Phase 1 is built around an application-level `my_app/` directory.
-A module is loadable when it contains a `manifest.yaml` file.
+A module is an importable Python package with a `manifest.yaml` at its root.
 
 ```files
 bedrock_app/
@@ -39,7 +38,7 @@ bedrock_app/
 
 ## Module Manifest
 
-Bedrock is standardizing on `manifest.yaml`.
+Bedrock loads module metadata from `manifest.yaml`.
 
 ```yaml
 title: My Bedrock App
@@ -123,14 +122,14 @@ Business logic layer. Services receive data as Pydantic entities or primitives �
 ```python
 from bedrock.database import db
 
-from .entities import ProductCreate, ProductResponse
+from .schemas import ProductCreateRequest, ProductResponse
 from .models import Product
 
 
 class InventoryService:
     """Inventory business operations."""
 
-    def create_product(self, data: ProductCreate) -> ProductResponse:
+    def create_product(self, data: ProductCreateRequest) -> ProductResponse:
         """Create a new product in the inventory."""
         product = Product(name=data.name, sku=data.sku, price=data.price)
         db.session.add(product)
@@ -171,7 +170,7 @@ class DuplicateSkuError(BedrockExc):
 
 ### `bootstrap.py`
 
-Lifecycle hooks called by the registry at specific stages. Hooks use keyword-only signatures — the registry inspects each hook's parameters and injects them by name automatically.
+Lifecycle hooks are called by the registry at specific stages. The registry invokes them with keyword arguments, injecting supported parameters by name.
 
 ```python
 from bedrock.module.registry import ModuleRegistry
@@ -262,7 +261,7 @@ def hook_name(*, registry, app, container, hooks) -> None: ...
 For dedicated API details, see [Dependency Injection](/docs/guides/di) and
 [Hook System](/docs/guides/hooks).
 
-Only declare the parameters you need — the registry injects only what it finds in the signature.
+Declare at least one supported parameter, or `**kwargs` to receive all four. Unsupported required parameters and required positional-only parameters are rejected. `registry.get()` and `registry.all()` require the registry to be ready, so use `is_installed()` or `list_installed()` during module hooks instead.
 
 ### Call Order
 
@@ -288,20 +287,20 @@ shutdown()
 | Hook | Phase | Description |
 |------|-------|-------------|
 | `on_load` | Install | Module just loaded. Register signal receivers, validate config, set up module state. |
-| `ready` | Ready | All modules loaded. Safe to access other modules, run cross-module setup. |
+| `ready` | Ready | All requested modules are loaded, but other modules' `ready` hooks may not have run and registry queries requiring readiness are unavailable. |
 | `on_shutdown` | Shutdown | Graceful teardown. Close connections, flush buffers, release resources. |
 
 ### Failure Semantics
 
 The registry keeps its state consistent when a lifecycle step fails, so startup can be retried and shutdown always tries to release everything.
 
-- **Install is failure-atomic.** If `install()` (or the install phase of `populate()`) fails, every module introduced by that call is removed from the registry and from install order. Modules installed before the call are never removed. Introduced modules that had already finished `on_load` are unwound best-effort: their `on_shutdown` hook runs in reverse install order and `module_shutdown` is emitted. If that cleanup also fails, `ModuleStartupRollbackError` (a `ModuleLifecycleError`) is raised; its `failures` hold the original failure first, then the cleanup failures.
+- **Install is failure-atomic.** If `install()` (or the install phase of `populate()`) fails, every module introduced by that call is removed from the registry and from install order. Modules installed before the call are never removed. Introduced modules that had already finished `on_load` are unwound best-effort in reverse install order: `module_shutdown` is emitted only if their `on_shutdown` hook succeeds. If cleanup fails, `ModuleStartupRollbackError` (a `ModuleLifecycleError`) is raised; its `failures` hold the original failure first, then the cleanup failures.
 - **Rollback cannot grow the registry.** Cleanup hooks and signal receivers must not introduce new modules through `install()` or `populate()` during rollback. Such attempts raise `ModuleLifecycleError` before loading the new module; uncaught errors are included in the rollback failures.
-- **Readiness is tracked per module.** Each module moves forward through `loading → loaded → ready → shutdown` (`ModuleLifecycleState`). If a `ready` hook fails, modules that were already readied stay ready. Calling `mark_ready()` again (or `populate()` with the same paths) skips them and continues; `registry_ready` is emitted only once every module is ready.
-- **Shutdown attempts every module.** `shutdown()` calls `on_shutdown` for each module that has not completed shutdown, in reverse install order, even after failures. It then raises one `ModuleLifecycleError` whose `failures` list every failed module with its original cause, and `registry_shutdown` is not emitted. A module whose shutdown completed is never shut down again, so calling `shutdown()` repeatedly is harmless; modules whose hook failed are retried.
+- **Readiness is tracked per module.** Modules move through `loading → loaded → ready → shutdown`, though a loaded module can shut down before becoming ready. A failed `ready` hook leaves already-readied modules ready; retrying `mark_ready()` (or `populate()` with the same paths) skips them. A `module_ready` receiver failure occurs after the module becomes ready, so that module's hook and signal are not retried.
+- **Shutdown attempts every module.** `shutdown()` attempts each unfinished module in reverse install order and aggregates hook and `module_shutdown` receiver failures in a `ModuleLifecycleError`; it does not emit `registry_shutdown` on that call. A failed hook is retried, but a failed `module_shutdown` receiver is not: the module was already marked shut down. A subsequent call can emit `registry_shutdown` after the remaining modules finish.
 - **Registry notifications can be retried.** If a `registry_ready` or `registry_shutdown` receiver raises, retry `mark_ready()` or `shutdown()` to resend the notification without repeating completed module hooks. A failed ready notification resets `registry.ready` to `False`, so `bedrock.setup()` can also retry. The registry remains queryable inside ready receivers. Notification retries resend the signal, so receivers that already succeeded may run again and must be retry-safe.
 - **`mark_ready()` and `shutdown()` are not re-entrant.** Calling either from a hook or a signal receiver while one of them is running raises `ModuleLifecycleError` instead of re-running hooks. Trigger shutdown outside the hook (for example, set a flag and call `shutdown()` from your main loop) rather than from `on_shutdown` or `ready`.
-- **Failures are attributed.** Every entry in `failures` names the module and the step (`on_load`, `manifest`, `ready`, `on_shutdown`, `module_loaded`, ...) it came from, and the error's `__cause__` is an `ExceptionGroup` of all of them.
+- **Aggregated failures are attributed.** Entries in an aggregate error's `failures` name the module and step, and its `__cause__` is an `ExceptionGroup`. Other errors, including `module_ready` receiver errors, can propagate directly.
 
 ### Signals
 
@@ -395,7 +394,7 @@ def on_load(*, registry: ModuleRegistry, app: AppConfig) -> None:
 
 
 def ready(*, registry: ModuleRegistry, app: AppConfig) -> None:
-    """All modules ready — safe for cross-module work."""
+    """All modules loaded — perform cross-module setup."""
     pass
 
 
@@ -419,13 +418,14 @@ print(module.manifest.title)  # "My Module"
 
 ## Loader Flow
 
-The runtime loader is planned around these phases:
+The registry installs explicit import paths; it does not scan a module root:
 
-1. **discover** — scan the module root and collect manifests
-2. **validate** — check schema, duplicates, missing dependencies, and cycles
-3. **order** — compute a deterministic dependency-respecting load order
-4. **import** — import modules lazily through declared package paths
-5. **initialize** — run lightweight lifecycle hooks
+1. Import each requested package, validate its manifest, and import optional `bootstrap` and `models` modules.
+2. Recursively install dependencies in manifest order, detecting cycles.
+3. Register each module, call `on_load`, and emit `module_loaded`.
+4. `populate()` then calls `mark_ready()` to run ready hooks and emit readiness signals.
+
+Installation rollback removes registry entries and calls shutdown hooks for loaded modules; it cannot automatically undo arbitrary side effects such as DI or hook registrations.
 
 ## Where Does My Code Belong?
 

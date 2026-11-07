@@ -56,7 +56,7 @@ uv build --all-packages
 uv build --package bedrock
 
 # Run
-bedrock -v
+bedrock --help
 
 # Lint (ruff configured, line-length=120)
 uv run ruff check .

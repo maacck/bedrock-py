@@ -1,0 +1,129 @@
+---
+title: 类注册表
+description: 通过显式注册和延迟导入管理带名称的类型化实现类
+---
+
+`bedrock.common.registry.ClassRegistry[T]` 将名称映射到调用方拥有的基类的具体子类。它返回的是**类**，而不是实例。当多个实现需要共存、调用方按名称选择实现时使用它。依赖实例及其生命周期仍由 DI 负责。
+
+## 直接注册
+
+```python
+from abc import ABC, abstractmethod
+
+from bedrock.common.registry import ClassRegistry
+
+
+class Codec(ABC):
+    @abstractmethod
+    def encode(self, value: str) -> bytes:
+        """Encode text into bytes."""
+
+
+class Utf8Codec(Codec):
+    def encode(self, value: str) -> bytes:
+        """Encode text using UTF-8."""
+        return value.encode("utf-8")
+
+
+codecs = ClassRegistry[Codec](base_class=Codec)
+codecs.register("utf8", Utf8Codec)
+codec_cls: type[Codec] = codecs.get("utf8")
+assert codec_cls().encode("hello") == b"hello"
+```
+
+直接注册会原样保留类，包括在函数内定义的类。注册不会实例化或重新导入类。调用方负责构造、配置、实例复用和清理；注册表不要求统一的构造函数签名。
+
+## 延迟注册
+
+将基类契约放在轻量的 `base.py` 中，将每个实现放在各自的 provider 模块中。所有者可以从 `service.py` 暴露一个空注册表，而无需导入 provider SDK：
+
+```python
+# myapp/encoding/service.py
+from bedrock.common.registry import ClassRegistry
+
+from .base import Codec
+
+codecs = ClassRegistry[Codec](base_class=Codec)
+```
+
+在 `bootstrap.py:on_load` 中注册路径：
+
+```python
+# myapp/encoding/bootstrap.py
+from .service import codecs
+
+
+def on_load() -> None:
+    """Declare implementations without importing them."""
+    codecs.register_lazy("utf8", "myapp.encoding.providers.utf8:Utf8Codec")
+```
+
+第三方 Bedrock 模块在自己的 `on_load` 钩子中使用相同的显式注册方式，并在 `manifest.yaml:depends_on` 中声明所有者模块。不要使用导入时装饰器或 `__init_subclass__` 注册扩展。父包的 `__init__.py` 不要导入可选实现：Python 导入子模块时会执行这些文件。
+
+路径格式为绝对路径 `module:qualified.attribute`，例如 `vendor.codecs:Container.CustomCodec`。注册时只检查路径语法。首次使用时，`get(name)` 导入选定的模块并验证其类。`has()` 和 `keys()` 均不会导入实现。
+
+对于注册表拥有的、不会主动加载的内置目录，可以提供初始声明：
+
+```python
+codecs = ClassRegistry[Codec](
+    base_class=Codec,
+    lazy_classes={"utf8": "myapp.encoding.providers.utf8:Utf8Codec"},
+)
+```
+
+输入映射会被复制；之后修改它不会改变注册表。这些声明既不会导入实现，也不会向 Bedrock 模块运行时注册任何内容。
+
+## 接口
+
+| 操作 | 结果 |
+| --- | --- |
+| `ClassRegistry[T](base_class=Base, lazy_classes=None)` | 绑定到 `Base` 的独立注册表 |
+| `register(name, cls)` | 立即验证并保留类 |
+| `register_lazy(name, path)` | 存储路径而不导入 |
+| `get(name)` | 返回经过验证的 `type[T]`，或抛出错误 |
+| `has(name)` | 检查是否已注册，而不是能否导入或是否就绪 |
+| `keys()` | 按注册顺序返回独立的名称列表 |
+
+名称区分大小写。对于其他方面有效的输入，重复注册总会失败，即使类或路径没有变化。条目只能追加：不支持替换、删除、可变映射或热重载。测试隔离请使用新的注册表。
+
+## 类型保证
+
+- 直接注册的静态类型为 `type[T]`，并在运行时验证。
+- `get()` 返回 `type[T]`，而不是 `Any` 或 `None`。动态名称不会将结果缩窄为某个具体子类。
+- 实现必须直接或间接显式继承基类。基类本身、无关的类、非类值、抽象实现和 Protocol 定义均会被拒绝。
+- 显式继承 Protocol 基类的子类受支持，无需 `runtime_checkable`。仅结构匹配的实现和虚拟 ABC 注册不被接受。
+- 名义继承不能证明方法签名或行为正确。请使用静态检查和 provider 契约测试。Protocol 继承的方法存根不会强制实现抽象方法；新契约如需强制实现，优先使用带 `abstractmethod` 的 ABC。
+- 字符串路径在目标导入前无法进行类型检查。运行时验证发生在 `get()` 返回类之前。
+
+## 加载、并发与失败
+
+成功解析后缓存的是**类**，而不是实例。失败的解析不会被缓存；之后显式调用 `get()` 会再次尝试，但不会自动重试。Python 的导入缓存不会被清除或重新加载。
+
+注册和成功缓存结果的发布是线程安全的。执行导入代码时注册表不会持有状态锁，因此缓慢的扩展不会阻塞其他条目的注册或查找。并发解析可能重复验证；成功的调用方会收到已发布的类引用。这不提供独立的插件依赖解析器，也不能使任意循环导入安全。
+
+注册表属于当前进程。一个 worker 中的新注册不会传播到其他 worker。要在应用启动时尽早发现问题，请仅在 `ready()` 中解析已配置的实现，不要导入所有可选实现。这只验证导入和继承，不检查凭据或网络健康状态。首次导入是同步的，可能阻塞事件循环；必要时应在处理异步流量前预先解析已启用的实现。
+
+以下所有错误均从 `bedrock.common.registry` 导出，继承自 `ClassRegistryError` / `BedrockExc`，并提供人类可读的 `detail`：
+
+| 错误 | 含义 |
+| --- | --- |
+| `DuplicateRegistrationError` | 名称已存在 |
+| `ClassNotRegisteredError` | 请求的名称未知 |
+| `InvalidClassPathError` | 路径语法无效 |
+| `ClassLoadError` | 模块导入或属性查找失败；`__cause__` 保留原始异常 |
+| `InvalidRegisteredClassError` | 基类不是类，或实现违反类契约 |
+
+不要将每个 `ClassLoadError` 都理解为缺少 SDK：扩展代码可能抛出了其他异常。Cache 和 Storage 会将解析失败转换为已有的配置错误，并将注册表错误保留为原因。
+
+导入路径是可执行配置。只应接受来自可信代码或部署配置的路径，绝不要直接接受请求参数中的路径。请求可以选择已注册且授权的名称。继承验证发生在导入之后，并非安全沙箱。
+
+## 从旧版注册表迁移
+
+这是一个不兼容的契约变更：
+
+1. 将 `ClassRegistry(paths)` 替换为 `ClassRegistry[Base](base_class=Base, lazy_classes=paths)`。泛型参数是实例/基类类型，而不是 `type[Base]`。
+2. 将 `add(name, path)` 替换为 `register_lazy(name, path)`；类对象仍使用 `register(name, cls)`。
+3. 将 `get()` 周围的 `None` 检查和 `KeyError` 处理替换为上述注册表异常处理。
+4. 移除通过 `instances`、`update`、`remove` 和 `all` 进行的修改；使用显式注册和 `keys()`。重复注册不再被静默忽略。
+5. `DictManager` 已移除。将其加载类的调用方迁移到 `ClassRegistry`，不要保留未经验证的加载路径。
+6. 自定义 Cache 和 Storage 后端必须显式继承 `CacheBackend` / `StorageBackend`，包括以前仅依赖结构匹配的实现。它们的 `register_backend()` 辅助函数会拒绝重复名称，包括内置名称。

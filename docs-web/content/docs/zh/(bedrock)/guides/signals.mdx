@@ -135,12 +135,13 @@ user_created.disconnect(log_user)
 # Disconnect from a specific sender only
 user_created.disconnect(log_user, sender=admin_module)
 ```
+不指定 sender 时，`disconnect()` 会移除该接收器与所有 sender 的连接；指定 sender 则只移除对应连接。
 
 ## 发送信号
 
 ### `signal.send(sender, **kwargs)`
 
-同步调用所有已连接的接收器。返回 `(receiver, return_value)` 元组列表：
+通过同步 API 调用匹配的接收器，返回 `(receiver, return_value)` 元组列表。异步接收器会按下文所述适配；首个异常会停止分发。
 
 ```python
 results = order_placed.send(current_app, order_id="ORD-042")
@@ -162,6 +163,7 @@ for receiver, result in results:
     else:
         log.info(f"{receiver.__name__} returned {result}")
 ```
+在运行中的事件 loop 内，默认包装器为异步接收器产生的 `RuntimeError` 也会被收集；`BaseException` 子类仍会向外传播。
 
 ### `await signal.asend(sender, **kwargs)`
 
@@ -252,6 +254,7 @@ assert len(received) == 1
 user_created.send(app, username="bob")
 assert len(received) == 1  # Still 1
 ```
+退出时 `connected_to()` 会断开该接收器与所有 sender 的连接，包括已有连接。需要保留已有连接时请使用独立接收器。
 
 ### `signal.muted()`
 
@@ -275,6 +278,7 @@ with audit.muted():
 # Normal dispatch resumes here
 audit.send(importer, action="complete")  # This fires
 ```
+`muted()` 是信号上的标志，不是可嵌套或任务局部的作用域：退出内层块时，即使外层仍在运行也会恢复发送。
 
 ## 生命周期信号
 
@@ -291,6 +295,7 @@ Bedrock 会在模块生命周期的关键节点发出信号。这些信号定义
 ### 用法
 
 ```python
+from bedrock.signal import Signal
 from bedrock.module.signals import module_ready, registry_ready
 
 @module_ready.connect_via(Signal.ANY, weak=False)
@@ -316,9 +321,10 @@ def on_all_ready(sender, **kwargs):
 4. 按**逆序**调用每个模块的 `on_shutdown` 钩子 → 每个模块触发一次 `module_shutdown`
 5. 注册表发出完成信号 → 仅在所有模块都已关闭后触发一次 `registry_shutdown`
 
-如果某一步失败，信号只反映实际完成的步骤：`on_load` 失败不会触发 `module_loaded`，安装会被回滚（已加载的模块在回滚时触发 `module_shutdown`）；只要仍有模块未就绪或未关闭，就不会触发 `registry_ready` / `registry_shutdown`。重复调用 `mark_ready()` 或 `shutdown()` 不会为已完成的模块重复触发信号。
+`on_load` 失败时不会发送 `module_loaded`，安装会回滚；已加载模块会被回滚，只有关闭钩子成功后才发送 `module_shutdown`。`module_ready` 接收器失败时模块已标记为就绪，异常会向外传播；重试会跳过该模块，不会重发其信号。`module_shutdown` 接收器失败时模块已标记为关闭，重试也不会重发该信号。失败的关闭钩子会重试，存在失败的那次调用不会发送 `registry_shutdown`。
 
 如果 `registry_ready` 或 `registry_shutdown` 接收器抛出异常，下次调用 `mark_ready()` 或 `shutdown()` 会重试该注册表级通知，不会重新执行已完成的模块钩子。就绪通知失败会将 `registry.ready` 重置为 `False`，因此也可以重试 `bedrock.setup()`；就绪接收器在通知期间仍可查询注册表。重试会重新发送整个信号，之前成功的接收器可能再次执行，必须能够安全重试。
+生命周期信号使用同步 `send()`。如果在事件 loop 线程中启动或关闭，异步生命周期接收器可能导致 `RuntimeError`；此时请使用同步接收器。
 
 ## 同步/异步互操作
 
@@ -404,46 +410,19 @@ results = order_placed.send(app, _async_wrapper=my_async_wrapper, order_id="ORD-
 
 类似地，`asend()` 接受 `_sync_wrapper` 参数，用于覆盖同步接收器的适配方式（默认：`asyncio.to_thread`）。
 
-### 在事件 loop 中使用 `send()` 时的限制
-
-<Callout type="error">
-`send()` 在普通同步上下文下会自动适配异步接收器。  
-但如果当前线程已有运行中的事件 loop，且命中了异步接收器，`send()` 会抛出 `RuntimeError`。此时请使用 `await signal.asend()` 或提供 `_async_wrapper`。
-</Callout>
-
-```python
-from bedrock.signal import Signal
-
-order_placed = Signal()
-
-async def async_handler(sender, **kwargs):
-    await notify_external_service(kwargs["order_id"])
-
-order_placed.connect(async_handler, weak=False)
-
-# 在事件 loop 中调用会抛出 RuntimeError!
-order_placed.send(app, order_id="ORD-001")
-# RuntimeError: Cannot send to an async receiver with send().
-# Use await signal.asend(...) or provide _async_wrapper.
-
-# 正确做法：在异步上下文中使用 asend()
-await order_placed.asend(app, order_id="ORD-001")
-```
-
-如果你的代码库同时包含同步与异步逻辑，建议优先将 `asend()` 作为默认分发方式。它可以无缝处理同步和异步接收器——同步接收器会自动通过 `asyncio.to_thread` 包装。
 
 ## 弱引用
 
 默认情况下，接收器会以弱引用形式存储。这意味着：
 
 - **模块级函数** 可以正常工作——它们会在模块生命周期内持续存在。
-- **闭包和 lambda** 如果不传入 `weak=False`，会立即被垃圾回收。
+- **闭包和 lambda** 在没有强引用后可能被垃圾回收；使用 `weak=False` 可保持连接。
 - **绑定方法** 会通过类似 `WeakMethod` 的包装器进行弱引用——当所属实例被垃圾回收时，接收器会自动断开连接。
 
 ### 何时使用 `weak=False`
 
 ```python
-# WRONG: closure is immediately garbage collected
+# WRONG: closure can be garbage collected after setup returns
 def setup():
     def handler(sender, **kwargs):
         print("received")

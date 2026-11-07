@@ -189,7 +189,7 @@ storage.generate_presigned_url("media/avatar/a1.png").endpoint
 ```
 
 <Callout type="warning">
-The CDN must be a reverse proxy to the bucket that preserves the query string and the origin `Host` header — a CloudFront distribution with an S3 origin, or `nginx proxy_pass` to the bucket/endpoint. Otherwise presigned query parameters are stripped and public URLs break.
+The CDN must forward the query string and route requests to the S3 origin in a way compatible with the signature, including the origin `Host` header. Configure the proxy or distribution for the actual bucket endpoint and signing scheme.
 </Callout>
 
 The local backend has no URL operations: all three raise `StorageUrlUnsupportedError`. Build URLs in your application instead.
@@ -237,7 +237,8 @@ await fetch(url, { method: presigned.method, headers, body: file });
 Rules, all enforced with `StorageError` before any request is signed:
 
 - Only `GET` and `PUT` are supported. Presigned POST uploads need the multipart form protocol (`{url, fields}`) and are not supported.
-- Upload conditions are `PUT`-only.
+- `mime_type`, `content_length`, and `checksum_sha256` are `PUT`-only; `provider_headers` can also be signed for `GET`.
+- `expires_in` must be a positive integer; `content_length`, when supplied, must be a non-negative integer.
 - `provider_headers` must not set `content-type` / `content-length` (use the typed arguments), must not repeat a name case-insensitively, and must not contain CR/LF/NUL. The S3 backend also rejects signer-owned headers (`host`, `authorization`, `x-amz-date`, `x-amz-content-sha256`, `x-amz-security-token`, `x-amz-algorithm`, `x-amz-signature*`) and `x-amz-checksum-sha256` when `checksum_sha256` is set.
 
 <Callout type="warning">
@@ -271,7 +272,7 @@ normalize_storage_key("a/../b")                 # raises StorageKeyError
 normalize_storage_key("")                       # raises StorageKeyError
 ```
 
-The local backend additionally verifies that every resolved path stays inside its root directory, rejecting escape attempts (backslashes, `..`, absolute paths) with `StorageKeyError`.
+The service strips leading slashes before delegation. The local backend additionally verifies that every resolved path stays inside its root directory, rejecting escape attempts such as backslashes and `..` segments with `StorageKeyError`.
 
 ## Exception Hierarchy
 
@@ -309,7 +310,7 @@ from bedrock.contrib.storage import (
 
 **Don't call `configure()` at runtime.** Reconfiguration is unsynchronized — the backend is swapped in place without a lock. Call `configure()` once at startup.
 
-**Don't expect async methods.** The v1 API is sync-only — there are no `a`-prefixed methods, and that is permanent. Async support, if added, will be a separate additive layer, never a replacement.
+**Don't expect async methods.** The current storage API is sync-only; offload blocking operations appropriately in async applications.
 
 **Don't use the local backend for URLs.** `generate_presigned_url()` / `get_access_url()` / `get_preview_url()` raise `StorageUrlUnsupportedError`. Build URLs in your application (e.g. a static route or a reverse proxy) instead.
 

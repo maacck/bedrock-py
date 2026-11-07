@@ -16,7 +16,7 @@ Before starting, make sure you have:
 Verify your installation:
 
 ```bash
-bedrock -v
+bedrock --help
 ```
 
 ## Step 1: Create the Module Directory
@@ -175,6 +175,8 @@ Key points:
 - The singleton instance is created **here** in `service.py`, not in `bootstrap.py`.
 - Other modules import the singleton directly: `from .service import inventory_service`.
 
+This example keeps products in memory; the model is not yet used for persistence. Each CLI invocation starts a new process with an empty inventory. Use a database-backed service for data shared across invocations.
+
 ## Step 6: Add Bootstrap Hooks
 
 Bootstrap hooks run code at specific lifecycle stages. The registry calls them automatically. Hooks should only **configure** or **cleanup** — not define business logic.
@@ -298,26 +300,17 @@ Use `bedrock run` to execute your module's commands:
 
 ```bash
 # Add a product
-bedrock run --app inventory add "Widget" WIDGET-001 1999 --qty 50
+bedrock run --app inventory inventory add "Widget" WIDGET-001 1999 --qty 50
 
-# Add another product
-bedrock run --app inventory add "Gadget" GADGET-002 4999 --qty 25
-
-# List all products
-bedrock run --app inventory list
-
-# Adjust quantity
-bedrock run --app inventory adjust WIDGET-001 -10
+# Each invocation starts with an empty inventory
+bedrock run --app inventory inventory list
 ```
 
 Expected output:
 
 ```
 Added 'Widget' (SKU: WIDGET-001, qty: 50)
-Added 'Gadget' (SKU: GADGET-002, qty: 25)
-  WIDGET-001      Widget                         qty=50
-  GADGET-002      Gadget                         qty=25
-WIDGET-001 quantity now: 40
+No products in inventory.
 ```
 
 ## Final Module Structure

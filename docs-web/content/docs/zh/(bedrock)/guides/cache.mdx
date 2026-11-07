@@ -45,18 +45,19 @@ cache.configure("redis")
 传入 settings 实例以覆盖默认值：
 
 ```python
-from bedrock.contrib.cache import cache, RedisCacheSettings
+from bedrock.contrib.cache import cache
+from bedrock.contrib.cache.backends.redis import RedisCacheSettings
 
 settings = RedisCacheSettings(
-    REDIS_URL="redis://localhost:6379/1",
-    REDIS_PREFIX="myapp",
+    url="redis://localhost:6379/1",
+    key_prefix="myapp:",
 )
 cache.configure("redis", settings=settings)
 ```
 
 ### 注册自定义后端
 
-Custom backends must explicitly inherit `CacheBackend`, directly or indirectly. Register extensions from `bootstrap.py:on_load`:
+自定义后端必须直接或间接显式继承 `CacheBackend`，并实现完整契约。在 `bootstrap.py:on_load` 中注册扩展：
 
 ```python
 from bedrock.contrib.cache import register_backend
@@ -72,7 +73,7 @@ def on_load() -> None:
     register_backend("custom", MyCustomBackend)
 ```
 
-Call `cache.configure("custom")` after registration. Duplicate names raise `DuplicateRegistrationError`; invalid classes raise `InvalidRegisteredClassError` (both from `bedrock.common.registry`). Configuration retains lazy loading failures in the exception chain of `BackendNotConfiguredError`.
+注册后使用 `cache.configure("custom")` 选择后端。重复名称（包括内置名称）会抛出 `DuplicateRegistrationError`；无效类会抛出 `InvalidRegisteredClassError`，两者均来自 `bedrock.common.registry`。配置时的惰性加载失败会包装为 `BackendNotConfiguredError`，并保留原始异常链。应用自己的惰性类目录可使用 [ClassRegistry](./class-registry)。
 
 ## CacheService API 参考
 
@@ -84,8 +85,8 @@ Call `cache.configure("custom")` after registration. Duplicate names raise `Dupl
 |--------|-----------|-------------|
 | `cache.get()` | `get(key, default=None, type_=None, coder=None) → Any` | 获取缓存值 |
 | `cache.aget()` | `aget(key, default=None, type_=None, coder=None) → Any` | `get` 的异步版本 |
-| `cache.set()` | `set(key, value, ex=None, ea=None, coder=None) → None` | 存储一个值 |
-| `cache.aset()` | `aset(key, value, ex=None, ea=None, coder=None) → None` | `set` 的异步版本 |
+| `cache.set()` | `set(key, value, ex=None, px=None, ea=None, coder=None) → None` | 存储一个值 |
+| `cache.aset()` | `aset(key, value, ex=None, px=None, ea=None, coder=None) → None` | `set` 的异步版本 |
 | `cache.delete()` | `delete(key) → bool` | 删除一个键 |
 | `cache.adelete()` | `adelete(key) → bool` | `delete` 的异步版本 |
 | `cache.exists()` | `exists(key) → bool` | 检查键是否存在 |
@@ -99,8 +100,10 @@ Call `cache.configure("custom")` after registration. Duplicate names raise `Dupl
 |--------|-----------|-------------|
 | `cache.get_many()` | `get_many(keys) → dict[str, Any]` | 获取多个键 |
 | `cache.aget_many()` | `aget_many(keys) → dict[str, Any]` | 异步版本 |
-| `cache.set_many()` | `set_many(mapping, ex=None, ea=None, coder=None) → None` | 存储多组键值 |
-| `cache.aset_many()` | `aset_many(mapping, ex=None, ea=None, coder=None) → None` | 异步版本 |
+| `cache.set_many()` | `set_many(mapping, ex=None, px=None, ea=None, coder=None) → None` | 存储多组键值 |
+| `cache.aset_many()` | `aset_many(mapping, ex=None, px=None, ea=None, coder=None) → None` | 异步版本 |
+
+`get_many()` 和 `aget_many()` 会省略不存在的键，且始终使用默认解码器；自定义 coder 请逐个调用 `get()`。
 
 ### 数值操作
 
@@ -127,7 +130,7 @@ Call `cache.configure("custom")` after registration. Duplicate names raise `Dupl
 
 ## TTL 与过期
 
-缓存条目的存活时间（TTL）可以通过两种方式设置：
+缓存条目的存活时间（TTL）可以通过三种方式设置：
 
 ### 相对过期（`ex`）
 
@@ -150,7 +153,7 @@ cache.set("session:abc", data, ea=time.time() + 3600)
 ```
 
 <Callout type="warning">
-`ex`、`px` 与 `ea` 互斥。`px` 使用毫秒设置相对过期时间；如果三者都是 `None`，则条目永不过期。
+`ex`、`px` 和 `ea` 只应使用其中一个。`px` 使用毫秒设置相对过期时间；如果三者都是 `None`，则条目永不过期。传入多个值时内存后端优先使用 `ex`，其次为 `px` 和 `ea`；不要依赖后端特定行为。
 </Callout>
 
 ## Coder
@@ -196,7 +199,7 @@ result = cache.get("data:key", coder=MsgPackCoder)
 ```
 
 <Callout type="warning">
-请在 `type_` 和 `coder` 中二选一，不要同时传入。若同时传入，会抛出 `ValueError`。
+读取时请在 `type_` 和 `coder` 中二选一。对已缓存的值同时传入两者会抛出 `ValueError`。
 </Callout>
 
 ## 命名空间
@@ -262,15 +265,16 @@ user = user_slot.get_or_load(lambda: User(name="Alice", email="alice@example.com
 |--------|-----------|-------------|
 | `slot.get()` | `get(default=None, **params) → T` | 读取缓存值 |
 | `slot.aget()` | `aget(default=None, **params) → T` | 异步版本 |
-| `slot.get_or_load()` | `get_or_load(loader, **params) → T` | 读取，未命中则加载并写入 |
-| `slot.aget_or_load()` | `aget_or_load(loader, **params) → T` | 异步版本 |
-| `slot.set()` | `set(value, ex=None, ea=None, **params) → None` | 写入一个值 |
-| `slot.aset()` | `aset(value, ex=None, ea=None, **params) → None` | 异步版本 |
+| `slot.get_or_load()` | `get_or_load(loader, *, ex=None, px=None, ea=None, **params) → T` | 读取，未命中则加载并写入 |
+| `slot.aget_or_load()` | `aget_or_load(loader, *, ex=None, px=None, ea=None, **params) → T` | 异步版本 |
+| `slot.set()` | `set(value, *, ex=None, px=None, ea=None, **params) → None` | 写入一个值 |
+| `slot.aset()` | `aset(value, *, ex=None, px=None, ea=None, **params) → None` | 异步版本 |
 | `slot.delete()` | `delete(**params) → bool` | 删除缓存值 |
 | `slot.adelete()` | `adelete(**params) → bool` | 异步版本 |
 | `slot.exists()` | `exists(**params) → bool` | 检查值是否存在 |
 | `slot.aexists()` | `aexists(**params) → bool` | 异步版本 |
 | `slot.get_with_ttl()` | `get_with_ttl(**params) → tuple[T, int \| None]` | 获取值及 TTL |
+| `slot.aget_with_ttl()` | `aget_with_ttl(**params) → tuple[T, int \| None]` | 异步版本 |
 | `slot.build_key()` | `build_key(**params) → str` | 渲染完整限定键 |
 
 <Callout type="info">
@@ -344,6 +348,7 @@ cache.configure("memory")
 | 设置 | 默认值 | 说明 |
 |---------|---------|-------------|
 | `CACHE_MEMORY_MAX_SIZE` | `10000` | 最大条目数 |
+| `CACHE_MEMORY_DEFAULT_TTL` | `300` | 设置值；缓存写入不会自动应用此值 |
 
 ### RedisBackend
 
@@ -355,9 +360,11 @@ cache.configure("redis")
 
 | 设置 | 默认值 | 说明 |
 |---------|---------|-------------|
-| `REDIS_URL` | `"redis://localhost:6379"` | Redis 连接 URL |
+| `CACHE_REDIS_URL` | `"redis://localhost:6379/0"` | Redis 连接 URL |
+| `CACHE_REDIS_DB` | `0` | Redis 数据库编号 |
+| `CACHE_REDIS_PASSWORD` | `None` | Redis 密码 |
 | `CACHE_REDIS_KEY_PREFIX` | `""` | 默认键命名空间。`clear()`/`aclear()` 需要此项 **或** 显式 `prefix=` 参数 |
-| `REDIS_MAX_CONNECTIONS` | `10` | 连接池大小 |
+| `CACHE_REDIS_MAX_CONNECTIONS` | `50` | 每个连接池的最大连接数 |
 
 <Callout type="warning">
 Redis 的 `clear()` 与 `aclear()` 永远不会执行全库清理。它们只会扫描并删除某个前缀下的键。可传入显式 `prefix=` 参数，或将 `CACHE_REDIS_KEY_PREFIX` 配置为专用且非空的命名空间。仅当**配置前缀与显式参数均为空**时清理才会失败。原先依赖无前缀 `flushdb()` 的应用，必须先选择专用前缀。
@@ -384,6 +391,7 @@ from bedrock.contrib.cache import (
     CacheConnectionError,
     CacheSerializationError,
     BackendNotConfiguredError,
+    CacheClearRequiresPrefixError,
     CacheLockError,
     CacheLockAcquisitionError,
     CacheLockOwnershipError,
@@ -396,11 +404,11 @@ from bedrock.contrib.cache import (
 
 **不要将内存后端用于分布式锁。** `InMemoryBackend` 只在单个进程内有效。锁只能协调同一进程内的操作。跨进程协调请使用 `RedisBackend`。
 
-**不要忘记为临时数据设置 TTL。** 如果没有 `ex` 或 `ea`，条目会一直保留，直到被显式删除或进程重启。对于 session 数据、token 和临时状态，始终应设置 TTL。
+**不要忘记为临时数据设置 TTL。** 如果没有 `ex`、`px` 或 `ea`，条目会一直保留，直到被显式删除或进程重启。对于 session 数据、token 和临时状态，始终应设置 TTL。
 
 **不要使用 `bedrock.cache` 作为导入路径。** 标准导入方式是 `from bedrock.contrib.cache import cache`。`bedrock` 包顶层并没有重新导出它。
 
-**不要混用 `type_` 与 `coder` 参数。** 在 `get()` 或 `set()` 中同时传入两者会抛出 `ValueError`。每次调用只选择一种序列化策略。
+**读取时不要混用 `type_` 与 `coder`。** 读取已缓存的值时同时传入两者会抛出 `ValueError`。每次调用只选择一种序列化策略。
 
 **不要硬编码缓存键。** 使用命名空间和 slot 来组织键。直接拼接原始字符串容易导致键冲突，也会让缓存失效处理变得困难。
 

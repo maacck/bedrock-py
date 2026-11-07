@@ -47,7 +47,7 @@ This project follows a standard code of conduct. By participating, you are expec
 
 3. Verify the installation:
    ```bash
-   uv run bedrock -v
+   uv run bedrock --help
    ```
 
 4. Install pre-commit hooks:

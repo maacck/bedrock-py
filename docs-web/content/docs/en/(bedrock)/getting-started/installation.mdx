@@ -93,10 +93,10 @@ And a basic `main.py` to bootstrap the runtime:
 ```python
 import bedrock
 
-bedrock.setup()
+bedrock.setup("my_app.my_module")
 
 apps = bedrock.apps
-print(f"Registry ready with {len(apps.modules)} module(s) loaded")
+print(f"Registry ready with {len(apps.all())} module(s) loaded")
 ```
 
 ## Verify Installation
@@ -104,7 +104,7 @@ print(f"Registry ready with {len(apps.modules)} module(s) loaded")
 After installing, verify that Bedrock is working correctly:
 
 ```bash
-bedrock -v
+bedrock --help
 ```
 
 Check available CLI commands:

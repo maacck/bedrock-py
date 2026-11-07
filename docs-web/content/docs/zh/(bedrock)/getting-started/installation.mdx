@@ -30,10 +30,8 @@ Bedrock 支持多种 Python 包管理器。选择最适合你工作流的那一�
 
 Bedrock 提供了可选依赖组，以支持更多后端：
 
-<Tabs items={['Redis Cache', 'Memcached Cache']}>
-  <Tab value="Redis Cache"><CodeBlock code={'uv add bedrock[cache-redis]'} lang={'bash'} /></Tab>
-
-
+<Tabs items={['Redis Cache']}>
+  <Tab value="Redis Cache"><CodeBlock code={'uv add bedrock-core[cache-redis]'} lang={'bash'} /></Tab>
 </Tabs>
 
 | 扩展 | 包 | 说明 |
@@ -95,10 +93,10 @@ depends_on: []
 ```python
 import bedrock
 
-bedrock.setup()
+bedrock.setup("my_app.my_module")
 
 apps = bedrock.apps
-print(f"Registry ready with {len(apps.modules)} module(s) loaded")
+print(f"Registry ready with {len(apps.all())} module(s) loaded")
 ```
 
 ## 验证安装
@@ -106,7 +104,7 @@ print(f"Registry ready with {len(apps.modules)} module(s) loaded")
 安装完成后，验证 Bedrock 是否正常工作：
 
 ```bash
-bedrock -v
+bedrock --help
 ```
 
 查看可用的 CLI 命令：
@@ -126,6 +124,5 @@ bedrock app info <module_name>
 ```python
 import bedrock
 
-bedrock -v
-# Output: Hello from bedrock!
+print(bedrock)
 ```

@@ -22,11 +22,11 @@ class Product(BedrockModel):
 # Initialize once at process start
 db.init()
 
-# Use the context-local session
-with db.session as session:
+# Use a transaction scope (and unbind the session on exit)
+with db.session_scope() as session:
     product = Product(name="Widget")
     session.add(product)
-    session.commit()
+    session.flush()
 
     # Query back
     all_products = session.query(Product).all()
@@ -138,7 +138,7 @@ Accessing `db.engine`, `db.session`, or `db.settings` before calling `db.init()`
 
 ## Session Management
 
-Bedrock uses context-local sessions backed by a `ContextVar`. Each execution context (thread, async task, request) gets its own session automatically.
+Bedrock uses context-local sessions backed by a `ContextVar`. New async tasks inherit their creator's context, including any bound session; clear or establish separate bindings at task and request boundaries rather than sharing a session concurrently.
 
 ### How It Works
 
@@ -205,7 +205,7 @@ with db.session_scope() as session:
 
     # Write an audit log in a separate transaction
     with db.independent_session() as audit_session:
-        audit_log = AuditLog(action="order_created", entity_id=order.id)
+        audit_log = AuditLog(action="order_started")
         audit_session.add(audit_log)
         # Commits independently — does not affect the outer session
 
@@ -215,7 +215,7 @@ with db.session_scope() as session:
 
 **Use cases for `independent_session()`:**
 - Audit logging (must persist even if the main transaction rolls back)
-- Event publishing or outbox patterns
+- Event publishing with an independent transaction (a transactional outbox must instead share the main transaction)
 - Reads that must not see uncommitted data from the caller
 - Background tasks that need their own transaction lifecycle
 
@@ -309,7 +309,7 @@ session.commit()
 
 ### Default Values
 
-BedrockModel listens for the `init` event and applies column defaults before the constructor finishes. Callable defaults are invoked with the instance as an argument. This means default values are set consistently, even when you pass explicit kwargs.
+BedrockModel listens for the `init` event and applies column defaults before the constructor finishes. Callable defaults are invoked with the instance as an argument; explicitly supplied keyword arguments take precedence.
 
 ## Query Builder
 
@@ -414,6 +414,8 @@ result = search_filter_sort_paginate(
 )
 ```
 
+`limit` must be an integer from 1 to 1000, including when `show_all=True`; invalid values raise `InvalidQueryLimitError`.
+
 The `page_info` dictionary includes:
 
 | Key | Description |
@@ -422,6 +424,8 @@ The `page_info` dictionary includes:
 | `limit` | Items per page |
 | `offset` | Current offset |
 | `page` | Current page number |
+| `query` | Search string, or an empty string |
+| `filters` | Supplied filter specifications, or an empty list |
 | `has_more` | Whether more pages exist |
 | `paginated` | Whether pagination is active |
 
@@ -446,6 +450,7 @@ For the complete migration CLI reference, see [CLI Reference — Database Comman
 ### Programmatic Usage
 
 ```python
+from bedrock.module import apps
 from bedrock.database.migrations_manager import MigrationsManager
 
 migrations = MigrationsManager(
@@ -472,7 +477,7 @@ Each app's migrations directory is audited before operations. If a revision file
 
 ### First Install
 
-When an app has no existing revisions, `ensure_schema()` creates all tables from SQLAlchemy metadata and stamps the branch at head. This avoids running migration scripts for brand-new apps.
+When the app's branch has no applied database revision, `ensure_schema()` creates its tables from SQLAlchemy metadata and stamps the branch at head. This avoids running migration scripts for a first installation even when revision files exist.
 
 ## Model Observer
 
@@ -518,13 +523,13 @@ custom_observer = ModelObserver()
 
 @observes_model(Catalog, "on_insert", observer=custom_observer)
 def handle_insert(session, target, identifier):
-    # Only fires on the custom observer
+    # Custom observers register their own SQLAlchemy listener; callbacks are stored on the model
     pass
 ```
 
 ### Weak References
 
-Observer callbacks are stored as weak references. Bound methods use a `WeakMethod` wrapper to prevent memory leaks. If the object owning a bound method is garbage collected, the callback is silently skipped.
+Observer callbacks are stored as weak references; bound methods use a `WeakMethod` wrapper. Keep callbacks and their owning objects alive while registered: dead weak references are not safely skipped during dispatch.
 
 ## Architecture
 
@@ -548,7 +553,7 @@ bedrock/database/
 
 ## Anti-Patterns
 
-**Don't call `db.init()` more than once.** The engine and session factory are not idempotent in all paths. Initialize once at process start.
+**Avoid reinitializing `db` during active work.** `db.init()` supports replacement: it constructs the new engine first, then clears the current context's session and disposes the old engine. Other contexts must manage their own sessions before replacement.
 
 **Don't access `db.session` before initialization.** This raises `DatabaseNotConfiguredError`. Always call `db.init()` first.
 

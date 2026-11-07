@@ -67,7 +67,7 @@ Bedrock 为常见操作提供了几个关键单例：
 | `bedrock.apps` | `ModuleRegistry` | 模块生命周期 |
 | `bedrock.di.container` | `Container` | 依赖注入 |
 | `bedrock.hooks.hooks` | `HookRegistry` | Hook specs 和 implementations |
-| `bedrock.db` | `DatabaseManager` | 数据库操作 |
+| `bedrock.database.db` | `DatabaseManager` | 数据库操作 |
 
 ## 架构
 
@@ -107,9 +107,7 @@ Bedrock 强制保持清晰的层边界：
 from bedrock.module.registry import ModuleRegistry
 
 apps = ModuleRegistry()
-apps.install("inventory")  # Validates dependencies, loads in order
-apps.populate()            # Runs on_load hooks
-apps.mark_ready()          # Runs ready hooks
+apps.populate(["inventory"])  # Installs dependencies and runs on_load and ready hooks
 ```
 
 ### 数据库层
@@ -124,13 +122,15 @@ class Product(BedrockModel):
     id = mapped_column(sa.Integer, primary_key=True)
     name = mapped_column(sa.String(100), nullable=False)
 
+db.init()
+
 # Context-local session management
 product = Product(name="Widget")
 db.session.add(product)
 db.session.commit()
 
 # New session
-with db.session_factory() as session:
+with db.independent_session() as session:
     product = session.query(Product).filter_by(name="Widget").first()
 ```
 
@@ -170,18 +170,19 @@ with container.scope():
 ### Hook 系统
 
 ```python
-from bedrock.hooks import hooks
+from bedrock.hooks import HookNamespace, hookimpl
 
-ns = hooks.namespace("auth")
+ns = HookNamespace("auth")
 
 @ns.spec(firstresult=True)
 def authenticate(user, password): ...
 
-@ns.impl(priority=10)
-def check_password(user, password):
-    return verify_password(user, password)
+class AuthHooks:
+    @hookimpl(priority=10)
+    def authenticate(self, user, password):
+        return verify_password(user, password)
 
-# Dispatch
+ns.add_impls_from(AuthHooks(), module="auth")
 results = ns.call("authenticate", user="alice", password="s3cret")
 ```
 
@@ -196,12 +197,12 @@ bedrock app info <module>      # Display module details
 bedrock app install <module>   # Run migrations and hooks
 
 # Database migrations
-bedrock db revision --message "description"
-bedrock db upgrade
-bedrock db history
+bedrock db revision <module> -m "description"
+bedrock db upgrade <module>
+bedrock db history <module>
 
 # Run module commands
-bedrock run <module> <command>
+bedrock run --app <module> <module> <command>
 ```
 
 ## 项目目标

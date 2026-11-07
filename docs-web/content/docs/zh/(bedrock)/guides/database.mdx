@@ -22,11 +22,11 @@ class Product(BedrockModel):
 # Initialize once at process start
 db.init()
 
-# Use the context-local session
-with db.session as session:
+# 使用事务作用域（退出时解绑 session）
+with db.session_scope() as session:
     product = Product(name="Widget")
     session.add(product)
-    session.commit()
+    session.flush()
 
     # Query back
     all_products = session.query(Product).all()
@@ -138,7 +138,7 @@ db.init(url="postgresql+psycopg2://admin:secret@localhost:5432/myapp")
 
 ## Session 管理
 
-Bedrock 使用由 `ContextVar` 支撑的上下文局部 session。每个执行上下文（线程、异步任务、请求）都会自动获得自己的 session。
+Bedrock 使用由 `ContextVar` 支撑的上下文局部 session。新异步任务会继承创建者的上下文，包括已绑定的 session；应在任务和请求边界清理或单独建立绑定，避免并发共享 session。
 
 ### 工作方式
 
@@ -205,7 +205,7 @@ with db.session_scope() as session:
 
     # 在独立事务中写入审计日志
     with db.independent_session() as audit_session:
-        audit_log = AuditLog(action="order_created", entity_id=order.id)
+        audit_log = AuditLog(action="order_started")
         audit_session.add(audit_log)
         # 独立提交 — 不影响外部 session
 
@@ -215,7 +215,7 @@ with db.session_scope() as session:
 
 **`independent_session()` 适用场景：**
 - 审计日志（即使主事务回滚也必须持久化）
-- 事件发布或 outbox 模式
+- 以独立事务发布事件（事务性 outbox 则必须与主事务共享同一事务）
 - 需要读取调用方未提交数据之外的数据
 - 需要独立事务生命周期的后台任务
 
@@ -309,7 +309,7 @@ session.commit()
 
 ### 默认值
 
-BedrockModel 会监听 `init` 事件，并在构造函数结束前应用列默认值。可调用默认值会以实例作为参数进行调用。这意味着即使你显式传入 kwargs，默认值也会被一致地设置。
+BedrockModel 会监听 `init` 事件，并在构造函数结束前应用列默认值。可调用默认值会以实例作为参数进行调用；显式传入的关键字参数优先于默认值。
 
 ## 查询构建器
 
@@ -414,6 +414,8 @@ result = search_filter_sort_paginate(
 )
 ```
 
+`limit` 必须是 1 到 1000 的整数，即使 `show_all=True` 也不例外；无效值会抛出 `InvalidQueryLimitError`。
+
 `page_info` 字典包含：
 
 | 键 | 说明 |
@@ -422,6 +424,8 @@ result = search_filter_sort_paginate(
 | `limit` | 每页条目数 |
 | `offset` | 当前偏移量 |
 | `page` | 当前页码 |
+| `query` | 搜索字符串，未指定时为空字符串 |
+| `filters` | 传入的过滤条件，未指定时为空列表 |
 | `has_more` | 是否还有更多页面 |
 | `paginated` | 是否启用了分页 |
 
@@ -446,6 +450,7 @@ Bedrock 对 Alembic 做了按模块分支的封装。每个应用都有自己的
 ### 通过代码使用
 
 ```python
+from bedrock.module import apps
 from bedrock.database.migrations_manager import MigrationsManager
 
 migrations = MigrationsManager(
@@ -472,7 +477,7 @@ history = migrations.get_history("myapp.users")
 
 ### 首次安装
 
-当应用还没有任何现有版本时，`ensure_schema()` 会根据 SQLAlchemy metadata 创建所有表，并将该分支 stamp 到 head。这样就避免了为全新应用执行迁移脚本。
+当应用分支在数据库中没有已应用的版本时，`ensure_schema()` 会根据 SQLAlchemy metadata 创建该应用的表，并将分支 stamp 到 head。即使存在版本文件，首次安装也无需执行迁移脚本。
 
 ## 模型观察器
 
@@ -518,13 +523,13 @@ custom_observer = ModelObserver()
 
 @observes_model(Catalog, "on_insert", observer=custom_observer)
 def handle_insert(session, target, identifier):
-    # Only fires on the custom observer
+    # 自定义观察器注册自己的 SQLAlchemy 监听器；回调保存在模型上
     pass
 ```
 
 ### 弱引用
 
-观察器回调会以弱引用形式存储。绑定方法会使用 `WeakMethod` 包装器，以防止内存泄漏。如果拥有该绑定方法的对象被垃圾回收，对应回调会被静默跳过。
+观察器回调以弱引用形式存储，绑定方法使用 `WeakMethod` 包装器。注册期间应保持回调及其所属对象存活：派发时不会安全跳过失效的弱引用。
 
 ## 架构
 
@@ -548,7 +553,7 @@ bedrock/database/
 
 ## 反模式
 
-**不要多次调用 `db.init()`。** engine 和 session factory 在所有路径上都不保证幂等。应在进程启动时初始化一次。
+**避免在工作进行中重新初始化 `db`。** `db.init()` 支持替换：先构建新 engine，再清理当前上下文的 session 并释放旧 engine。替换前其他上下文必须自行管理其 session。
 
 **不要在初始化前访问 `db.session`。** 这会抛出 `DatabaseNotConfiguredError`。务必先调用 `db.init()`。
 

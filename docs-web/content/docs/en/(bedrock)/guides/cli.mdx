@@ -325,15 +325,17 @@ Commands for managing the application lifecycle.
 Install the current Bedrock application.
 
 ```bash
-bedrock manage install [OPTIONS]
+bedrock manage [-A ROOT_MODULE] install [OPTIONS]
 ```
 
 **Options:**
 
 | Option | Short | Description |
 |--------|-------|-------------|
-| `--app` | `-A` | Install specific module (default: all loaded) |
+| `--app` | | Install a specific loaded module (default: all loaded) |
 | `--skip-migrations` | | Skip database migrations |
+
+The parent `manage` command's `-A ROOT_MODULE` option selects the root module to load; alternatively set `BEDROCK_APP`.
 
 **What it does for each module:**
 
@@ -349,7 +351,7 @@ bedrock manage install [OPTIONS]
 bedrock manage install
 
 # Install specific module
-bedrock manage install -A myapp.users
+bedrock manage install --app myapp.users
 
 # Skip migrations
 bedrock manage install --skip-migrations
@@ -373,14 +375,14 @@ Running post-install hook for myapp.users...
 Execute module-specific CLI commands.
 
 ```bash
-bedrock run --app <module> <command> [ARGS]
+bedrock run --app <root_module> <module> <command> [ARGS]
 ```
 
 **Options:**
 
 | Option | Short | Description |
 |--------|-------|-------------|
-| `--app` | `-a` | Module to load (or set `APP` env var) |
+| `--app` | `-a` | Module to load (or set `BEDROCK_APP` env var) |
 
 ### How Module Commands Work
 
@@ -415,14 +417,14 @@ commands: commands:app
 
 ```bash
 # Run module command
-bedrock run --app myapp.users create-user --name Alice --email alice@example.com
+bedrock run --app myapp.users myapp.users create-user --name Alice --email alice@example.com
 
 # List available commands
-bedrock run --app myapp.users --help
+bedrock run --app myapp.users myapp.users --help
 
-# Use APP environment variable
-export APP=myapp.users
-bedrock run create-user --name Bob --email bob@example.com
+# Use BEDROCK_APP environment variable
+export BEDROCK_APP=myapp.users
+bedrock run myapp.users create-user --name Bob --email bob@example.com
 ```
 
 ---
@@ -431,8 +433,8 @@ bedrock run create-user --name Bob --email bob@example.com
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `APP` | Default app for `run` and `manage` commands | None |
-| `DATABASE_URL` | Database connection string | Required for `db` commands |
+| `BEDROCK_APP` | Default root app for `run` and `manage` commands | None |
+| `DATABASE_SCHEMA` | Database name or SQLite file path | `bedrock.db` |
 
 ---
 

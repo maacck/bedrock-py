@@ -36,7 +36,7 @@ cd bedrock-py
 uv sync --all-packages
 
 # Verify
-uv run bedrock -v
+uv run bedrock --help
 
 # Run tests
 uv run pytest packages/bedrock/tests/
