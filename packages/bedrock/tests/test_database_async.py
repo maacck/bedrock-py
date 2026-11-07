@@ -7,10 +7,11 @@ from pathlib import Path
 
 import pytest
 from bedrock.database.config import DatabaseConfigurationError, DbSettings
-from bedrock.database.connection import build_async_engine
+from bedrock.database.connection import async_url_for_driver, build_async_engine
 from bedrock.database.manager import DatabaseManager, DatabaseNotConfiguredError
 from bedrock.database.session_factory import _current_async_db_session, _current_db_session
 from sqlalchemy import Column, Integer, String, select
+from sqlalchemy.engine.url import make_url
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import DeclarativeBase
 
@@ -130,6 +131,46 @@ class TestAsyncSessions:
                     assert sync_session is not async_session
         finally:
             await manager.aclose()
+
+
+class TestExplicitInitUrl:
+    """An explicit init URL is the database both engines open."""
+
+    def test_sync_and_async_engines_share_the_explicit_url(self, tmp_path: Path) -> None:
+        """db.init(url=...) keeps the async engine on that database, swapping only the driver."""
+
+        explicit = tmp_path / "explicit.db"
+        explicit_url = f"sqlite:///{explicit.as_posix()}"
+        settings = DbSettings(ASYNC_DRIVER="aiosqlite")
+        manager = DatabaseManager()
+        manager.init(url=explicit_url, settings=settings)
+        try:
+            sync_url = make_url(manager.engine.url)
+            async_url = make_url(manager.aengine.url)
+
+            assert sync_url.database == explicit.as_posix()
+            assert async_url.database == sync_url.database
+            assert async_url.get_driver_name() == "aiosqlite"
+            assert "bedrock.db" not in str(async_url)
+        finally:
+            manager.close()
+
+    def test_driver_swap_preserves_the_rest_of_the_resolved_url(self) -> None:
+        """Only the driver name changes when the resolved URL is adapted for async."""
+
+        swapped = async_url_for_driver(
+            "postgresql+psycopg2://user:p%40ss@db.example:5432/app?sslmode=require",
+            "asyncpg",
+        )
+        parsed = make_url(swapped)
+
+        assert parsed.drivername == "postgresql+asyncpg"
+        assert parsed.username == "user"
+        assert parsed.password == "p@ss"
+        assert parsed.host == "db.example"
+        assert parsed.port == 5432
+        assert parsed.database == "app"
+        assert parsed.query["sslmode"] == "require"
 
 
 class TestAsyncDriverErrors:

@@ -139,7 +139,7 @@ db.init(url="postgresql+psycopg2://admin:secret@localhost:5432/myapp")
 | `db.clear_session()` | `clear_session()` | 关闭并解绑当前上下文局部 session。 |
 | `db.session_scope()` | `contextmanager → Session` | 事务作用域，自动提交/回滚。绑定到上下文。 |
 | `db.independent_session()` | `contextmanager → Session` | 隔离事务，不绑定到上下文。 |
-| `db.aengine` | `property → AsyncEngine` | 用同一份 settings 构建的异步 engine。需要 `DATABASE_ASYNC_DRIVER`。 |
+| `db.aengine` | `property → AsyncEngine` | 使用 `init()` 已解析的 URL，只把驱动换成 `DATABASE_ASYNC_DRIVER`。 |
 | `db.asession` | `property → AsyncSession` | 当前上下文局部的异步 session，使用与 `db.session` 不同的上下文变量。 |
 | `db.asession_scope()` | `async context manager → AsyncSession` | 异步事务作用域，提交、回滚和禁止嵌套的规则与 `session_scope()` 相同。 |
 | `db.aindependent_session()` | `async context manager → AsyncSession` | 不绑定 `db.asession` 的异步事务。 |

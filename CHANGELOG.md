@@ -55,6 +55,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   without changing the database. It exits with status 1 when any branch is behind head
   or the revision is unknown, including a database that has never been migrated.
 
+### Fixed
+
+- Async engines use the URL already resolved by `db.init()`, including an explicit
+  `url=` argument. Only the DBAPI driver is swapped for `DATABASE_ASYNC_DRIVER`.
+  An explicit SQLite path no longer falls back to the default `bedrock.db`.
+
 ## [0.3.1] - 2026-11-07
 
 ### Documentation

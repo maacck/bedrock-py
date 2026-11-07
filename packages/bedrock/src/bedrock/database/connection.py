@@ -4,6 +4,7 @@ import importlib
 import json
 
 from sqlalchemy import Engine, create_engine
+from sqlalchemy.engine.url import make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -93,12 +94,39 @@ def build_engine(database_url: str, settings: DbSettings) -> Engine:
     return create_engine(database_url, **_engine_kwargs(settings))
 
 
-def build_async_engine(settings: DbSettings) -> AsyncEngine:
-    """Create an async engine from the same settings as the sync engine.
+def async_url_for_driver(database_url: str, async_driver: str) -> str:
+    """Replace only the DBAPI driver in an already-resolved database URL.
+
+    The dialect, credentials, host, database, and query string stay as they were
+    resolved for the synchronous engine. ``db.init(url=...)`` therefore points
+    the async engine at that same database.
 
     Args:
-        settings: Database settings. ``ASYNC_DRIVER`` selects the async DBAPI
-            and the URL is built with :meth:`DbSettings.database_uri`.
+        database_url: URL already chosen for the synchronous engine.
+        async_driver: Async DBAPI name, such as ``aiosqlite`` or ``asyncpg``.
+
+    Returns:
+        The same URL with ``<dialect>+<async_driver>`` as its driver name.
+        SQLite ``:memory:`` stays in the canonical unquoted form.
+    """
+
+    parsed = make_url(database_url)
+    backend = parsed.get_backend_name()
+    drivername = f"{backend}+{async_driver}"
+    if backend == "sqlite" and parsed.database == ":memory:":
+        return f"{drivername}:///:memory:"
+    return parsed.set(drivername=drivername).render_as_string(hide_password=False)
+
+
+def build_async_engine(settings: DbSettings, database_url: str | None = None) -> AsyncEngine:
+    """Create an async engine for the URL the synchronous engine already uses.
+
+    Args:
+        settings: Pool settings and ``ASYNC_DRIVER``. Pool options still come
+            from these settings. The URL does not.
+        database_url: Resolved synchronous URL, including one passed to
+            ``db.init(url=...)``. When omitted, the URL is rendered from
+            *settings* and then given the async driver.
 
     Returns:
         An :class:`~sqlalchemy.ext.asyncio.AsyncEngine`.
@@ -115,11 +143,13 @@ def build_async_engine(settings: DbSettings) -> AsyncEngine:
             "and install the matching bedrock-core extra."
         )
     ensure_async_driver_installed(settings.ASYNC_DRIVER)
+    resolved_url = (
+        async_url_for_driver(database_url, settings.ASYNC_DRIVER)
+        if database_url is not None
+        else settings.database_uri(driver=settings.ASYNC_DRIVER)
+    )
     try:
-        return create_async_engine(
-            settings.database_uri(driver=settings.ASYNC_DRIVER),
-            **_engine_kwargs(settings),
-        )
+        return create_async_engine(resolved_url, **_engine_kwargs(settings))
     except ImportError as exc:
         raise DatabaseConfigurationError(_missing_async_driver_detail(settings.ASYNC_DRIVER)) from exc
 

@@ -209,12 +209,12 @@ class DatabaseManager:
     def _ensure_async(self) -> AsyncSessionFactory:
         """Build the async engine on first use and return its session factory."""
 
-        if self._settings is None or self._session_factory is None:
+        if self._settings is None or self._session_factory is None or self._database_url is None:
             raise DatabaseNotConfiguredError(
                 "Database is not initialized. Call db.init(...) before using async sessions."
             )
         if self._async_session_factory is None or self._async_engine is None:
-            self._async_engine = build_async_engine(self._settings)
+            self._async_engine = build_async_engine(self._settings, database_url=self._database_url)
             self._async_session_factory = AsyncSessionFactory(build_async_session_local(self._async_engine))
         return self._async_session_factory
 

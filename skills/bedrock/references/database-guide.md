@@ -739,7 +739,7 @@ The `db` singleton is a `DatabaseManager` instance. It owns the engine, session 
 | `db.clear_session()` | Close and unbind the current context-local session. |
 | `db.session_scope()` | Context manager — transactional scope with auto commit/rollback. Binds to context. |
 | `db.independent_session()` | Context manager — isolated transaction that does not bind to context. |
-| `db.aengine` | Async engine from the same settings. Requires `DATABASE_ASYNC_DRIVER`. |
+| `db.aengine` | Async engine for the URL resolved by `init()`, including an explicit `url=`. Only the driver is swapped for `DATABASE_ASYNC_DRIVER`. |
 | `db.asession` | Context-local async session. Separate context variable from `db.session`. |
 | `db.asession_scope()` | Async transactional scope. Same commit, rollback, and nesting rules as `session_scope()`. |
 | `db.aindependent_session()` | Async transaction that does not bind `db.asession`. |
