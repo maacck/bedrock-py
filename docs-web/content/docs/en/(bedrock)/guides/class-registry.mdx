@@ -1,0 +1,129 @@
+---
+title: Class Registry
+description: Typed, named implementation classes with explicit registration and lazy imports
+---
+
+`bedrock.common.registry.ClassRegistry[T]` maps names to concrete subclasses of a caller-owned base class. It returns **classes**, not instances. Use it when several implementations must coexist and callers select one by name. DI remains responsible for dependency instances and lifetimes.
+
+## Direct registration
+
+```python
+from abc import ABC, abstractmethod
+
+from bedrock.common.registry import ClassRegistry
+
+
+class Codec(ABC):
+    @abstractmethod
+    def encode(self, value: str) -> bytes:
+        """Encode text into bytes."""
+
+
+class Utf8Codec(Codec):
+    def encode(self, value: str) -> bytes:
+        """Encode text using UTF-8."""
+        return value.encode("utf-8")
+
+
+codecs = ClassRegistry[Codec](base_class=Codec)
+codecs.register("utf8", Utf8Codec)
+codec_cls: type[Codec] = codecs.get("utf8")
+assert codec_cls().encode("hello") == b"hello"
+```
+
+A directly registered class is retained as-is, including classes defined inside functions. Registration does not instantiate or re-import it. The caller owns construction, configuration, instance reuse and cleanup. The registry imposes no shared constructor signature.
+
+## Lazy registration
+
+Move the base contract into a lightweight `base.py` and each implementation into its own provider module. The owner can expose an empty registry from `service.py` without importing provider SDKs:
+
+```python
+# myapp/encoding/service.py
+from bedrock.common.registry import ClassRegistry
+
+from .base import Codec
+
+codecs = ClassRegistry[Codec](base_class=Codec)
+```
+
+Register paths from `bootstrap.py:on_load`:
+
+```python
+# myapp/encoding/bootstrap.py
+from .service import codecs
+
+
+def on_load() -> None:
+    """Declare implementations without importing them."""
+    codecs.register_lazy("utf8", "myapp.encoding.providers.utf8:Utf8Codec")
+```
+
+Third-party Bedrock modules use the same explicit registration in their own `on_load` hooks and declare the owning module in `manifest.yaml:depends_on`. Do not use import-time decorators or `__init_subclass__` to register extensions. Keep parent package `__init__.py` files free of optional implementation imports: Python executes them when importing a child module.
+
+The path format is an absolute `module:qualified.attribute`, such as `vendor.codecs:Container.CustomCodec`. Registration checks path syntax only. `get(name)` imports the selected module and validates its class on first use. Neither `has()` nor `keys()` imports implementations.
+
+For an inert built-in catalog owned by a registry, supply initial declarations:
+
+```python
+codecs = ClassRegistry[Codec](
+    base_class=Codec,
+    lazy_classes={"utf8": "myapp.encoding.providers.utf8:Utf8Codec"},
+)
+```
+
+The input mapping is copied; changing it later cannot modify the registry. These declarations neither import implementations nor register anything with the Bedrock module runtime.
+
+## Interface
+
+| Operation | Result |
+| --- | --- |
+| `ClassRegistry[T](base_class=Base, lazy_classes=None)` | An independent registry bound to `Base` |
+| `register(name, cls)` | Validate and retain a class immediately |
+| `register_lazy(name, path)` | Store a path without importing it |
+| `get(name)` | Return a validated `type[T]`, or raise an error |
+| `has(name)` | Check registration, not importability or readiness |
+| `keys()` | Return an independent list of names in registration order |
+
+Names are case-sensitive. Duplicate registration always fails for otherwise valid inputs, even when the class or path is unchanged. Entries are append-only: there is no replacement, removal, mutable mapping, or hot reload. Use a fresh registry for test isolation.
+
+## Type guarantees
+
+- Direct registration is statically typed as `type[T]` and validated at runtime.
+- `get()` returns `type[T]`, not `Any` or `None`. A dynamic name does not narrow the result to a particular concrete subclass.
+- Implementations must explicitly inherit the base, directly or indirectly. The base itself, unrelated classes, non-class values, abstract implementations and Protocol definitions are rejected.
+- Explicit subclasses of Protocol bases are supported without `runtime_checkable`. Structural-only implementations and virtual ABC registrations are not accepted.
+- Nominal inheritance does not prove method signatures or behavior. Use static checking and provider conformance tests. A Protocol's inherited method stubs are not abstract-method enforcement; prefer ABCs with `abstractmethod` for new contracts that require it.
+- A string path cannot be type-checked before its target is imported. Its runtime validation happens during `get()`, before returning the class.
+
+## Loading, concurrency and failures
+
+Successful resolution caches the **class**, never its instances. Failed resolution is not cached; a later explicit `get()` tries again, with no automatic retries. Python's import cache is not cleared or reloaded.
+
+Registrations and successful cache publication are thread-safe. The registry does not hold its state lock while running import code, so a slow extension does not block registration or lookup of unrelated entries. Concurrent resolution may repeat validation; successful callers receive the published class reference. This does not provide a separate plugin dependency resolver or make arbitrary import cycles safe.
+
+The registry is process-local. A new registration in one worker does not propagate to other workers. To fail early at application startup, resolve only configured implementations from `ready()`; do not import every optional implementation. This verifies imports and inheritance, not credentials or network health. First-time imports are synchronous and can block an event loop; pre-resolve enabled implementations before serving async traffic when needed.
+
+All errors below are exported from `bedrock.common.registry`, inherit `ClassRegistryError` / `BedrockExc`, and provide a human-readable `detail`:
+
+| Error | Meaning |
+| --- | --- |
+| `DuplicateRegistrationError` | A name already exists |
+| `ClassNotRegisteredError` | A requested name is unknown |
+| `InvalidClassPathError` | A path has invalid syntax |
+| `ClassLoadError` | Module import or attribute lookup failed; `__cause__` preserves the original exception |
+| `InvalidRegisteredClassError` | The base is not a class, or an implementation violates the class contract |
+
+Do not interpret every `ClassLoadError` as a missing SDK: extension code may have raised another exception. Cache and Storage translate resolution failures to their existing configuration errors and retain the registry error as the cause.
+
+Import paths are executable configuration. Accept them only from trusted code or deployment configuration, never directly from request parameters. Requests may select authorized, already-registered names. Inheritance validation happens after import and is not a security sandbox.
+
+## Migration from the previous registry
+
+This is a breaking contract change:
+
+1. Replace `ClassRegistry(paths)` with `ClassRegistry[Base](base_class=Base, lazy_classes=paths)`. The generic argument is the instance/base type, not `type[Base]`.
+2. Replace `add(name, path)` with `register_lazy(name, path)`; keep `register(name, cls)` for class objects.
+3. Replace `None` checks and `KeyError` handling around `get()` with the registry exceptions above.
+4. Remove mutations through `instances`, `update`, `remove`, and `all`; use explicit registration and `keys()`. Duplicate registration is no longer silently ignored.
+5. `DictManager` is removed. Migrate its class-loading callers to `ClassRegistry` rather than retaining an unvalidated loading path.
+6. Custom Cache and Storage backends must explicitly inherit `CacheBackend` / `StorageBackend`, including implementations that previously relied only on structural conformance. Their `register_backend()` helpers reject duplicate names, including built-ins.

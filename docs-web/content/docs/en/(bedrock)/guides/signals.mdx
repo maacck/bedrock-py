@@ -286,7 +286,7 @@ Bedrock emits signals at key points in the module lifecycle. These are defined i
 | `module_ready` | After a module's `ready` hook completes | The `AppConfig` instance | `registry`, `module`, `config` |
 | `module_shutdown` | During graceful shutdown (reverse order) | The `AppConfig` instance | `registry`, `module`, `config` |
 | `registry_ready` | After all modules are marked ready | The `ModuleRegistry` | `registry`, `config` |
-| `registry_shutdown` | When the registry begins shutdown | The `ModuleRegistry` | `registry`, `config` |
+| `registry_shutdown` | After every module has shut down | The `ModuleRegistry` | `registry`, `config` |
 
 ### Usage
 
@@ -314,7 +314,11 @@ During `registry.populate(modules)`:
 During `registry.shutdown()`:
 
 4. Each module's `on_shutdown` hook is called in **reverse** order → `module_shutdown` per module
-5. Registry signals completion → `registry_shutdown` once
+5. Registry signals completion → `registry_shutdown` once, only after every module has shut down
+
+If a step fails, signals follow what actually completed: a failed `on_load` emits no `module_loaded` and the install is rolled back (modules that had loaded emit `module_shutdown` while being unwound); `registry_ready` and `registry_shutdown` are never emitted while a module is not ready or not shut down. A repeated `mark_ready()` or `shutdown()` does not re-emit signals for modules that already completed.
+
+If a `registry_ready` or `registry_shutdown` receiver raises, the next `mark_ready()` or `shutdown()` retries that registry-level notification without rerunning completed module hooks. A failed ready notification resets `registry.ready` to `False`, allowing `bedrock.setup()` to retry too; ready receivers can still query the registry during delivery. Retrying resends the whole signal, so receivers that already succeeded may run again and must be retry-safe.
 
 ## Sync/Async Interop
 

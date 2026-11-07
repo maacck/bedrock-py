@@ -92,17 +92,22 @@ ACL resolution is: explicit `acl=` parameter > `S3StorageSettings.default_acl` (
 
 ### Registering Custom Backends
 
+Custom backends must explicitly inherit `StorageBackend`, directly or through an existing backend, and implement its complete contract. Structural conformance alone is no longer sufficient. Register extensions from `bootstrap.py:on_load`:
+
 ```python
-from bedrock.contrib.storage import register_backend, storage
-from bedrock.contrib.storage.base import StorageBackend
+from bedrock.contrib.storage import LocalBackend, register_backend
 
-class MyBackend:
-    """Implement the StorageBackend protocol (12 operations + close)."""
-    ...
 
-register_backend("custom", MyBackend)
-storage.configure("custom")
+class MyBackend(LocalBackend):
+    """Project-specific implementation inheriting the complete local backend."""
+
+
+def on_load() -> None:
+    """Register the project backend once during module loading."""
+    register_backend("custom", MyBackend)
 ```
+
+Select it with `storage.configure("custom")` after registration. Duplicate names, including built-ins, raise `DuplicateRegistrationError`; invalid classes raise `InvalidRegisteredClassError`. Both come from `bedrock.common.registry`. Configuration wraps lazy resolution failures in `StorageBackendNotConfiguredError`, preserving the original exception chain. For application-owned lazy catalogs, use [ClassRegistry](./class-registry).
 
 ## StorageService API Reference
 

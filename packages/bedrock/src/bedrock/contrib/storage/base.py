@@ -1,4 +1,4 @@
-"""Storage backend protocol (sync-only in v1)."""
+"""Storage backend contract (sync-only in v1)."""
 
 from collections.abc import Iterable
 from pathlib import Path
@@ -11,6 +11,10 @@ from .entities import StorageListResult, StorageObject, StoragePresignedUrl, Sto
 
 class StorageBackend(Protocol):
     """Contract every storage backend must implement.
+
+    Backends must explicitly subclass this class to be registered with
+    :func:`~bedrock.contrib.storage.register_backend`; structural conformance
+    alone is not accepted.
 
     Backends receive already-normalized ``storage_key`` values; the service
     performs validation and normalization before delegation.

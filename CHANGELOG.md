@@ -5,6 +5,59 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-11-07
+
+### Breaking changes
+
+- `ClassRegistry` now requires `base_class` and uses the base instance type as its generic argument: `ClassRegistry[Base](base_class=Base, lazy_classes=paths)`. Only concrete, explicit subclasses are accepted. Register paths with `register_lazy()` instead of `add()`; `get()` raises typed `BedrockExc` subclasses instead of returning `None` or raising `KeyError`.
+- Duplicate class/backend names now raise `DuplicateRegistrationError`, including repeated registrations of the same implementation. The mutable `instances`, `update`, `remove`, and `all` interfaces and the obsolete `DictManager` loader are removed.
+- Custom Cache and Storage backends must explicitly inherit their respective backend contracts; structural-only implementations must migrate. Configuration errors preserve registry resolution failures in their exception chains.
+- **Module lifecycle**: a failed `install()` / `populate()` no longer leaves modules registered.
+  Every module introduced by the failed call is removed (modules installed earlier are kept), so
+  code that relied on a module staying installed after its `on_load` raised must now retry
+  the install instead.
+- **Module lifecycle**: `shutdown()` no longer stops at the first failing hook. It attempts every
+  module that has not completed shutdown and then raises one `ModuleLifecycleError` listing all
+  failures; `registry_shutdown` is only emitted when every module shut down.
+- **Module lifecycle**: `mark_ready()` skips modules that are already ready (their `ready` hook and
+  `module_ready` signal are not repeated) and raises `ModuleLifecycleError` if a module was already
+  shut down. `AppConfig.lifecycle_state` is now a `ModuleLifecycleState` string enum (values still compare
+  equal to `"loaded"`, `"ready"`, `"shutdown"`) with a new initial value `"loading"`.
+
+### Added
+
+- Typed, thread-safe lazy class registration with successful-resolution caching, isolated registries, retained import error causes, and no instance or dependency-injection lifecycle. Direct registration retains class objects, including locally defined classes.
+- Class Registry guide covering explicit extension registration, optional dependency loading, type guarantees, security boundaries, and migration from the previous registry.
+- `ModuleLifecycleState`, `AppConfig.transition_to()` (validated forward transitions), `ModuleFailure`,
+  and `ModuleStartupRollbackError`, exported from `bedrock.module`.
+- `ModuleLifecycleError.failures` / `.failed_modules` expose every module failure with its original cause.
+- Installed modules that had loaded before a later startup failure are unwound best-effort with
+  `on_shutdown` (reverse order, `module_shutdown` emitted); if cleanup also fails,
+  `ModuleStartupRollbackError` carries both the original failure and the cleanup failures.
+
+### Changed
+
+- `ModuleRegistry.install()`, `populate()`, `mark_ready()` and `shutdown()` hold the registry lock for the
+  whole operation (`populate()` keeps it across both its install and ready phases), so other threads wait
+  until the operation finishes and cannot run a hook twice.
+- `mark_ready()` and `shutdown()` are not re-entrant: calling either from a bootstrap hook or a lifecycle
+  signal receiver while one of them is running raises `ModuleLifecycleError` instead of re-running hooks
+  (previously this recursed until `RecursionError`). The guard is registry state, not a thread lock.
+- A failed `ready` hook now raises a `ModuleLifecycleError` whose `failures` name the module, like
+  `shutdown()`. `failures` are always attributed to the module and step where they happened
+  (`on_load`, `manifest`, `dependency`, `module_loaded`, `ready`, `on_shutdown`, ...), and the `__cause__` of
+  every aggregated lifecycle error is an `ExceptionGroup` of all its failures.
+- `AppConfig` validates assignments, so assigning a plain string to `lifecycle_state` is coerced to
+  `ModuleLifecycleState` (invalid values raise `ValidationError`).
+
+### Fixed
+
+- Failed `registry_ready` and `registry_shutdown` notifications can be retried without
+  repeating completed module hooks. A failed ready notification resets `registry.ready`,
+  so retrying `bedrock.setup()` also resumes notification delivery.
+- Installation rollback rejects attempts to introduce new modules from cleanup hooks
+  or signal receivers, preserving failure-atomic membership and install order.
+
 ## [0.2.2] - 2026-10-01
 
 ### Breaking changes
