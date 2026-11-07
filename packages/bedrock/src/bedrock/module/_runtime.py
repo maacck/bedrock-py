@@ -31,19 +31,25 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class HookEffect:
-    """Call the ``hook_name`` bootstrap hook of ``app`` if the module defines it."""
+    """Call the ``hook_name`` bootstrap hook of ``app`` if the module defines it.
+
+    ``protected`` effects are cleanup work that must run to completion: the async driver does not let a cancellation
+    of the caller interrupt them and delivers it once the whole protected section has finished.
+    """
 
     app: Any
     hook_name: str
+    protected: bool = False
 
 
 @dataclass(frozen=True)
 class SignalEffect:
-    """Send ``signal`` with ``sender`` and ``kwargs`` to its receivers."""
+    """Send ``signal`` with ``sender`` and ``kwargs`` to its receivers; ``protected`` as for ``HookEffect``."""
 
     signal: Any
     sender: Any
     kwargs: dict[str, Any]
+    protected: bool = False
 
 
 @dataclass(frozen=True)
@@ -58,6 +64,11 @@ class AwaitEffect:
     """Run the awaitable produced by ``factory``; the factory is only called once running it is possible."""
 
     factory: Callable[[], Awaitable[Any]]
+
+
+def is_protected(effect: Any) -> bool:
+    """Return whether ``effect`` is cleanup work that a caller cancellation must not interrupt."""
+    return bool(getattr(effect, "protected", False))
 
 
 Effect = HookEffect | SignalEffect | CallEffect | AwaitEffect
@@ -84,7 +95,7 @@ def discard_awaitable(awaitable: Any) -> None:
         cancel()
 
 
-async def _drain(future: asyncio.Future[Any]) -> asyncio.CancelledError | None:
+async def drain(future: asyncio.Future[Any]) -> asyncio.CancelledError | None:
     """Wait until ``future`` is done however often this task is cancelled; return the first cancellation seen."""
     cancelled: asyncio.CancelledError | None = None
     while not future.done():
@@ -104,7 +115,7 @@ async def _dispose_unawaited(result: Any) -> None:
         return
     future = asyncio.ensure_future(result)
     future.cancel()
-    await _drain(future)
+    await drain(future)
     if not future.cancelled():
         future.exception()
 
@@ -132,7 +143,7 @@ async def run_in_worker[**P, R](fn: Callable[P, R], /, *args: P.args, **kwargs: 
         Exception: Whatever ``fn`` raised, when the calling task was not cancelled.
     """
     worker = asyncio.ensure_future(asyncio.to_thread(fn, *args, **kwargs))
-    cancelled = await _drain(worker)
+    cancelled = await drain(worker)
     if cancelled is None:
         return worker.result()
     if worker.cancelled():

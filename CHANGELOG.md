@@ -45,7 +45,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   identical, and cancelling an async operation leaves every module in a valid state. A cancelled async operation
   waits for synchronous hooks and receivers already running in a worker thread before it rolls back or releases
   the registry, because a blocking function cannot be forced to stop; repeated cancellation does not skip that
-  wait, and an awaitable returned by a cancelled plain hook is released instead of left unawaited.
+  wait, and an awaitable returned by a cancelled plain hook is released instead of left unawaited. Installation
+  rollback cannot be interrupted by a caller cancellation: every introduced module is still cleaned in reverse
+  order and the operation stays held until then, after which `CancelledError` is raised (chained to the install
+  error that started the rollback, with cleanup failures logged and attached as notes). A cleanup hook that
+  itself raises `CancelledError` or `KeyboardInterrupt` leaves that module and its dependencies registered so
+  `shutdown()` can finish them.
 - `bedrock.shutdown()` / `bedrock.ashutdown()` stop every module, then release the initialized database: `db.close()`
   for the sync engine and `db.aclose()` for the async engine, each only if it exists, even when a module hook
   failed. A database failure is reported with the module failures as `ModuleFailure("bedrock.database", ...)`.

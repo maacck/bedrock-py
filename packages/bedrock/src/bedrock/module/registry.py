@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
@@ -16,6 +17,8 @@ from ._runtime import (
     SignalEffect,
     Steps,
     discard_awaitable,
+    drain,
+    is_protected,
     loop_is_running,
     run_in_worker,
 )
@@ -139,6 +142,18 @@ class ModuleRegistry:
       the next operation and the release of the operation never overlap a running
       worker, and an awaitable returned by a cancelled plain hook is released
       instead of being left unawaited.
+    * Installation rollback is not interruptible by the caller. Cancelling an
+      ``ainstall`` or ``apopulate`` while it rolls back (whether the rollback
+      started from an error or from the first cancellation) never aborts a
+      cleanup hook or skips a module: every introduced module is still unwound in
+      reverse order, the operation stays held until that is done, and then
+      ``CancelledError`` is raised. When an ordinary error started the rollback,
+      the error stays as the ``__cause__`` of the ``CancelledError``. Cleanup
+      failures keep their usual aggregate when no cancellation happened; when
+      ``CancelledError`` propagates they are logged and added as notes. A cleanup
+      hook that itself raises ``CancelledError`` or ``KeyboardInterrupt`` stops the
+      unwind: that module and the modules it depends on stay registered in their
+      current state, and ``shutdown`` finishes them later.
 
     Args:
         config: Optional host application configuration passed to hook callables.
@@ -456,18 +471,36 @@ class ModuleRegistry:
             return stop.value
 
     async def _drive_async(self, steps: Steps[Any]) -> Any:
-        """Execute the effects of ``steps`` on the running loop and return its result."""
+        """Execute the effects of ``steps`` on the running loop and return its result.
+
+        Protected effects (installation rollback) run as a child task that this driver keeps waiting for however
+        often the caller is cancelled. The first such cancellation is held back and raised when ``steps`` ends,
+        after the whole protected section ran, so cleanup keeps its owner and the operation gate until it is done.
+        """
+        deferred: asyncio.CancelledError | None = None
         try:
             effect = next(steps)
             while True:
                 try:
-                    value = await self._perform_async(effect)
+                    if is_protected(effect):
+                        task = asyncio.ensure_future(self._perform_async(effect))
+                        cancelled = await drain(task)
+                        deferred = deferred or cancelled
+                        value = task.result()
+                    else:
+                        value = await self._perform_async(effect)
                 except BaseException as exc:
                     effect = steps.throw(exc)
                 else:
                     effect = steps.send(value)
         except StopIteration as stop:
+            if deferred is not None:
+                raise deferred from None
             return stop.value
+        except BaseException as exc:
+            if deferred is not None and not isinstance(exc, asyncio.CancelledError):
+                raise deferred from exc
+            raise
 
     def _perform_sync(self, effect: Effect) -> Any:
         if isinstance(effect, HookEffect):
@@ -717,7 +750,10 @@ class ModuleRegistry:
         except BaseException as exc:
             introduced = [name for name in self._install_order if name not in preexisting]
             unwind_failures = yield from self._rollback(introduced)
-            if not unwind_failures or not isinstance(exc, Exception):
+            if not unwind_failures:
+                raise
+            if not isinstance(exc, Exception):
+                self._report_cleanup_failures_beside(exc, unwind_failures)
                 raise
 
             original = attempt.failure or ModuleFailure(module=import_paths[0], phase="install", error=exc)
@@ -728,13 +764,36 @@ class ModuleRegistry:
             )
             raise error from error.__cause__
 
+    @staticmethod
+    def _report_cleanup_failures_beside(interruption: BaseException, failures: list[ModuleFailure]) -> None:
+        """Keep cleanup failures visible when a cancellation or interrupt is what propagates.
+
+        The interruption must keep its type, so the failures are logged and attached to it as notes.
+        """
+        from ..logging import get_logger
+
+        logger = get_logger(__name__)
+        for failure in failures:
+            logger.warning(
+                f"Cleanup of module '{failure.module}' failed during {failure.phase} while installation "
+                f"was interrupted by {type(interruption).__name__}: {failure.error}"
+            )
+            interruption.add_note(
+                f"Cleanup of module '{failure.module}' failed during {failure.phase}: {failure.error}"
+            )
+
     def _rollback(self, introduced: list[str]) -> Steps[list[ModuleFailure]]:
         """Remove modules introduced by a failed installation (must be called inside an install operation).
 
         Modules that completed ``on_load`` are unwound best-effort with their
         ``on_shutdown`` hook in reverse install order. A module that never
         finished loading, or that was already shut down, has nothing to release. Every introduced module is
-        removed from membership and install order, whatever the unwind outcome.
+        removed from membership and install order, whatever the unwind outcome, with one exception: if an
+        ``on_shutdown`` hook or ``module_shutdown`` receiver is interrupted by something that is not an
+        ``Exception`` (it raised ``CancelledError`` itself, or ``KeyboardInterrupt``), the unwind stops. The
+        interrupted module and the modules it depends on stay registered in their current state, so a later
+        ``shutdown`` finishes their cleanup instead of losing them. Cleanup effects are protected: the async driver
+        never lets a cancellation of the caller interrupt them.
 
         Args:
             introduced: Names of modules added by the failed operation, in install order.
@@ -743,22 +802,27 @@ class ModuleRegistry:
             Failures that occurred while unwinding; empty when cleanup was clean.
         """
         failures: list[ModuleFailure] = []
+        retained: list[str] = []
         self._rolling_back = True
         try:
-            for name in reversed(introduced):
-                app = self._app_configs[name]
+            for index in range(len(introduced) - 1, -1, -1):
+                app = self._app_configs[introduced[index]]
                 if app.lifecycle_state in (ModuleLifecycleState.LOADING, ModuleLifecycleState.SHUTDOWN):
                     continue
-                failures.extend((yield from self._shutdown_module(app)))
+                try:
+                    failures.extend((yield from self._shutdown_module(app, protected=True)))
+                except BaseException:
+                    retained = introduced[: index + 1]
+                    raise
         finally:
-            removed = set(introduced)
-            for name in introduced:
+            removed = set(introduced) - set(retained)
+            for name in removed:
                 self._app_configs.pop(name, None)
             self._install_order[:] = [name for name in self._install_order if name not in removed]
             self._rolling_back = False
         return failures
 
-    def _shutdown_module(self, app: AppConfig) -> Steps[list[ModuleFailure]]:
+    def _shutdown_module(self, app: AppConfig, protected: bool = False) -> Steps[list[ModuleFailure]]:
         """Shut down one module and report failures instead of raising.
 
         The module is marked ``SHUTDOWN`` only after its ``on_shutdown`` hook
@@ -768,18 +832,21 @@ class ModuleRegistry:
 
         Args:
             app: Module to shut down.
+            protected: Whether a cancellation of the async caller must not interrupt the hook and receivers.
 
         Returns:
             Failures recorded for this module; empty on success.
         """
         try:
-            yield HookEffect(app, "on_shutdown")
+            yield HookEffect(app, "on_shutdown", protected)
         except Exception as exc:
             return [ModuleFailure(module=app.name, phase="on_shutdown", error=exc)]
 
         app.transition_to(ModuleLifecycleState.SHUTDOWN)
         try:
-            yield SignalEffect(module_shutdown, app, {"registry": self, "module": app, "config": self.config})
+            yield SignalEffect(
+                module_shutdown, app, {"registry": self, "module": app, "config": self.config}, protected
+            )
         except Exception as exc:
             wrapped = ModuleLifecycleError(
                 f"Receiver of 'module_shutdown' for module '{app.name}' raised an error: {exc}"

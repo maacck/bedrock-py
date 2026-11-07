@@ -1200,3 +1200,300 @@ class TestRunInWorker:
         with pytest.raises(asyncio.CancelledError):
             await task
         assert background.cancelled()
+
+
+class _AsyncBlock:
+    """Awaitable gate for an async hook that records overlap and whether the hook itself was cancelled."""
+
+    def __init__(self) -> None:
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+        self.running = 0
+        self.max_running = 0
+        self.cancelled = 0
+
+    async def __call__(self) -> None:
+        self.running += 1
+        self.max_running = max(self.max_running, self.running)
+        self.entered.set()
+        try:
+            await self.release.wait()
+        except asyncio.CancelledError:
+            self.cancelled += 1
+            raise
+        finally:
+            self.running -= 1
+
+
+async def _hold_forever() -> None:
+    await asyncio.sleep(60)
+
+
+async def _cancel_repeatedly(task: asyncio.Task[Any], times: int = 3) -> None:
+    for _ in range(times):
+        task.cancel()
+        await asyncio.sleep(0.002)
+
+
+class TestRollbackCancellation:
+    @pytest.mark.asyncio
+    async def test_repeated_cancel_during_coroutine_rollback_still_cleans_every_module(
+        self,
+        fake_package: Path,
+        kinds: dict[str, str],
+        gates: dict[tuple[str, str], Callable[[], Any]],
+        hook_state: list[str],
+    ) -> None:
+        _chain(fake_package, "rbc_a", "rbc_b", "rbc_c")
+        kinds.update({"rbc_a": "async", "rbc_b": "async", "rbc_c": "async"})
+        cleaning = _AsyncBlock()
+        gates[("on_load", "rbc_c")] = _hold_forever
+        gates[("on_shutdown", "rbc_b")] = cleaning
+        registry = ModuleRegistry()
+
+        task = asyncio.create_task(registry.ainstall("rbc_c"))
+        await _wait_until(lambda: "on_load:rbc_c" in hook_state)
+        task.cancel()
+        await asyncio.wait_for(cleaning.entered.wait(), timeout=5)
+        competitor = asyncio.create_task(registry.ainstall("rbc_a"))
+        await _cancel_repeatedly(task)
+        await _settle()
+
+        assert not task.done()
+        assert not competitor.done()
+        assert cleaning.cancelled == 0
+        assert "on_shutdown:rbc_a" not in hook_state
+
+        cleaning.release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        gates.pop(("on_shutdown", "rbc_b"))
+        await asyncio.wait_for(competitor, timeout=5)
+
+        assert hook_state[:6] == [
+            "on_load:rbc_a",
+            "on_load:rbc_b",
+            "on_load:rbc_c",
+            "on_shutdown:rbc_b",
+            "on_shutdown:rbc_a",
+            "on_load:rbc_a",
+        ]
+        assert cleaning.cancelled == 0
+        assert cleaning.max_running == 1
+        assert registry.list_installed() == ["rbc_a"]
+        assert _pending_tasks() == []
+
+    @pytest.mark.asyncio
+    async def test_cancel_during_rollback_after_an_ordinary_install_error_cleans_every_module(
+        self,
+        fake_package: Path,
+        kinds: dict[str, str],
+        gates: dict[tuple[str, str], Callable[[], Any]],
+        failures: set[tuple[str, str]],
+        hook_state: list[str],
+    ) -> None:
+        _chain(fake_package, "rbe_a", "rbe_b", "rbe_c")
+        kinds.update({"rbe_a": "async", "rbe_b": "async", "rbe_c": "async"})
+        cleaning = _AsyncBlock()
+        gates[("on_shutdown", "rbe_b")] = cleaning
+        failures.add(("on_load", "rbe_c"))
+        registry = ModuleRegistry()
+
+        task = asyncio.create_task(registry.ainstall("rbe_c"))
+        await asyncio.wait_for(cleaning.entered.wait(), timeout=5)
+        await _cancel_repeatedly(task, 1)
+        await _settle()
+        assert not task.done()
+        assert cleaning.cancelled == 0
+
+        cleaning.release.set()
+        with pytest.raises(asyncio.CancelledError) as info:
+            await task
+
+        assert isinstance(info.value.__cause__, ModuleLifecycleError)
+        assert "rbe_c" in str(info.value.__cause__)
+        assert hook_state == [
+            "on_load:rbe_a",
+            "on_load:rbe_b",
+            "on_load:rbe_c",
+            "on_shutdown:rbe_b",
+            "on_shutdown:rbe_a",
+        ]
+        assert registry.list_installed() == []
+        assert _pending_tasks() == []
+
+    @pytest.mark.asyncio
+    async def test_repeated_cancel_during_thread_rollback_cleans_every_module(
+        self,
+        fake_package: Path,
+        actions: dict[tuple[str, str], Callable[..., Any]],
+        hook_state: list[str],
+    ) -> None:
+        _chain(fake_package, "rbt_a", "rbt_b", "rbt_c")
+        loading, cleaning = _BlockingHook(), _BlockingHook()
+        actions[("on_load", "rbt_c")] = loading
+        actions[("on_shutdown", "rbt_b")] = cleaning
+        registry = ModuleRegistry()
+
+        task = asyncio.create_task(registry.ainstall("rbt_c"))
+        await _wait_until(loading.started.is_set)
+        task.cancel()
+        loading.release.set()
+        await _wait_until(cleaning.started.is_set)
+        await _cancel_repeatedly(task)
+        await _settle()
+        assert not task.done()
+        assert "on_shutdown:rbt_a" not in hook_state
+
+        cleaning.release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert hook_state == [
+            "on_load:rbt_a",
+            "on_load:rbt_b",
+            "on_load:rbt_c",
+            "on_shutdown:rbt_b",
+            "on_shutdown:rbt_a",
+        ]
+        assert cleaning.max_running == 1 and cleaning.calls == 1
+        assert registry.list_installed() == []
+        assert _pending_tasks() == []
+
+    @pytest.mark.asyncio
+    async def test_cancel_during_thread_rollback_after_an_ordinary_install_error(
+        self,
+        fake_package: Path,
+        actions: dict[tuple[str, str], Callable[..., Any]],
+        failures: set[tuple[str, str]],
+        hook_state: list[str],
+    ) -> None:
+        _chain(fake_package, "rbx_a", "rbx_b", "rbx_c")
+        cleaning = _BlockingHook()
+        actions[("on_shutdown", "rbx_b")] = cleaning
+        failures.add(("on_load", "rbx_c"))
+        registry = ModuleRegistry()
+
+        task = asyncio.create_task(registry.ainstall("rbx_c"))
+        await _wait_until(cleaning.started.is_set)
+        task.cancel()
+        await _settle()
+        assert not task.done()
+        cleaning.release.set()
+        with pytest.raises(asyncio.CancelledError) as info:
+            await task
+
+        assert isinstance(info.value.__cause__, ModuleLifecycleError)
+        assert hook_state[-2:] == ["on_shutdown:rbx_b", "on_shutdown:rbx_a"]
+        assert registry.list_installed() == []
+
+    @pytest.mark.asyncio
+    async def test_failed_cleanup_is_reported_alongside_a_cancellation(
+        self,
+        fake_package: Path,
+        kinds: dict[str, str],
+        gates: dict[tuple[str, str], Callable[[], Any]],
+        failures: set[tuple[str, str]],
+        hook_state: list[str],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        _chain(fake_package, "rbf_a", "rbf_b", "rbf_c")
+        kinds.update({"rbf_a": "async", "rbf_b": "async", "rbf_c": "async"})
+        gates[("on_load", "rbf_c")] = _hold_forever
+        failures.add(("on_shutdown", "rbf_b"))
+        registry = ModuleRegistry()
+
+        task = asyncio.create_task(registry.ainstall("rbf_c"))
+        await _wait_until(lambda: "on_load:rbf_c" in hook_state)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError) as info:
+            await task
+
+        assert hook_state[-2:] == ["on_shutdown:rbf_b", "on_shutdown:rbf_a"]
+        assert any("rbf_b" in note for note in getattr(info.value, "__notes__", []))
+        assert registry.list_installed() == []
+
+    @pytest.mark.asyncio
+    async def test_failed_cleanup_after_an_install_error_and_a_cancel_keeps_the_aggregate_as_cause(
+        self,
+        fake_package: Path,
+        kinds: dict[str, str],
+        gates: dict[tuple[str, str], Callable[[], Any]],
+        failures: set[tuple[str, str]],
+        hook_state: list[str],
+    ) -> None:
+        _chain(fake_package, "rba_a", "rba_b", "rba_c")
+        kinds.update({"rba_a": "async", "rba_b": "async", "rba_c": "async"})
+        cleaning = _AsyncBlock()
+        gates[("on_shutdown", "rba_b")] = cleaning
+        failures.update({("on_load", "rba_c"), ("on_shutdown", "rba_a")})
+        registry = ModuleRegistry()
+
+        task = asyncio.create_task(registry.ainstall("rba_c"))
+        await asyncio.wait_for(cleaning.entered.wait(), timeout=5)
+        task.cancel()
+        cleaning.release.set()
+        with pytest.raises(asyncio.CancelledError) as info:
+            await task
+
+        cause = info.value.__cause__
+        assert isinstance(cause, ModuleStartupRollbackError)
+        assert {(failure.module, failure.phase) for failure in cause.failures} == {
+            ("rba_c", "on_load"),
+            ("rba_a", "on_shutdown"),
+        }
+        assert registry.list_installed() == []
+
+    @pytest.mark.asyncio
+    async def test_a_cleanup_hook_that_raises_cancellation_keeps_ownership_of_unfinished_modules(
+        self,
+        fake_package: Path,
+        kinds: dict[str, str],
+        gates: dict[tuple[str, str], Callable[[], Any]],
+        failures: set[tuple[str, str]],
+        hook_state: list[str],
+    ) -> None:
+        _chain(fake_package, "rbo_a", "rbo_b", "rbo_c")
+        kinds.update({"rbo_a": "async", "rbo_b": "async", "rbo_c": "async"})
+        failures.add(("on_load", "rbo_c"))
+
+        async def provider_cancelled() -> None:
+            raise asyncio.CancelledError
+
+        gates[("on_shutdown", "rbo_b")] = provider_cancelled
+        registry = ModuleRegistry()
+
+        with pytest.raises(asyncio.CancelledError):
+            await registry.ainstall("rbo_c")
+
+        assert registry.list_installed() == ["rbo_a", "rbo_b"]
+        assert _states(registry) == {
+            "rbo_a": ModuleLifecycleState.LOADED,
+            "rbo_b": ModuleLifecycleState.LOADED,
+        }
+        assert "on_shutdown:rbo_a" not in hook_state
+
+        gates.clear()
+        await asyncio.wait_for(registry.ashutdown(), timeout=5)
+        assert set(_states(registry).values()) == {ModuleLifecycleState.SHUTDOWN}
+        assert hook_state[-2:] == ["on_shutdown:rbo_b", "on_shutdown:rbo_a"]
+        assert _pending_tasks() == []
+
+    @pytest.mark.asyncio
+    async def test_cancel_after_install_succeeded_in_rollback_free_path_is_unchanged(
+        self, fake_package: Path, kinds: dict[str, str], gates: dict[tuple[str, str], Callable[[], Any]]
+    ) -> None:
+        _chain(fake_package, "rbn_a", "rbn_b")
+        kinds.update({"rbn_a": "async", "rbn_b": "async"})
+        entered = _AsyncBlock()
+        gates[("on_load", "rbn_b")] = entered
+        registry = ModuleRegistry()
+
+        task = asyncio.create_task(registry.ainstall("rbn_b"))
+        await asyncio.wait_for(entered.entered.wait(), timeout=5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert entered.cancelled == 1
+        assert registry.list_installed() == []
