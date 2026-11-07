@@ -6,6 +6,12 @@ from collections.abc import Iterable
 from types import SimpleNamespace
 
 import pytest
+from bedrock.common.registry import (
+    ClassLoadError,
+    ClassRegistry,
+    DuplicateRegistrationError,
+    InvalidRegisteredClassError,
+)
 from bedrock.contrib.storage import (
     StorageBackendNotConfiguredError,
     StorageError,
@@ -17,12 +23,14 @@ from bedrock.contrib.storage import (
     normalize_storage_key,
     register_backend,
 )
+from bedrock.contrib.storage import service as storage_service_module
+from bedrock.contrib.storage.base import StorageBackend
 from bedrock.contrib.storage.entities import StorageListEntry, StorageListResult
 from bedrock.contrib.storage.service import StorageService
 from pydantic_settings import BaseSettings
 
 
-class StubBackend:
+class StubBackend(StorageBackend):
     """Minimal in-memory backend used to exercise service delegation."""
 
     def __init__(self, settings=None) -> None:
@@ -130,6 +138,20 @@ class StubBackend:
         self.objects.clear()
 
 
+@pytest.fixture(autouse=True)
+def registry(monkeypatch: pytest.MonkeyPatch) -> ClassRegistry[StorageBackend]:
+    """Give every test a fresh registry seeded with the built-in lazy backends."""
+    fresh: ClassRegistry[StorageBackend] = ClassRegistry(
+        base_class=StorageBackend,
+        lazy_classes={
+            "local": "bedrock.contrib.storage.backends.local:LocalBackend",
+            "s3": "bedrock.contrib.storage.backends.s3:S3Backend",
+        },
+    )
+    monkeypatch.setattr(storage_service_module, "_BACKEND_REGISTRY", fresh)
+    return fresh
+
+
 @pytest.fixture
 def svc() -> StorageService:
     service = StorageService()
@@ -170,33 +192,39 @@ def test_upload_normalizes_key_before_delegation(svc: StorageService) -> None:
     assert svc.get_backend().seen_keys == ["a/b.txt"]  # type: ignore[attr-defined]
 
 
-def test_configure_unknown_backend_raises() -> None:
-    """Unknown backend names raise StorageBackendNotConfiguredError with available list."""
-    with pytest.raises(StorageBackendNotConfiguredError):
-        StorageService().configure("does-not-exist")
+def test_configure_wraps_class_load_failure_with_cause(registry: ClassRegistry[StorageBackend]) -> None:
+    """A lazy backend that cannot be imported surfaces as StorageBackendNotConfiguredError chained to the cause."""
+    registry.register_lazy("broken", "bedrock_missing_backend_module:Backend")
+    with pytest.raises(StorageBackendNotConfiguredError, match="broken") as excinfo:
+        StorageService().configure("broken")
+    assert isinstance(excinfo.value.__cause__, ClassLoadError)
+    assert isinstance(excinfo.value.__cause__.__cause__, ModuleNotFoundError)
 
 
-def test_configure_logs_backend_name(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Successful configure() logs the backend name at INFO."""
-    recorded: list[tuple[str, tuple[object, ...]]] = []
+def test_register_backend_rejects_structural_only_class() -> None:
+    """A class that merely matches the protocol shape without subclassing StorageBackend is rejected."""
 
-    def capture(message: str, *args: object) -> None:
-        recorded.append((message, args))
+    class Structural:
+        pass
 
-    monkeypatch.setattr("bedrock.contrib.storage.service.logger.info", capture)
+    with pytest.raises(InvalidRegisteredClassError):
+        register_backend("structural", Structural)  # type: ignore[arg-type]
+    assert "structural" not in list_backends()
+
+
+def test_register_backend_rejects_duplicate_names() -> None:
+    """Built-in and previously registered names cannot be re-registered."""
     register_backend("stub", StubBackend)
-    service = StorageService()
-    try:
-        service.configure("stub")
-    finally:
-        service.close()
-    assert recorded == [("Storage backend configured: {}", ("stub",))]
+    with pytest.raises(DuplicateRegistrationError):
+        register_backend("stub", StubBackend)
+    with pytest.raises(DuplicateRegistrationError):
+        register_backend("local", StubBackend)
 
 
 def test_list_backends_includes_registered_names() -> None:
-    """list_backends() reports stub plus the built-in local/s3 entries."""
-    assert "stub" in list_backends()
-    assert "local" in list_backends()
+    """list_backends() reports a registered backend alongside the built-in local/s3 entries."""
+    register_backend("stub", StubBackend)
+    assert list_backends() == ["local", "s3", "stub"]
 
 
 def test_operations_delegate_with_normalized_keys(svc: StorageService) -> None:

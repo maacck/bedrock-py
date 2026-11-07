@@ -1,13 +1,21 @@
-"""Registry module for dynamic class registration and lookup.
-
-This package provides utilities for registering, storing, and dynamically
-importing classes by name.
-"""
+"""Typed class registration and lazy resolution, without instance management."""
 
 from .class_registry import ClassRegistry
-from .dict_manager import DictManager
+from .exc import (
+    ClassLoadError,
+    ClassNotRegisteredError,
+    ClassRegistryError,
+    DuplicateRegistrationError,
+    InvalidClassPathError,
+    InvalidRegisteredClassError,
+)
 
 __all__ = [
     "ClassRegistry",
-    "DictManager",
+    "ClassRegistryError",
+    "ClassLoadError",
+    "ClassNotRegisteredError",
+    "DuplicateRegistrationError",
+    "InvalidClassPathError",
+    "InvalidRegisteredClassError",
 ]

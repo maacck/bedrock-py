@@ -13,6 +13,7 @@ from typing import BinaryIO
 import orjson
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from ..base import StorageBackend
 from ..entities import StorageListEntry, StorageListResult, StorageObject, StoragePresignedUrl, StorageUploadResult
 from ..exc import (
     StorageDownloadError,
@@ -37,7 +38,7 @@ class LocalStorageSettings(BaseSettings):
     create_dir: bool = True
 
 
-class LocalBackend:
+class LocalBackend(StorageBackend):
     """Store objects as files under a base directory.
 
     Writes are atomic (tmp file + ``os.replace``). Optional mime_type and

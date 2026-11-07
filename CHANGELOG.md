@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Breaking changes
+
+- `ClassRegistry` now requires `base_class` and uses the base instance type as its generic argument: `ClassRegistry[Base](base_class=Base, lazy_classes=paths)`. Only concrete, explicit subclasses are accepted. Register paths with `register_lazy()` instead of `add()`; `get()` raises typed `BedrockExc` subclasses instead of returning `None` or raising `KeyError`.
+- Duplicate class/backend names now raise `DuplicateRegistrationError`, including repeated registrations of the same implementation. The mutable `instances`, `update`, `remove`, and `all` interfaces and the obsolete `DictManager` loader are removed.
+- Custom Cache and Storage backends must explicitly inherit their respective backend contracts; structural-only implementations must migrate. Configuration errors preserve registry resolution failures in their exception chains.
+
+### Added
+
+- Typed, thread-safe lazy class registration with successful-resolution caching, isolated registries, retained import error causes, and no instance or dependency-injection lifecycle. Direct registration retains class objects, including locally defined classes.
+- Class Registry guide covering explicit extension registration, optional dependency loading, type guarantees, security boundaries, and migration from the previous registry.
+
 ## [0.2.2] - 2026-10-01
 
 ### Breaking changes
