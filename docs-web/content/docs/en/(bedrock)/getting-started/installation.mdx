@@ -97,7 +97,11 @@ bedrock.setup("my_app.my_module")
 
 apps = bedrock.apps
 print(f"Registry ready with {len(apps.all())} module(s) loaded")
+
+bedrock.shutdown()
 ```
+
+In an async process, use `await bedrock.asetup(...)` and `await bedrock.ashutdown()` instead; see [Async Lifecycle](/docs/guides/module-anatomy#async-lifecycle).
 
 ## Logging
 

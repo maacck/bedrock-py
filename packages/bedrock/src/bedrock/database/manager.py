@@ -54,8 +54,8 @@ class DatabaseManager:
 
     ``close()`` disposes the synchronous engine. ``aclose()`` disposes the
     asynchronous engine. Call both when both were built. Neither method shuts
-    down the module registry; process shutdown wiring belongs to the caller
-    that owns the process lifetime.
+    down the module registry. ``bedrock.shutdown()`` and ``bedrock.ashutdown()``
+    stop every module and then call whichever of them applies.
     """
 
     def __init__(self) -> None:

@@ -127,7 +127,7 @@ bedrock.setup()  # Reads BEDROCK_APP env var, or pass app path explicitly
 bedrock.setup("myproject.app")  # Explicit app path
 ```
 
-Call `bedrock.setup()` once at process start. It is safe to call multiple times, and it does not configure logging.
+Call `bedrock.setup()` once at process start. It is safe to call multiple times, and it does not configure logging. In an async process call `await bedrock.asetup()` and stop with `await bedrock.ashutdown()` (sync: `bedrock.shutdown()`), which stops modules in reverse order and then releases the initialized database. Use one family end to end; see `references/module-guide.md` (Async lifecycle).
 
 Importing Bedrock does not remove loguru handlers or install Bedrock's sink. `configure_logging()` installs Bedrock's stderr sink (or `LOG_FILE` when that variable is set) and, on a later call, replaces only that sink. Handlers already present, including Loguru's preconfigured stderr handler, stay. `LOG_LEVEL`, `LOG_FORMAT`, `LOG_FILE`, `LOG_ROTATION`, `LOG_RETENTION`, `LOG_COMPRESSION`, and `LOG_SERIALIZE` are read when it runs. The `bedrock` CLI calls `configure_cli_logging()` before dispatching commands. That removes Loguru's preconfigured stderr handler so CLI lines are not duplicated and `LOG_*` controls CLI stderr; host handlers stay. Commands inside a module do not need to configure logging.
 

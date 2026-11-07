@@ -32,6 +32,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Async lifecycle.** `ModuleRegistry` gains `ainstall()`, `apopulate()`, `amark_ready()` and `ashutdown()`,
+  and `bedrock` gains `asetup()`, `shutdown()` and `ashutdown()` next to `setup()`. Existing hook names
+  (`on_load`, `ready`, `on_shutdown`) and signal receivers accept either sync or async implementations; a hook
+  that returns an awaitable is awaited too. Async entrypoints run async hooks on the running loop and plain
+  hooks in a worker thread, in dependency order and reverse order on shutdown. Sync entrypoints keep working
+  and adapt async hooks on a private loop that stays open until every module has shut down, so a client opened
+  by `on_load` is closed on the same loop. Called inside a running event loop, a sync entrypoint raises the new
+  `ModuleAsyncRequiredError` (a `ModuleLifecycleError`) that names the async entrypoint, instead of nesting a
+  loop or leaving a coroutine unawaited; `mark_ready()` and `shutdown()` check coroutine hooks before running
+  anything. Both modes share one state machine, so rollback, retry, idempotency and aggregate errors are
+  identical, and cancelling an async operation leaves every module in a valid state.
+- `bedrock.shutdown()` / `bedrock.ashutdown()` stop every module, then release the initialized database: `db.close()`
+  for the sync engine and `db.aclose()` for the async engine, each only if it exists, even when a module hook
+  failed. A database failure is reported with the module failures as `ModuleFailure("bedrock.database", ...)`.
+  `db.close()` and `db.aclose()` keep their sync-only and async-only contracts.
+  `DatabaseManager.has_async_engine` reports whether an async engine exists without building one.
+- `CacheService.aclose()` closes the async client of every backend the service created (including replaced
+  ones) and `close()` the sync client, so the Redis async client is no longer left open at shutdown.
+  `CacheService.has_async_resources()`, `CacheBackend.holds_async_resources` and `CacheCloseError` support it.
+- The cache module's `on_shutdown` hook and a new metrics `on_shutdown` hook close sync resources and return
+  the async close to the registry, which awaits it before the module counts as shut down. Metric providers may
+  define optional `flush()`, `aflush()` and `aclose()`; `MetricsManager.aclose()` and `has_async_resources()`
+  are new, and providers are now flushed and closed at registry shutdown (failures are still only logged).
 - `bedrock.logging.LoggingSettings` (prefix `LOG_`) is read when `configure_logging()` runs, so
   `LOG_LEVEL`, `LOG_FORMAT`, `LOG_FILE`, `LOG_ROTATION`, `LOG_RETENTION`, `LOG_COMPRESSION`, and
   `LOG_SERIALIZE` set after import are honored.
@@ -116,9 +139,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- `ModuleRegistry.install()`, `populate()`, `mark_ready()` and `shutdown()` hold the registry lock for the
-  whole operation (`populate()` keeps it across both its install and ready phases), so other threads wait
-  until the operation finishes and cannot run a hook twice.
+- `ModuleRegistry.install()`, `populate()`, `mark_ready()` and `shutdown()` run as one serialized operation
+  (`populate()` covers both its install and ready phases), so other threads and tasks wait until the
+  operation finishes and cannot run a hook twice. The guard no longer holds a thread lock, so it stays correct
+  across `await` points; see the async lifecycle entry below.
 - `mark_ready()` and `shutdown()` are not re-entrant: calling either from a bootstrap hook or a lifecycle
   signal receiver while one of them is running raises `ModuleLifecycleError` instead of re-running hooks
   (previously this recursed until `RecursionError`). The guard is registry state, not a thread lock.
