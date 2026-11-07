@@ -12,15 +12,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Logging**: importing `bedrock` or `bedrock.logging` no longer configures loguru.
   `configure_logging()` is not called at import, and `bedrock.setup()` does not install a sink.
   Sinks registered before the import stay in place. Non-CLI processes that relied on implicit
-  stderr output must call `configure_logging()` from their process entry point. The `bedrock`
-  CLI still calls it before dispatching commands. Repeated calls replace only the sink Bedrock
-  installed; configuration never calls `logger.remove()` without a handler id.
+  stderr output must call `configure_logging()` from their process entry point. That call leaves
+  existing handlers in place, including Loguru's preconfigured stderr handler. The `bedrock` CLI
+  calls `configure_cli_logging()` before dispatching commands: it removes that preconfigured stderr
+  handler when it is still installed, then installs Bedrock's sink, so `LOG_*` controls CLI stderr
+  and log lines are not duplicated. Handlers added by the host are kept. Repeated calls replace only
+  the sink Bedrock installed; configuration never calls `logger.remove()` without a handler id.
 
 ### Added
 
 - `bedrock.logging.LoggingSettings` (prefix `LOG_`) is read when `configure_logging()` runs, so
   `LOG_LEVEL`, `LOG_FORMAT`, `LOG_FILE`, `LOG_ROTATION`, `LOG_RETENTION`, `LOG_COMPRESSION`, and
   `LOG_SERIALIZE` set after import are honored.
+- `configure_cli_logging()` is the process-owned CLI initializer. It retires Loguru's preconfigured
+  stderr handler, then calls `configure_logging()`.
 
 ## [0.3.1] - 2026-11-07
 

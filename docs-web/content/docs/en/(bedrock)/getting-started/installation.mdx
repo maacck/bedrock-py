@@ -111,7 +111,7 @@ configure_logging()
 bedrock.setup("my_app.my_module")
 ```
 
-`LOG_LEVEL`, `LOG_FORMAT`, `LOG_FILE`, `LOG_ROTATION`, `LOG_RETENTION`, `LOG_COMPRESSION`, and `LOG_SERIALIZE` are read when `configure_logging()` runs. Calling it again replaces only the sink Bedrock installed. The `bedrock` CLI calls it for you.
+`LOG_LEVEL`, `LOG_FORMAT`, `LOG_FILE`, `LOG_ROTATION`, `LOG_RETENTION`, `LOG_COMPRESSION`, and `LOG_SERIALIZE` are read when `configure_logging()` runs. Calling it again replaces only the sink Bedrock installed. The `bedrock` CLI calls `configure_cli_logging()`, which also removes Loguru's preconfigured stderr handler so CLI logs are written once and `LOG_*` controls that stream. Other handlers stay.
 
 ## Verify Installation
 

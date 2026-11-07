@@ -27,7 +27,8 @@ def setup(app: str | None = None) -> None:
     It does not configure logging. Importing Bedrock leaves existing loguru
     sinks in place. A process that wants Bedrock's stderr or ``LOG_FILE`` sink
     calls :func:`bedrock.logging.configure_logging` itself. The Bedrock CLI
-    does that in its entry point.
+    calls :func:`bedrock.logging.configure_cli_logging`, which also retires
+    Loguru's preconfigured stderr handler.
 
     Args:
         app: Dotted import path of the root application module to install,

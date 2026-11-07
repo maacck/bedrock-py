@@ -1,7 +1,7 @@
 import typer
 from typer import Typer
 
-from bedrock.logging import configure_logging
+from bedrock.logging import configure_cli_logging
 
 from .apps import apps
 from .db import db_app
@@ -28,9 +28,10 @@ def entrypoint() -> None:
     """Install Bedrock's log sink, then dispatch CLI commands.
 
     Logging stays out of import and :func:`bedrock.setup`. This process entry
-    point owns the CLI sink so command output still reaches stderr.
+    point retires Loguru's preconfigured stderr handler and installs Bedrock's
+    sink so ``LOG_*`` controls CLI stderr. Host handlers are kept.
     """
-    configure_logging()
+    configure_cli_logging()
     bedrock_cli()
 
 

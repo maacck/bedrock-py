@@ -81,6 +81,89 @@ _CLI_SCRIPT = textwrap.dedent(
     """
 )
 
+_CLI_INIT_SCRIPT = textwrap.dedent(
+    """
+    from bedrock.logging import configure_cli_logging
+    from loguru import logger
+
+    configure_cli_logging()
+    logger.debug("debug-marker")
+    logger.info("info-marker")
+    logger.error("error-marker")
+    logger.complete()
+    """
+)
+
+_CLI_KEEPS_HOST_SCRIPT = textwrap.dedent(
+    """
+    from loguru import logger
+
+    received = []
+
+    def _sink(message):
+        received.append(message.record["message"])
+
+    host_id = logger.add(_sink)
+    from bedrock.logging import configure_cli_logging
+
+    configure_cli_logging()
+    if host_id not in logger._core.handlers:
+        raise SystemExit(f"host sink removed: {list(logger._core.handlers)}")
+    if 0 in logger._core.handlers:
+        raise SystemExit(f"default sink still installed: {list(logger._core.handlers)}")
+    logger.info("host-marker")
+    logger.complete()
+    if "host-marker" not in received:
+        raise SystemExit(f"host sink missed record: {received!r}")
+    """
+)
+
+_LIBRARY_KEEPS_DEFAULT_AND_HOST_SCRIPT = textwrap.dedent(
+    """
+    from loguru import logger
+
+    received = []
+
+    def _sink(message):
+        received.append(message.record["message"])
+
+    host_id = logger.add(_sink)
+    if 0 not in logger._core.handlers:
+        raise SystemExit("expected Loguru's preconfigured handler")
+    from bedrock.logging import configure_logging
+
+    configure_logging()
+    if host_id not in logger._core.handlers or 0 not in logger._core.handlers:
+        raise SystemExit(f"library configure removed a sink: {list(logger._core.handlers)}")
+    logger.info("host-marker")
+    logger.complete()
+    if "host-marker" not in received:
+        raise SystemExit(f"host sink missed record: {received!r}")
+    """
+)
+
+_NO_AUTOINIT_HOST_SCRIPT = textwrap.dedent(
+    """
+    from loguru import logger
+
+    received = []
+
+    def _sink(message):
+        received.append(message.record["message"])
+
+    host_id = logger.add(_sink)
+    if host_id != 0:
+        raise SystemExit(f"expected the host sink to be handler 0, got {host_id}")
+    from bedrock.logging import configure_cli_logging
+
+    configure_cli_logging()
+    logger.error("host-marker")
+    logger.complete()
+    if host_id not in logger._core.handlers or "host-marker" not in received:
+        raise SystemExit(f"handlers={list(logger._core.handlers)} received={received!r}")
+    """
+)
+
 
 def _run_isolated(code: str, *, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     """Run ``code`` in a fresh interpreter so import side effects are observable."""
@@ -192,4 +275,35 @@ class TestCliEntrypoint:
             },
         )
         _assert_success(result)
+        assert result.stderr.count("Cache backend configured: memory") == 1
         assert "BEDROCK_CLI_LOG|Cache backend configured: memory" in result.stderr
+
+    def test_cli_init_applies_level_and_does_not_duplicate(self) -> None:
+        """CLI init drops the default sink so ``LOG_*`` controls stderr once."""
+        result = _run_isolated(
+            _CLI_INIT_SCRIPT,
+            env={
+                "LOG_LEVEL": "ERROR",
+                "LOG_FORMAT": "BEDROCK_CLI_LOG|{message}",
+                "LOG_SERIALIZE": "true",
+            },
+        )
+        _assert_success(result)
+        stderr = result.stderr
+        assert "info-marker" not in stderr
+        assert "debug-marker" not in stderr
+        error_lines = [line for line in stderr.splitlines() if "error-marker" in line]
+        assert error_lines == [line for line in error_lines if line.lstrip().startswith("{")]
+        assert len(error_lines) == 1
+
+    def test_cli_init_keeps_host_sink_and_removes_default(self) -> None:
+        """CLI init removes only Loguru's preconfigured stderr handler."""
+        _assert_success(_run_isolated(_CLI_KEEPS_HOST_SCRIPT))
+
+    def test_library_configure_keeps_default_and_host_sinks(self) -> None:
+        """``configure_logging()`` keeps the preconfigured sink and a host sink."""
+        _assert_success(_run_isolated(_LIBRARY_KEEPS_DEFAULT_AND_HOST_SCRIPT))
+
+    def test_cli_init_keeps_host_sink_when_autoinit_is_disabled(self) -> None:
+        """A host sink installed as handler 0 is not treated as Loguru's default."""
+        _assert_success(_run_isolated(_NO_AUTOINIT_HOST_SCRIPT, env={"LOGURU_AUTOINIT": "0"}))
