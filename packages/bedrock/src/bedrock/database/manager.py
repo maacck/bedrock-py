@@ -144,6 +144,16 @@ class DatabaseManager:
         self._forget_config_if_idle()
 
     @property
+    def has_async_engine(self) -> bool:
+        """Return whether an async engine has been built and not yet disposed.
+
+        Reading this never builds an engine, unlike :attr:`aengine`. Top-level lifecycle shutdown uses it to
+        decide whether :meth:`aclose` has anything to release.
+        """
+
+        return self._async_engine is not None
+
+    @property
     def engine(self) -> Engine:
         """Return the configured SQLAlchemy engine."""
 

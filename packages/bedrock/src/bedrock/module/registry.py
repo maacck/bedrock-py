@@ -33,8 +33,8 @@ from .exc import (
 from .manifest import build_app_config
 from .signals import module_loaded, module_ready, module_shutdown, registry_ready, registry_shutdown
 
-Finalizer = tuple[str, Effect]
-"""A named cleanup step run after every module hook; see ``ModuleRegistry._shutdown_with``."""
+Finalizer = tuple[str, str, Effect]
+"""A cleanup step as ``(owner, phase, effect)``, run after every module hook; see ``ModuleRegistry._shutdown_with``."""
 
 _ASYNC_ENTRYPOINT_HINT = {
     "install": "await registry.ainstall(...)",
@@ -382,6 +382,14 @@ class ModuleRegistry:
         """
         await self._run_async("shutdown", lambda: self._shutdown_with(None))
 
+    def _shutdown_with_cleanups(self, finalizers: Callable[[], list[Finalizer]]) -> None:
+        """Sync shutdown followed by process-level cleanup steps; used by ``bedrock.lifecycle.shutdown``."""
+        self._run_sync("shutdown", lambda: self._shutdown_with(finalizers))
+
+    async def _ashutdown_with_cleanups(self, finalizers: Callable[[], list[Finalizer]]) -> None:
+        """Async shutdown followed by process-level cleanup steps; used by ``bedrock.lifecycle.ashutdown``."""
+        await self._run_async("shutdown", lambda: self._shutdown_with(finalizers))
+
     # ------------------------------------------------------------------
     # Operation plumbing (shared by the sync and async entrypoints)
     # ------------------------------------------------------------------
@@ -591,11 +599,11 @@ class ModuleRegistry:
 
         step_failures: list[ModuleFailure] = []
         if finalizers is not None:
-            for phase, effect in finalizers():
+            for owner, phase, effect in finalizers():
                 try:
                     yield effect
                 except Exception as exc:
-                    step_failures.append(ModuleFailure(module="bedrock", phase=phase, error=exc))
+                    step_failures.append(ModuleFailure(module=owner, phase=phase, error=exc))
 
         if step_failures:
             if isinstance(error, ModuleLifecycleError) and error.failures:

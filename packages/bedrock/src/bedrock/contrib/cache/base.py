@@ -19,7 +19,13 @@ class CacheBackend(Protocol):
     must explicitly subclass this protocol.
 
     Clients are created at ``__init__`` time.
+
+    ``close()`` releases the synchronous client and ``aclose()`` the asynchronous one. A backend that holds
+    no asynchronous resource sets ``holds_async_resources = False`` so shutdown does not need to await it;
+    the default is ``True``.
     """
+
+    holds_async_resources: bool = True
 
     @property
     def settings(self) -> BaseSettings: ...
