@@ -98,7 +98,12 @@ class ModuleRegistry:
 
     @property
     def ready(self) -> bool:
-        """Return whether the registry has been fully readied."""
+        """Return whether readiness has been announced for the registry.
+
+        This stays ``True`` when a module is installed after readiness; that module remains
+        ``LOADED`` until ``mark_ready()`` runs again. It does not mean every installed module
+        is ready, so check each module's ``lifecycle_state`` when that matters.
+        """
         return self._ready
 
     def get(self, name: str) -> AppConfig:

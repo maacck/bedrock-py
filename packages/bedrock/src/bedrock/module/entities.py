@@ -6,7 +6,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any
 
-from pydantic import ConfigDict, Field, PrivateAttr, computed_field
+from pydantic import ConfigDict, Field, PrivateAttr, computed_field, model_validator
 from typer import Typer
 
 from ..constants import StrEnum
@@ -69,7 +69,7 @@ class AppConfig(BedrockEntity):
             transitions. Assigning to it raises ``AttributeError``.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(validate_assignment=True)
 
     name: str
     manifest: ModuleManifest
@@ -78,6 +78,16 @@ class AppConfig(BedrockEntity):
     bootstrap_module: ModuleType | None = None
     models_module: ModuleType | None = None
     _lifecycle_state: ModuleLifecycleState = PrivateAttr(default=ModuleLifecycleState.LOADING)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_lifecycle_state_input(cls, data: Any) -> Any:
+        """Refuse an initial ``lifecycle_state`` so only ``transition_to`` can set it; other input is untouched."""
+        if isinstance(data, dict) and "lifecycle_state" in data:
+            raise ValueError(
+                "lifecycle_state is read-only; a module starts as 'loading' and changes via transition_to()."
+            )
+        return data
 
     @computed_field  # type: ignore[prop-decorator]
     @property

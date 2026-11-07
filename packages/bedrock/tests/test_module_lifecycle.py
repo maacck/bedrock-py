@@ -18,6 +18,7 @@ from bedrock.module import (
     build_app_config,
 )
 from bedrock.module.signals import module_loaded, module_ready, module_shutdown, registry_ready, registry_shutdown
+from pydantic import ValidationError
 
 from tests.helpers import make_fake_module
 
@@ -650,19 +651,65 @@ class TestLifecycleStateIsReadOnly:
 
         assert lifecycle_log == ["on_shutdown:b", "on_shutdown:a"]
 
-    def test_state_is_not_a_constructor_argument(self, fake_package: Path) -> None:
+    def test_state_is_rejected_as_a_constructor_argument(self, fake_package: Path) -> None:
         _make_chain(fake_package, "ctor")
-        app = build_app_config("ctor")
+        template = build_app_config("ctor")
+        fields = {name: getattr(template, name) for name in AppConfig.model_fields}
 
-        with pytest.raises(ValueError, match="lifecycle_state"):
-            AppConfig(**{**dict(app), "lifecycle_state": ModuleLifecycleState.READY})
+        with pytest.raises(ValidationError, match="lifecycle_state"):
+            AppConfig(**fields, lifecycle_state=ModuleLifecycleState.READY)
+        with pytest.raises(ValidationError, match="lifecycle_state"):
+            AppConfig.model_validate({**fields, "lifecycle_state": "ready"})
 
+        assert template.lifecycle_state is ModuleLifecycleState.LOADING
+
+    def test_state_still_appears_in_the_repr_and_dump(self, fake_package: Path) -> None:
+        _make_chain(fake_package, "shown")
+        app = build_app_config("shown")
+
+        assert "lifecycle_state=" in repr(app)
+        assert app.model_dump()["lifecycle_state"] is ModuleLifecycleState.LOADING
+
+    def test_a_copy_keeps_the_state_it_was_copied_in(self, fake_package: Path) -> None:
+        _make_chain(fake_package, "copied")
+        app = _app_in_state("copied", ModuleLifecycleState.READY)
+
+        assert app.model_copy().lifecycle_state is ModuleLifecycleState.READY
+
+
+class TestAppConfigKeepsItsOtherModelSemantics:
+    """Making the state read-only must not change how every other ``AppConfig`` field behaves."""
+
+    def test_unrelated_unknown_keyword_arguments_are_still_ignored(self, fake_package: Path) -> None:
+        _make_chain(fake_package, "extras")
+        template = build_app_config("extras")
+        fields = {name: getattr(template, name) for name in AppConfig.model_fields}
+
+        app = AppConfig(**fields, not_a_field="ignored")
+
+        assert not hasattr(app, "not_a_field")
         assert app.lifecycle_state is ModuleLifecycleState.LOADING
 
-    def test_state_still_appears_in_the_repr(self, fake_package: Path) -> None:
-        _make_chain(fake_package, "shown")
+    def test_assignment_to_other_fields_is_still_validated_and_coerced(self, fake_package: Path) -> None:
+        _make_chain(fake_package, "validated")
+        app = build_app_config("validated")
 
-        assert "lifecycle_state=" in repr(build_app_config("shown"))
+        app.package_dir = str(fake_package)  # type: ignore[assignment]
+        assert app.package_dir == fake_package
+        assert isinstance(app.package_dir, Path)
+
+        with pytest.raises(ValidationError, match="name"):
+            app.name = 5  # type: ignore[assignment]
+        with pytest.raises(ValidationError, match="bootstrap_module"):
+            app.bootstrap_module = 1  # type: ignore[assignment]
+        assert app.name == "validated"
+
+    def test_assigning_an_undeclared_attribute_still_raises_a_validation_error(self, fake_package: Path) -> None:
+        _make_chain(fake_package, "undeclared")
+        app = build_app_config("undeclared")
+
+        with pytest.raises(ValidationError, match="not_a_field"):
+            app.not_a_field = 1  # type: ignore[attr-defined]
 
 
 class TestFailureAttribution:
@@ -998,6 +1045,105 @@ class TestInstallRejectsLifecycleCallbacks:
         ]
 
 
+_CATCHING_OUTER = """
+import builtins
+
+from bedrock.module import ModuleLifecycleError
+
+
+def on_load(*, registry):
+    builtins._lifecycle_calls.append("on_load:outer")
+    try:
+        registry.install("bad_inner")
+    except ModuleLifecycleError:
+        builtins._lifecycle_calls.append("nested_install_failed")
+    builtins._lifecycle_calls.append(f"installed_after_nested_failure:{registry.list_installed()}")
+    try:
+        registry.shutdown()
+    except ModuleLifecycleError as exc:
+        builtins._lifecycle_calls.append(f"shutdown_rejected:{'install() is running' in str(exc)}")
+        if PROPAGATE:
+            raise
+"""
+
+
+class TestNestedInstallFailureKeepsTheOuterGuard:
+    """A failed nested install is rolled back alone and leaves the outer installation guarded."""
+
+    def _make_outer(self, fake_package: Path, *, propagate: bool) -> None:
+        _make_chain(fake_package, "dep")
+        _make_chain(fake_package, "bad_inner")
+        make_fake_module(
+            fake_package,
+            "outer",
+            manifest={"title": "outer", "version": "1", "depends_on": ["dep"]},
+            bootstrap=_CATCHING_OUTER.replace("PROPAGATE", repr(propagate)),
+        )
+
+    def test_caught_nested_failure_keeps_the_outer_install_and_still_rejects_shutdown(
+        self, fake_package: Path, fail_hooks: set[tuple[str, str]], lifecycle_log: list[str]
+    ) -> None:
+        self._make_outer(fake_package, propagate=False)
+        fail_hooks.add(("on_load", "bad_inner"))
+        registry = ModuleRegistry()
+
+        outer = registry.install("outer")
+
+        assert lifecycle_log == [
+            "on_load:dep",
+            "on_load:outer",
+            "on_load:bad_inner",
+            "nested_install_failed",
+            "installed_after_nested_failure:['dep', 'outer']",
+            "shutdown_rejected:True",
+        ]
+        assert registry.list_installed() == ["dep", "outer"]
+        assert outer.lifecycle_state is ModuleLifecycleState.LOADED
+
+        lifecycle_log.clear()
+        registry.mark_ready()
+        registry.shutdown()
+        assert lifecycle_log == ["ready:dep", "on_shutdown:dep"]
+
+    def test_the_guard_is_released_so_the_registry_is_usable_after_the_outer_install(
+        self, fake_package: Path, fail_hooks: set[tuple[str, str]], lifecycle_log: list[str]
+    ) -> None:
+        self._make_outer(fake_package, propagate=False)
+        _make_chain(fake_package, "later")
+        fail_hooks.add(("on_load", "bad_inner"))
+        registry = ModuleRegistry()
+        registry.install("outer")
+
+        registry.install("later")
+        registry.mark_ready()
+        registry.shutdown()
+
+        assert registry.list_installed() == ["dep", "outer", "later"]
+        assert all(app.lifecycle_state is ModuleLifecycleState.SHUTDOWN for app in registry.all())
+
+    def test_propagated_error_rolls_back_the_outer_install_and_attempts_every_cleanup(
+        self, fake_package: Path, fail_hooks: set[tuple[str, str]], lifecycle_log: list[str]
+    ) -> None:
+        self._make_outer(fake_package, propagate=True)
+        fail_hooks.update({("on_load", "bad_inner"), ("on_shutdown", "dep")})
+        registry = ModuleRegistry()
+
+        with pytest.raises(ModuleStartupRollbackError) as exc_info:
+            registry.install("outer")
+
+        assert [(f.module, f.phase) for f in exc_info.value.failures] == [("outer", "on_load"), ("dep", "on_shutdown")]
+        assert "shutdown_rejected:True" in lifecycle_log
+        assert lifecycle_log[-1] == "on_shutdown:dep"
+        assert registry.list_installed() == []
+
+        fail_hooks.clear()
+        lifecycle_log.clear()
+        registry.install("dep")
+        registry.mark_ready()
+        registry.shutdown()
+        assert lifecycle_log == ["on_load:dep", "ready:dep", "on_shutdown:dep"]
+
+
 class TestInstallDuringReadinessOrShutdown:
     """A module cannot be introduced while ``mark_ready()`` or ``shutdown()`` is running."""
 
@@ -1047,9 +1193,14 @@ class TestInstallDuringReadinessOrShutdown:
         registry.populate(["a"])
 
         late = registry.install("late")
+
+        # ``registry.ready`` means readiness was announced, not that every installed module is ready.
+        assert registry.ready is True
         assert late.lifecycle_state is ModuleLifecycleState.LOADED
+
         registry.mark_ready()
 
+        assert registry.ready is True
         assert late.lifecycle_state is ModuleLifecycleState.READY
 
     def test_installing_an_already_installed_module_from_a_ready_hook_is_a_no_op(
