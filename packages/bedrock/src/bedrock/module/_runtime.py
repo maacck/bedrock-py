@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import weakref
 from collections.abc import Awaitable, Callable, Generator, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
@@ -83,17 +84,38 @@ async def _await[T](awaitable: Awaitable[T]) -> T:
     return await awaitable
 
 
+def _close_loop(loop: asyncio.AbstractEventLoop) -> None:
+    """Cancel leftover tasks, finalize async generators and the default executor, then close ``loop``."""
+    if loop.is_closed():
+        return
+    if loop_is_running():
+        loop.close()
+        return
+    try:
+        leftover = asyncio.all_tasks(loop)
+        for task in leftover:
+            task.cancel()
+        if leftover:
+            loop.run_until_complete(asyncio.gather(*leftover, return_exceptions=True))
+        loop.run_until_complete(loop.shutdown_asyncgens())
+        loop.run_until_complete(loop.shutdown_default_executor())
+    finally:
+        loop.close()
+
+
 class LoopAdapter:
     """Persistent event loop that lets synchronous entrypoints run asynchronous hooks.
 
     One adapter belongs to one registry. The loop is created when the first awaitable has to run and stays open
     for as long as the registry has a module that has not shut down, so an async client opened by a startup hook
     is closed by the shutdown hook on the same loop. ``asyncio.run`` per call would close the loop between hooks
-    and strand such clients on a closed loop.
+    and strand such clients on a closed loop. A registry that is dropped without being shut down closes its loop
+    when the adapter is garbage collected.
     """
 
     def __init__(self) -> None:
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._finalizer: weakref.finalize | None = None
 
     @property
     def is_open(self) -> bool:
@@ -112,26 +134,20 @@ class LoopAdapter:
         loop = self._loop
         if loop is None or loop.is_closed():
             loop = self._loop = asyncio.new_event_loop()
+            self._finalizer = weakref.finalize(self, _close_loop, loop)
         return loop.run_until_complete(_await(awaitable))
 
     def close(self) -> None:
-        """Cancel leftover tasks, finalize async generators and the default executor, then close the loop.
+        """Close the adapter loop; see :func:`_close_loop`.
 
         Must not be called from a thread that is running another event loop.
         """
         loop, self._loop = self._loop, None
-        if loop is None or loop.is_closed():
-            return
-        try:
-            leftover = asyncio.all_tasks(loop)
-            for task in leftover:
-                task.cancel()
-            if leftover:
-                loop.run_until_complete(asyncio.gather(*leftover, return_exceptions=True))
-            loop.run_until_complete(loop.shutdown_asyncgens())
-            loop.run_until_complete(loop.shutdown_default_executor())
-        finally:
-            loop.close()
+        finalizer, self._finalizer = self._finalizer, None
+        if finalizer is not None:
+            finalizer.detach()
+        if loop is not None:
+            _close_loop(loop)
 
 
 @dataclass(eq=False)

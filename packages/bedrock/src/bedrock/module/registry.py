@@ -561,6 +561,8 @@ class ModuleRegistry:
                 continue
             try:
                 yield HookEffect(app, "ready")
+            except ModuleAsyncRequiredError:
+                raise
             except ModuleLifecycleError as exc:
                 error = self._aggregate_error(
                     "Readiness failed", [ModuleFailure(module=app.name, phase="ready", error=exc)]
@@ -790,13 +792,17 @@ class ModuleRegistry:
         Args:
             summary: Human-readable lead sentence.
             failures: Failures to aggregate, in the order they occurred.
-            error_type: Concrete error class to build.
+            error_type: Concrete error class to build. Failures that all need an async entrypoint produce
+                ``ModuleAsyncRequiredError`` instead of the default.
 
         Returns:
             The aggregate error. It always has ``failures`` set, and its ``__cause__``
             is always an ``ExceptionGroup`` holding the error of every failure, in order.
             Each hook failure error chains to the exception the module's own code raised.
         """
+        if error_type is ModuleLifecycleError and failures:
+            if all(isinstance(failure.error, ModuleAsyncRequiredError) for failure in failures):
+                error_type = ModuleAsyncRequiredError
         details = "; ".join(f"{failure.error}" for failure in failures)
         error = error_type(f"{summary}: {details}", failures=tuple(failures))
         error.__cause__ = ExceptionGroup(
