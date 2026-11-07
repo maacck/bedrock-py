@@ -425,21 +425,7 @@ await order_placed.asend(app, order_id="ORD-001")
 
 ## Signals vs Hooks
 
-Bedrock offers two distinct mechanisms for cross-module communication:
-
-| Aspect | Signals (`bedrock.signal`) | Hooks (`bedrock.hooks`) |
-|--------|---------------------------|------------------------|
-| **Pattern** | Notification (fire-and-forget) | Call/response (returns values) |
-| **Return values** | Returned as `(receiver, result)` pairs, usually ignored | Collected and returned to caller |
-| **Ordering** | Unspecified (set-based) | Priority-sorted (lower runs first) |
-| **Short-circuit** | No | `firstresult=True` stops after first non-None result |
-| **Registration** | `signal.connect(receiver)` | `@hookimpl` decorator or `ns.impl()` |
-| **Dispatch** | `signal.send()` / `signal.asend()` | `hooks.call(fqn)` / `hooks.acall(fqn)` |
-| **Best for** | Lifecycle events, loose coupling | Extension points, middleware chains |
-
-**Use signals when** you want to notify listeners about something that happened, and you don't care about return values. Example: "a user was created, update your cache."
-
-**Use hooks when** you want to define an extension point where implementations contribute behavior or return values. Example: "authenticate this request, first valid result wins."
+See `SKILL.md` → "Choosing a Mechanism" for the full decision table (direct call, DI, `ClassRegistry`, hooks, signals) and failure semantics. The contrast in code:
 
 ```python
 # SIGNAL: notification only

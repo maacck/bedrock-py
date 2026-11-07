@@ -9,12 +9,13 @@ Reference for Bedrock's structured hook system in `bedrock.hooks`.
 3. [Declaring Hook Specs](#declaring-hook-specs)
 4. [Registering Implementations](#registering-implementations)
 5. [Calling Hooks](#calling-hooks)
-6. [Scanning Classes and Modules](#scanning-classes-and-modules)
-7. [Using Hooks in Modules](#using-hooks-in-modules)
-8. [Validation and Introspection](#validation-and-introspection)
-9. [Signals vs Hooks](#signals-vs-hooks)
-10. [Testing Utilities](#testing-utilities)
-11. [Anti-Patterns](#anti-patterns)
+6. [Extension Points That Must All Succeed](#extension-points-that-must-all-succeed)
+7. [Scanning Classes and Modules](#scanning-classes-and-modules)
+8. [Using Hooks in Modules](#using-hooks-in-modules)
+9. [Validation and Introspection](#validation-and-introspection)
+10. [Signals vs Hooks](#signals-vs-hooks)
+11. [Testing Utilities](#testing-utilities)
+12. [Anti-Patterns](#anti-patterns)
 
 ---
 
@@ -157,6 +158,64 @@ results = auth_hooks.call_robust("get_permissions", user_id="user-1")
 
 ---
 
+## Extension Points That Must All Succeed
+
+Hooks dispatch in priority order but provide no transaction and no error aggregation. Pick the guarantee you need:
+
+- Keep `firstresult=False` (the default); `firstresult=True` stops at the first non-`None` result.
+- Report failure by raising a `BedrockExc` subclass. Return values are collected, not interpreted: `return False` is not a failure.
+
+### Abort and roll back database changes
+
+```python
+# orders/hooks.py: the owning module declares the spec
+from bedrock.hooks import HookNamespace
+
+order_hooks = HookNamespace("orders")
+
+
+@order_hooks.spec
+def before_order_placed(order): ...
+
+
+# orders/service.py
+from bedrock.database import db
+
+from .hooks import order_hooks
+
+
+def place_order(order):
+    with db.session_scope():  # commits on success, rolls back on any exception
+        order_hooks.call("before_order_placed", order=order)
+        _save(order)
+```
+
+`call()` stops at the first exception, after earlier implementations have already run. Their writes are undone only if they joined the same transaction: write through `db.session`, never commit, and never use `independent_session()`. `session_scope()` raises `RuntimeError` when a session is already bound to the context; then call the hook inside the caller's existing transaction instead.
+
+### Run every implementation, then report all failures
+
+```python
+from bedrock.exc import BedrockExc
+
+
+class OrderValidationError(BedrockExc):
+    detail = "Order validation failed."
+
+
+results = order_hooks.call_robust("validate_order", order=order)
+errors = [result for _, result in results if isinstance(result, Exception)]
+if errors:
+    raise OrderValidationError() from ExceptionGroup("validate_order failed", errors)
+```
+
+Use this for validation so callers see every problem at once. There is no async robust variant: in async code, `acall()` is fail-fast; to collect all failures, iterate `order_hooks.get_impls("validate_order")` (priority order) with your own `try`/`except`.
+
+### External side effects (HTTP APIs, cache, messages)
+
+Neither hooks nor database transactions can undo them. Split the work: a side-effect-free validation hook that must fully pass (either pattern above), then commit, then perform external effects after commit (for example via a signal or an outbox) and make them idempotent and retryable.
+
+---
+
 ## Scanning Classes and Modules
 
 ### `add_specs_from(obj)`
@@ -266,17 +325,7 @@ Namespace reset removes implementations associated with registered specs; orphan
 
 ## Signals vs Hooks
 
-| Need | Use |
-|------|-----|
-| Fire-and-forget notification | Signals |
-| Ordered call/response extension point | Hooks |
-| Ordered receiver return values | Hooks |
-| Decoupled event broadcast | Signals |
-
-### Rule of thumb
-
-- Use **signals** when the sender should not care about return values
-- Use **hooks** when the caller needs results, ordering, or first-match behavior
+See `SKILL.md` → "Choosing a Mechanism" for the decision table covering direct calls, DI, `ClassRegistry`, hooks, and signals, including failure semantics.
 
 ---
 

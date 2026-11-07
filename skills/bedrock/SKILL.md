@@ -319,7 +319,7 @@ class MyDbSettings(BaseSettings):
 
 ### 10. Signal System
 
-Bedrock provides lifecycle signals for cross-module notification (fire-and-forget):
+Signals announce that something happened; the sender must not depend on who listens or what they return (see section 13):
 
 ```python
 from bedrock.signal import Signal
@@ -389,7 +389,7 @@ request = {"token": "..."}
 results = auth.call("authenticate", request=request)
 ```
 
-**Signals vs Hooks**: Signals notify receivers and also return their results; hooks provide ordered call/response with optional `firstresult` short-circuit.
+**Signals vs Hooks vs DI**: see section 13.
 
 ### 12. Named Implementation Classes
 
@@ -410,6 +410,29 @@ codec = codecs.get("utf8")()
 ```
 
 Register extensions explicitly in `bootstrap.py:on_load`. See `references/class-registry-guide.md` for lazy registration and errors.
+
+### 13. Choosing a Mechanism
+
+Pick the first row that fits:
+
+| Need | Use |
+|------|-----|
+| Call a module already declared in `depends_on` | Direct import of its `service.py`; no mechanism |
+| Share one instance, swap it in tests, or control its lifetime (`SINGLETON` / `SCOPED` / `TRANSIENT`) | DI `container` |
+| Select one implementation **class** by name (backend, provider, codec) | `ClassRegistry` |
+| Owner defines an extension point; other modules contribute behavior; the caller uses results, ordering, or first match | Hooks (`HookNamespace`) |
+| Announce that something happened; the sender must not depend on listeners or their results | Signals |
+
+Failure and execution semantics often decide between hooks and signals:
+
+| | Hooks | Signals |
+|---|-------|---------|
+| Order | Priority (lower runs first) | Unspecified |
+| On first exception | `call()` / `acall()` raise it; later implementations do not run; earlier side effects stay | `send()` / `asend()` raise it; remaining receivers do not run |
+| Run all, collect exceptions | `call_robust()` (sync only) | `send_robust()` / `asend_robust()` |
+| Async | `acall()` (sync implementations run in a thread) | `asend()`; lifecycle signals always use sync `send()` |
+
+**Every implementation must succeed** → hooks with `firstresult=False` (default); implementations signal failure by raising a `BedrockExc` subclass, never by returning `False`. Hooks provide no rollback: see `references/hooks-guide.md` → "Extension Points That Must All Succeed" for fail-fast with DB rollback, collect-all reporting, and external side effects.
 
 ## Anti-Patterns (Avoid These)
 

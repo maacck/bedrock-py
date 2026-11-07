@@ -308,18 +308,7 @@ await user_created.asend(sender, user=new_user)
 
 ## Signals vs Hooks
 
-Bedrock has two cross-module communication mechanisms. Use the right one for the job:
-
-| Aspect | Signals | Hooks |
-|--------|---------|-------|
-| Pattern | Notification (fire-and-forget) | Call/response (returns values) |
-| Return values | Collected by send; callers may ignore them | Collected and returned |
-| Ordering | Unspecified | Priority-sorted (lower runs first) |
-| Short-circuit | No | `firstresult=True` stops after first non-None |
-| Registration | `signal.connect(receiver)` | scanned `@hookimpl` marker or `ns.impl()` |
-| Best for | Lifecycle events, loose coupling | Extension points, middleware, authentication |
-
-**Rule of thumb**: If you need a return value to drive logic, use hooks. If you just want to notify listeners, use signals.
+See `SKILL.md` → "Choosing a Mechanism" for when to use a direct call, DI, `ClassRegistry`, hooks, or signals, including failure semantics. For extension points where every implementation must succeed, see `references/hooks-guide.md` → "Extension Points That Must All Succeed".
 
 ---
 

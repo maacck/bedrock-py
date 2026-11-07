@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   skills, guides, and getting-started pages realigned with the v0.3.0 lifecycle, registry, cache, storage,
   hooks, database, and CLI APIs (e.g. `bedrock run --app <app> <module> <command>`, `BEDROCK_APP`,
   `bedrock --help` instead of the unsupported `bedrock -v`).
+- Agent skills: one "Choosing a Mechanism" table (direct call, DI, `ClassRegistry`, hooks, signals) with
+  failure/async semantics replaces four diverging comparisons; the hooks guide documents extension points
+  where every implementation must succeed (fail-fast with DB rollback, collect-all, external side effects).
 
 ## [0.3.0] - 2026-11-07
 
