@@ -143,8 +143,8 @@ db.init(url="postgresql+psycopg2://admin:secret@localhost:5432/myapp")
 | `db.asession` | `property → AsyncSession` | 当前上下文局部的异步 session，使用与 `db.session` 不同的上下文变量。 |
 | `db.asession_scope()` | `async context manager → AsyncSession` | 异步事务作用域，提交、回滚和禁止嵌套的规则与 `session_scope()` 相同。 |
 | `db.aindependent_session()` | `async context manager → AsyncSession` | 不绑定 `db.asession` 的异步事务。 |
-| `db.close()` | `close()` | 释放本管理器持有的 engine。可以重复调用。之后可以再次 `init()`。 |
-| `db.aclose()` | `async aclose()` | 在异步代码中释放 engine。可以重复调用，之后可以再次 `init()`。 |
+| `db.close()` | `close()` | 释放同步 engine。已创建的异步 engine 仍可使用。可以重复调用。之后可以再次 `init()`。 |
+| `db.aclose()` | `async aclose()` | 释放异步 engine。同步 engine 仍可使用。可以重复调用。 |
 
 ### 错误处理
 
@@ -254,11 +254,14 @@ async with db.asession_scope() as session:
     session.add(Product(name="Widget"))
 
 await db.aclose()
+db.close()
 ```
 
 ### 关闭 Engine
 
-`db.close()` 和 `db.aclose()` 会释放同步 engine，以及已经创建的异步 engine。重复调用不会产生额外效果。返回之后可以再次调用 `db.init()`。这两个方法不会关闭模块注册表。持有进程生命周期的调用方应在关闭流程中调用它们。
+同步 engine 调用 `db.close()`，异步 engine 调用 `await db.aclose()`。两边都创建过时，两个都要调用。对同一侧重复调用不会再做额外释放。`close()` 之后，同步访问会抛出 `DatabaseNotConfiguredError`，直到再次 `db.init()`；已经创建的异步 engine 仍可使用。`aclose()` 之后，同步 engine 仍可使用；若同步配置还在，下一次异步访问会重新构建异步 engine。这两个方法不会关闭模块注册表。持有进程生命周期的调用方应在关闭流程中调用它们。
+
+`db.init()` 会释放上一个同步 engine。已经打开过连接的异步 engine 不会在这里同步释放：那种关闭发生在事件循环之外，会以 `MissingGreenlet` 失败。需要关闭该异步 engine 时，先 `await db.aclose()` 再调用 `db.init()`。尚未打开连接的异步 engine 会在 `init()` 中释放。
 
 ### 绑定外部 Session
 
@@ -610,7 +613,7 @@ bedrock/database/
 
 ## 反模式
 
-**避免在工作进行中重新初始化 `db`。** `db.init()` 支持替换：先构建新 engine，再清理当前上下文的 session 并释放旧 engine。替换前其他上下文必须自行管理其 session。
+**避免在工作进行中重新初始化 `db`。** `db.init()` 支持替换：先构建新的同步 engine，再清理当前上下文的同步 session 并释放上一个同步 engine。如果异步 engine 已经打开过连接，先 `await db.aclose()` 再 `init()`，让这些连接在事件循环上关闭。替换前其他上下文必须自行管理其 session。
 
 **不要在初始化前访问 `db.session`。** 这会抛出 `DatabaseNotConfiguredError`。务必先调用 `db.init()`。
 

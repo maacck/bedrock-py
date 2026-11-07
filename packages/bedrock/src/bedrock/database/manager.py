@@ -19,12 +19,43 @@ class DatabaseNotConfiguredError(ImproperlyConfigured):
     detail: str = "Database is not configured. Call db.init() first."
 
 
+def _async_engine_has_connections(engine: AsyncEngine) -> bool:
+    """Return whether *engine* has opened a pooled connection.
+
+    Closing those connections with ``sync_engine.dispose()`` runs driver IO
+    outside the event loop and logs ``MissingGreenlet``. Queue-style pools
+    report checked-in and checked-out connections. SQLite ``StaticPool`` keeps
+    its single connection in instance state once that connection exists.
+    """
+
+    pool = engine.sync_engine.pool
+    checked_in = getattr(pool, "checkedin", None)
+    checked_out = getattr(pool, "checkedout", None)
+    if callable(checked_in) and callable(checked_out):
+        return checked_in() > 0 or checked_out() > 0
+    return "connection" in pool.__dict__
+
+
+def _discard_async_engine(engine: AsyncEngine) -> None:
+    """Drop *engine* from a synchronous caller.
+
+    An engine that has not opened a connection is disposed here, because that
+    dispose performs no driver IO. An engine that has been used is left for
+    ``await aclose()``; disposing it synchronously does not close the
+    connections.
+    """
+
+    if not _async_engine_has_connections(engine):
+        engine.sync_engine.dispose()
+
+
 class DatabaseManager:
     """Own database initialization state and expose lazy session access.
 
-    ``close()`` and ``aclose()`` dispose engines this manager created. They do
-    not shut down the module registry; process shutdown wiring belongs to the
-    caller that owns the process lifetime.
+    ``close()`` disposes the synchronous engine. ``aclose()`` disposes the
+    asynchronous engine. Call both when both were built. Neither method shuts
+    down the module registry; process shutdown wiring belongs to the caller
+    that owns the process lifetime.
     """
 
     def __init__(self) -> None:
@@ -36,12 +67,19 @@ class DatabaseManager:
         self._database_url: str | None = None
 
     def init(self, url: str | None = None, settings: DbSettings | None = None) -> None:
-        """Initialize or safely replace the database engine and session factory.
+        """Initialize or safely replace the synchronous engine and session factory.
 
         Replacement is supported. The new engine is constructed before the
-        existing engine is disposed, so a failed initialization leaves the
-        current database configuration usable. A previously built async engine
-        is disposed and built again on the next async access.
+        existing synchronous engine is disposed, so a failed initialization
+        leaves the current database configuration usable.
+
+        A previous async engine that has already opened a connection is not
+        disposed here. ``sync_engine.dispose()`` closes those connections
+        outside the event loop and fails with ``MissingGreenlet``. Call
+        ``await aclose()`` before ``init()`` when that engine should be closed.
+        An async engine that has not opened a connection is disposed, because
+        that close does no driver IO. The next async access builds a new engine
+        from the replacement configuration.
         """
 
         resolved_settings = settings or DbSettings()
@@ -62,7 +100,7 @@ class DatabaseManager:
         if previous_engine is not None:
             previous_engine.dispose()
         if previous_async_engine is not None:
-            previous_async_engine.sync_engine.dispose()
+            _discard_async_engine(previous_async_engine)
 
         self._engine = engine
         self._session_factory = SessionFactory(session_local)
@@ -72,33 +110,38 @@ class DatabaseManager:
         self._database_url = resolved_url
 
     def close(self) -> None:
-        """Dispose owned engines and drop configuration.
+        """Dispose the synchronous engine and drop synchronous session state.
 
-        The call is safe to repeat. Afterwards :meth:`init` can configure the
-        manager again. Async engines are disposed through their synchronous
-        engine so this method does not need a running event loop.
+        An async engine that was already built stays open and usable. Call
+        :meth:`aclose` to dispose it. When both engines were built, call both
+        methods. Synchronous access raises :class:`DatabaseNotConfiguredError`
+        until :meth:`init`. The call is safe to repeat.
         """
 
-        self._close_sessions()
+        if self._session_factory is not None:
+            self._session_factory.clear_session()
         if self._engine is not None:
             self._engine.dispose()
-        if self._async_engine is not None:
-            self._async_engine.sync_engine.dispose()
-        self._clear_state()
+        self._engine = None
+        self._session_factory = None
+        self._forget_config_if_idle()
 
     async def aclose(self) -> None:
-        """Dispose owned engines from an async caller and drop configuration.
+        """Dispose the asynchronous engine and drop asynchronous session state.
 
-        The call is safe to repeat. Afterwards :meth:`init` can configure the
-        manager again.
+        The synchronous engine stays open and usable. Call :meth:`close` to
+        dispose it. When both engines were built, call both methods. The next
+        async access builds a new async engine when synchronous configuration
+        is still in place. The call is safe to repeat.
         """
 
-        await self._aclose_sessions()
-        if self._engine is not None:
-            self._engine.dispose()
+        if self._async_session_factory is not None:
+            await self._async_session_factory.aclear_session()
         if self._async_engine is not None:
             await self._async_engine.dispose()
-        self._clear_state()
+        self._async_engine = None
+        self._async_session_factory = None
+        self._forget_config_if_idle()
 
     @property
     def engine(self) -> Engine:
@@ -110,7 +153,7 @@ class DatabaseManager:
 
     @property
     def aengine(self) -> AsyncEngine:
-        """Return the async engine built from the configured settings."""
+        """Return the async engine for the URL resolved by :meth:`init`."""
 
         self._ensure_async()
         if self._async_engine is None:
@@ -207,42 +250,34 @@ class DatabaseManager:
             yield session
 
     def _ensure_async(self) -> AsyncSessionFactory:
-        """Build the async engine on first use and return its session factory."""
+        """Return the async session factory, building the engine on first use.
 
+        An engine left in place by :meth:`close` is returned as-is. Building a
+        new one still requires :meth:`init` so the synchronous configuration
+        and URL are known.
+        """
+
+        if self._async_engine is not None and self._async_session_factory is not None:
+            return self._async_session_factory
         if self._settings is None or self._session_factory is None or self._database_url is None:
             raise DatabaseNotConfiguredError(
                 "Database is not initialized. Call db.init(...) before using async sessions."
             )
-        if self._async_session_factory is None or self._async_engine is None:
-            self._async_engine = build_async_engine(self._settings, database_url=self._database_url)
-            self._async_session_factory = AsyncSessionFactory(build_async_session_local(self._async_engine))
+        self._async_engine = build_async_engine(self._settings, database_url=self._database_url)
+        self._async_session_factory = AsyncSessionFactory(build_async_session_local(self._async_engine))
         return self._async_session_factory
 
-    def _close_sessions(self) -> None:
-        """Close context-local sessions without disposing engines."""
+    def _forget_config_if_idle(self) -> None:
+        """Drop settings once neither engine remains."""
 
-        if self._session_factory is not None:
-            self._session_factory.clear_session()
-        if self._async_session_factory is not None:
-            self._async_session_factory.clear_session()
-
-    async def _aclose_sessions(self) -> None:
-        """Close context-local sessions, awaiting the async session close."""
-
-        if self._session_factory is not None:
-            self._session_factory.clear_session()
-        if self._async_session_factory is not None:
-            await self._async_session_factory.aclear_session()
-
-    def _clear_state(self) -> None:
-        """Forget engines and settings so the manager can be initialized again."""
-
-        self._engine = None
-        self._session_factory = None
-        self._async_engine = None
-        self._async_session_factory = None
-        self._settings = None
-        self._database_url = None
+        if (
+            self._engine is None
+            and self._session_factory is None
+            and self._async_engine is None
+            and self._async_session_factory is None
+        ):
+            self._settings = None
+            self._database_url = None
 
 
 # Public singleton mirroring Flask-SQLAlchemy style usage.

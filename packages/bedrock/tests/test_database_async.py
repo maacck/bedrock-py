@@ -79,6 +79,7 @@ class TestAsyncSessions:
             assert found is not None
         finally:
             await manager.aclose()
+            manager.close()
 
     @pytest.mark.asyncio
     async def test_asession_scope_rolls_back(self, tmp_path: Path) -> None:
@@ -97,6 +98,7 @@ class TestAsyncSessions:
             assert found is None
         finally:
             await manager.aclose()
+            manager.close()
 
     @pytest.mark.asyncio
     async def test_async_contexts_are_isolated_across_tasks(self, tmp_path: Path) -> None:
@@ -117,6 +119,7 @@ class TestAsyncSessions:
             assert seen[0][1] != seen[1][1]
         finally:
             await manager.aclose()
+            manager.close()
 
     @pytest.mark.asyncio
     async def test_async_session_does_not_replace_the_sync_session(self, tmp_path: Path) -> None:
@@ -131,6 +134,7 @@ class TestAsyncSessions:
                     assert sync_session is not async_session
         finally:
             await manager.aclose()
+            manager.close()
 
 
 class TestExplicitInitUrl:
@@ -240,7 +244,7 @@ class TestAsyncDriverErrors:
 
 
 class TestEngineShutdown:
-    """close and aclose dispose owned engines and can be called twice."""
+    """close and aclose each dispose one engine and can be called twice."""
 
     def test_close_is_idempotent_and_reinitializable(self) -> None:
         """close() disposes the sync engine once and leaves init() usable."""
@@ -269,38 +273,72 @@ class TestEngineShutdown:
         manager.close()
 
     @pytest.mark.asyncio
-    async def test_close_disposes_the_async_engine(self, tmp_path: Path) -> None:
-        """The synchronous close path disposes an async engine that was created."""
+    async def test_close_leaves_the_async_engine_usable(self, tmp_path: Path) -> None:
+        """close() disposes only the sync engine and leaves a built async engine open."""
 
         manager = _manager(tmp_path)
+        sync_engine = manager.engine
         async_engine = manager.aengine
-        calls: list[int] = []
-        original = async_engine.sync_engine.dispose
+        async with async_engine.connect() as connection:
+            assert await connection.scalar(select(1)) == 1
 
-        def dispose(*args: object, **kwargs: object) -> None:
-            calls.append(1)
-            original(*args, **kwargs)
+        sync_calls: list[int] = []
+        async_calls: list[int] = []
+        original_sync = sync_engine.dispose
+        original_async = async_engine.sync_engine.dispose
 
-        async_engine.sync_engine.dispose = dispose  # type: ignore[method-assign]
+        def dispose_sync(*args: object, **kwargs: object) -> None:
+            sync_calls.append(1)
+            original_sync(*args, **kwargs)
+
+        def dispose_async(*args: object, **kwargs: object) -> None:
+            async_calls.append(1)
+            original_async(*args, **kwargs)
+
+        sync_engine.dispose = dispose_sync  # type: ignore[method-assign]
+        async_engine.sync_engine.dispose = dispose_async  # type: ignore[method-assign]
+
         manager.close()
         manager.close()
 
-        assert calls == [1]
+        assert sync_calls == [1]
+        assert async_calls == []
         with pytest.raises(DatabaseNotConfiguredError):
             _ = manager.engine
+        with pytest.raises(DatabaseNotConfiguredError):
+            _ = manager.session
+        assert manager.aengine is async_engine
+        async with manager.aengine.connect() as connection:
+            assert await connection.scalar(select(1)) == 1
+
+        manager.init(settings=_settings(tmp_path))
+        with manager.engine.connect() as connection:
+            assert connection.exec_driver_sql("select 1").scalar() == 1
+        assert async_calls == []
+        await async_engine.dispose()
+        await manager.aclose()
+        manager.close()
 
     @pytest.mark.asyncio
-    async def test_aclose_is_idempotent_and_reinitializable(self, tmp_path: Path) -> None:
-        """aclose() disposes both engines once and allows a later init()."""
+    async def test_aclose_leaves_the_sync_engine_usable(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """aclose() disposes only the async engine and leaves the sync engine open."""
 
         from sqlalchemy.ext.asyncio import AsyncEngine
 
         settings = _settings(tmp_path)
         manager = _manager(tmp_path)
+        sync_engine = manager.engine
         async_engine = manager.aengine
+        async with async_engine.connect() as connection:
+            assert await connection.scalar(select(1)) == 1
+
         sync_calls: list[int] = []
         async_calls: list[int] = []
-        original_sync = manager.engine.dispose
+        original_sync = sync_engine.dispose
         original_async = AsyncEngine.dispose
 
         def dispose_sync(*args: object, **kwargs: object) -> None:
@@ -312,19 +350,70 @@ class TestEngineShutdown:
                 async_calls.append(1)
             await original_async(self, *args, **kwargs)
 
-        manager.engine.dispose = dispose_sync  # type: ignore[method-assign]
-        monkeypatch = pytest.MonkeyPatch()
+        sync_engine.dispose = dispose_sync  # type: ignore[method-assign]
         monkeypatch.setattr(AsyncEngine, "dispose", dispose_async)
-        try:
-            await manager.aclose()
-            await manager.aclose()
-        finally:
-            monkeypatch.undo()
 
-        assert sync_calls == [1]
+        await manager.aclose()
+        await manager.aclose()
+
+        assert sync_calls == []
         assert async_calls == [1]
+        assert manager.engine is sync_engine
+        with manager.engine.connect() as connection:
+            assert connection.exec_driver_sql("select 1").scalar() == 1
+        with manager.session_scope() as session:
+            assert session.get_bind() is sync_engine
 
         manager.init(settings=settings)
         with manager.engine.connect() as connection:
-            assert connection is not None
+            assert connection.exec_driver_sql("select 1").scalar() == 1
+        manager.close()
+
+    @pytest.mark.asyncio
+    async def test_init_does_not_sync_dispose_a_used_async_engine(self, tmp_path: Path) -> None:
+        """init() drops a used async engine without sync_engine.dispose()."""
+
+        manager = _manager(tmp_path)
+        async_engine = manager.aengine
+        async with async_engine.connect() as connection:
+            assert await connection.scalar(select(1)) == 1
+
+        calls: list[int] = []
+        original = async_engine.sync_engine.dispose
+
+        def dispose(*args: object, **kwargs: object) -> None:
+            calls.append(1)
+            original(*args, **kwargs)
+
+        async_engine.sync_engine.dispose = dispose  # type: ignore[method-assign]
+        manager.init(settings=_settings(tmp_path))
+
+        assert calls == []
+        with manager.engine.connect() as connection:
+            assert connection.exec_driver_sql("select 1").scalar() == 1
+        assert manager.aengine is not async_engine
+        async with manager.aengine.connect() as connection:
+            assert await connection.scalar(select(1)) == 1
+        await async_engine.dispose()
+        await manager.aclose()
+        manager.close()
+
+    def test_init_disposes_an_unused_async_engine(self, tmp_path: Path) -> None:
+        """init() may dispose an async engine that has never opened a connection."""
+
+        manager = _manager(tmp_path)
+        async_engine = manager.aengine
+        calls: list[int] = []
+        original = async_engine.sync_engine.dispose
+
+        def dispose(*args: object, **kwargs: object) -> None:
+            calls.append(1)
+            original(*args, **kwargs)
+
+        async_engine.sync_engine.dispose = dispose  # type: ignore[method-assign]
+        manager.init(settings=_settings(tmp_path))
+
+        assert calls == [1]
+        with manager.engine.connect() as connection:
+            assert connection.exec_driver_sql("select 1").scalar() == 1
         manager.close()

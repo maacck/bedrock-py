@@ -43,9 +43,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `db.aindependent_session()` follow the sync session rules and use a separate
   context variable. A missing driver raises `DatabaseConfigurationError` naming the extra.
   The SQLAlchemy asyncio extra (`greenlet`) is now a core dependency.
-- **`db.close()` and `db.aclose()`** dispose engines owned by `DatabaseManager`.
-  Both are safe to call more than once and leave the manager ready for another `init()`.
-  They do not shut down the module registry.
+- **`db.close()` and `db.aclose()`** dispose one side each. `close()` disposes the
+  synchronous engine and leaves an already built async engine usable. `await aclose()`
+  disposes the async engine and leaves the synchronous engine usable. If both were
+  built, call both. Each call is safe to repeat. They do not shut down the module
+  registry. `init()` disposes the previous synchronous engine. It does not
+  synchronously dispose an async engine that has already opened a connection;
+  `await aclose()` before `init()` when that engine should be closed.
 - **Migration lock.** `upgrade` and `downgrade`, including uninstall and `ensure_schema`,
   take a PostgreSQL advisory lock or a MySQL/MariaDB `GET_LOCK`. SQLite stays unlocked
   and must be migrated from one process. `DATABASE_MIGRATION_LOCK_TIMEOUT` (default 30
@@ -60,6 +64,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Async engines use the URL already resolved by `db.init()`, including an explicit
   `url=` argument. Only the DBAPI driver is swapped for `DATABASE_ASYNC_DRIVER`.
   An explicit SQLite path no longer falls back to the default `bedrock.db`.
+- `db.close()` no longer disposes the async engine, and `db.aclose()` no longer
+  disposes the sync engine. `init()` no longer sync-disposes an async engine that
+  has already opened a connection, which failed with `MissingGreenlet`.
 
 ## [0.3.1] - 2026-11-07
 

@@ -143,8 +143,8 @@ The `db` singleton is a `DatabaseManager` instance. It owns the engine, session 
 | `db.asession` | `property → AsyncSession` | Current context-local async session. Separate context variable from `db.session`. |
 | `db.asession_scope()` | `async context manager → AsyncSession` | Async transactional scope with the same commit, rollback, and nesting rules as `session_scope()`. |
 | `db.aindependent_session()` | `async context manager → AsyncSession` | Async transaction that does not bind `db.asession`. |
-| `db.close()` | `close()` | Dispose owned engines. Safe to call twice. `init()` works again afterwards. |
-| `db.aclose()` | `async aclose()` | Dispose owned engines from async code. Safe to call twice and then `init()` again. |
+| `db.close()` | `close()` | Dispose the sync engine. Leaves a built async engine usable. Safe to call twice. `init()` works again afterwards. |
+| `db.aclose()` | `async aclose()` | Dispose the async engine. Leaves the sync engine usable. Safe to call twice. |
 
 ### Error Handling
 
@@ -254,11 +254,14 @@ async with db.asession_scope() as session:
     session.add(Product(name="Widget"))
 
 await db.aclose()
+db.close()
 ```
 
 ### Closing Engines
 
-`db.close()` and `db.aclose()` dispose the sync engine and, when one was created, the async engine. Calling either one again does nothing. After they return, `db.init()` can configure the manager again. These methods do not shut down the module registry. The caller that owns the process lifetime invokes them during shutdown.
+Call `db.close()` for the synchronous engine and `await db.aclose()` for the asynchronous engine. If both were built, call both. Calling either method again does nothing further to that side. After `close()`, synchronous access raises `DatabaseNotConfiguredError` until `db.init()`, while an async engine that was already built still works. After `aclose()`, the synchronous engine still works, and the next async access builds a new async engine when synchronous configuration remains. These methods do not shut down the module registry. The caller that owns the process lifetime invokes them during shutdown.
+
+`db.init()` disposes the previous synchronous engine. It does not synchronously dispose an async engine that has already opened a connection: that close runs outside the event loop and fails with `MissingGreenlet`. Await `db.aclose()` before `db.init()` when that async engine should be closed. An async engine that has not opened a connection is disposed during `init()`.
 
 ### Binding an External Session
 
@@ -610,7 +613,7 @@ bedrock/database/
 
 ## Anti-Patterns
 
-**Avoid reinitializing `db` during active work.** `db.init()` supports replacement: it constructs the new engine first, then clears the current context's session and disposes the old engine. Other contexts must manage their own sessions before replacement.
+**Avoid reinitializing `db` during active work.** `db.init()` supports replacement: it constructs the new synchronous engine first, then clears the current context's synchronous session and disposes the previous synchronous engine. If an async engine has already opened a connection, `await db.aclose()` before `init()` so those connections close on the event loop. Other contexts must manage their own sessions before replacement.
 
 **Don't access `db.session` before initialization.** This raises `DatabaseNotConfiguredError`. Always call `db.init()` first.
 
