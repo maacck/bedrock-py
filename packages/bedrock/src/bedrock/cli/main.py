@@ -1,6 +1,8 @@
 import typer
 from typer import Typer
 
+from bedrock.logging import configure_logging
+
 from .apps import apps
 from .db import db_app
 from .manage import manage_app
@@ -22,7 +24,13 @@ def bedrock_callback(ctx: typer.Context):
         pass
 
 
-def entrypoint():
+def entrypoint() -> None:
+    """Install Bedrock's log sink, then dispatch CLI commands.
+
+    Logging stays out of import and :func:`bedrock.setup`. This process entry
+    point owns the CLI sink so command output still reaches stderr.
+    """
+    configure_logging()
     bedrock_cli()
 
 

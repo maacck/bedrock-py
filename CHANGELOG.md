@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Breaking changes
+
+- **Logging**: importing `bedrock` or `bedrock.logging` no longer configures loguru.
+  `configure_logging()` is not called at import, and `bedrock.setup()` does not install a sink.
+  Sinks registered before the import stay in place. Non-CLI processes that relied on implicit
+  stderr output must call `configure_logging()` from their process entry point. The `bedrock`
+  CLI still calls it before dispatching commands. Repeated calls replace only the sink Bedrock
+  installed; configuration never calls `logger.remove()` without a handler id.
+
+### Added
+
+- `bedrock.logging.LoggingSettings` (prefix `LOG_`) is read when `configure_logging()` runs, so
+  `LOG_LEVEL`, `LOG_FORMAT`, `LOG_FILE`, `LOG_ROTATION`, `LOG_RETENTION`, `LOG_COMPRESSION`, and
+  `LOG_SERIALIZE` set after import are honored.
+
 ## [0.3.1] - 2026-11-07
 
 ### Documentation

@@ -24,6 +24,11 @@ def setup(app: str | None = None) -> None:
     This function is idempotent: if the registry is already ready it returns
     immediately without re-populating.
 
+    It does not configure logging. Importing Bedrock leaves existing loguru
+    sinks in place. A process that wants Bedrock's stderr or ``LOG_FILE`` sink
+    calls :func:`bedrock.logging.configure_logging` itself. The Bedrock CLI
+    does that in its entry point.
+
     Args:
         app: Dotted import path of the root application module to install,
             e.g. ``"myproject.app"``.  When *None* the value is read from
@@ -35,7 +40,9 @@ def setup(app: str | None = None) -> None:
     Example — ASGI entry-point (``myproject/asgi.py``)::
 
         import bedrock
+        from bedrock.logging import configure_logging
 
+        configure_logging()
         bedrock.setup()
 
         from myproject.api import create_app
@@ -45,7 +52,9 @@ def setup(app: str | None = None) -> None:
     Example — Celery entry-point (``myproject/celery.py``)::
 
         import bedrock
+        from bedrock.logging import configure_logging
 
+        configure_logging()
         bedrock.setup()
 
         from celery import Celery

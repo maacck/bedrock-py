@@ -8,6 +8,8 @@ CLI commands for building and managing Bedrock applications.
 uv run bedrock <command> [options]
 ```
 
+The `bedrock` entry point calls `configure_logging()` before it dispatches a command, so CLI log lines still use Bedrock's format. Importing Bedrock from a library process does not do this, and it does not remove sinks registered earlier. Call `configure_logging()` from that process entry point when you want the same sink.
+
 ---
 
 ## bedrock run
