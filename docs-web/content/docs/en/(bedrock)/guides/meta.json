@@ -12,6 +12,7 @@
     "storage",
     "signals",
     "di",
+    "class-registry",
     "hooks"
   ],
   "defaultOpen": true

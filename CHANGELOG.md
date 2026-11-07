@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- `ClassRegistry` now requires `base_class` and uses the base instance type as its generic argument: `ClassRegistry[Base](base_class=Base, lazy_classes=paths)`. Only concrete, explicit subclasses are accepted. Register paths with `register_lazy()` instead of `add()`; `get()` raises typed `BedrockExc` subclasses instead of returning `None` or raising `KeyError`.
+- Duplicate class/backend names now raise `DuplicateRegistrationError`, including repeated registrations of the same implementation. The mutable `instances`, `update`, `remove`, and `all` interfaces and the obsolete `DictManager` loader are removed.
+- Custom Cache and Storage backends must explicitly inherit their respective backend contracts; structural-only implementations must migrate. Configuration errors preserve registry resolution failures in their exception chains.
 - **Module lifecycle**: a failed `install()` / `populate()` no longer leaves modules registered.
   Every module introduced by the failed call is removed (modules installed earlier are kept), so
   code that relied on a module staying installed after its `on_load` raised must now retry
@@ -23,6 +26,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Typed, thread-safe lazy class registration with successful-resolution caching, isolated registries, retained import error causes, and no instance or dependency-injection lifecycle. Direct registration retains class objects, including locally defined classes.
+- Class Registry guide covering explicit extension registration, optional dependency loading, type guarantees, security boundaries, and migration from the previous registry.
 - `ModuleLifecycleState`, `AppConfig.transition_to()` (validated forward transitions), `ModuleFailure`,
   and `ModuleStartupRollbackError`, exported from `bedrock.module`.
 - `ModuleLifecycleError.failures` / `.failed_modules` expose every module failure with its original cause.
@@ -44,6 +49,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every aggregated lifecycle error is an `ExceptionGroup` of all its failures.
 - `AppConfig` validates assignments, so assigning a plain string to `lifecycle_state` is coerced to
   `ModuleLifecycleState` (invalid values raise `ValidationError`).
+
+### Fixed
+
+- Failed `registry_ready` and `registry_shutdown` notifications can be retried without
+  repeating completed module hooks. A failed ready notification resets `registry.ready`,
+  so retrying `bedrock.setup()` also resumes notification delivery.
+- Installation rollback rejects attempts to introduce new modules from cleanup hooks
+  or signal receivers, preserving failure-atomic membership and install order.
 
 ## [0.2.2] - 2026-10-01
 

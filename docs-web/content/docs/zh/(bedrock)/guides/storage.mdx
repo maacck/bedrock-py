@@ -92,17 +92,22 @@ ACL 解析顺序为：显式 `acl=` 参数 > `S3StorageSettings.default_acl`（�
 
 ### 注册自定义后端
 
+Custom backends must explicitly inherit `StorageBackend`, directly or indirectly; structural conformance alone is no longer sufficient. Register extensions from `bootstrap.py:on_load`:
+
 ```python
-from bedrock.contrib.storage import register_backend, storage
-from bedrock.contrib.storage.base import StorageBackend
+from bedrock.contrib.storage import LocalBackend, register_backend
 
-class MyBackend:
-    """实现 StorageBackend 协议（12 个操作 + close）。"""
-    ...
 
-register_backend("custom", MyBackend)
-storage.configure("custom")
+class MyBackend(LocalBackend):
+    """Project-specific implementation inheriting the complete local backend."""
+
+
+def on_load() -> None:
+    """Register the project backend once during module loading."""
+    register_backend("custom", MyBackend)
 ```
+
+Call `storage.configure("custom")` after registration. Duplicate names raise `DuplicateRegistrationError`; invalid classes raise `InvalidRegisteredClassError` (both from `bedrock.common.registry`). Configuration retains lazy loading failures in the exception chain of `StorageBackendNotConfiguredError`.
 
 ## StorageService API 参考
 

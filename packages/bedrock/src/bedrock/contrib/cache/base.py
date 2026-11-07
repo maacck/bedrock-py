@@ -1,4 +1,4 @@
-"""Protocol definition and backend registry for Bedrock cache backends."""
+"""Protocol definition for Bedrock cache backends."""
 
 from __future__ import annotations
 
@@ -14,6 +14,9 @@ class CacheBackend(Protocol):
     Backends store raw ``bytes``. All serialization/deserialization
     is handled by :class:`CacheService` and shared across backends.
     Both sync and async variants are required.
+
+    Backends registered with :func:`bedrock.contrib.cache.register_backend`
+    must explicitly subclass this protocol.
 
     Clients are created at ``__init__`` time.
     """

@@ -10,6 +10,7 @@ from urllib.parse import parse_qsl
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from ..base import StorageBackend
 from ..entities import StorageListEntry, StorageListResult, StorageObject, StoragePresignedUrl, StorageUploadResult
 from ..exc import (
     StorageConnectionError,
@@ -85,7 +86,7 @@ class S3StorageSettings(BaseSettings):
     cdn_base_url: str | None = None
 
 
-class S3Backend:
+class S3Backend(StorageBackend):
     """Store objects in an S3-compatible bucket using boto3."""
 
     def __init__(self, settings: S3StorageSettings | None = None) -> None:

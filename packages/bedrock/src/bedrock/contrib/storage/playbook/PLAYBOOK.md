@@ -48,6 +48,12 @@ Settings: `base_dir` (`./storage`), `create_dir` (`true`). Writes are atomic (tm
 
 Settings: `bucket_name` (required), `region_name`, `access_key_id`, `secret_access_key`, `session_token`, `endpoint_url`, `default_acl`, `cdn_base_url`. Explicit ACLs are validated against AWS canned ACLs; presigned URLs use SigV4.
 
+## Custom Backend Registration
+
+Register extensions in `bootstrap.py:on_load` with `register_backend(name, backend_cls)`. The class must explicitly inherit `StorageBackend` (directly or indirectly) and implement its complete contract. Structural-only implementations are no longer accepted. Names are process-local and cannot be replaced: duplicates, including `local` or `s3`, raise `DuplicateRegistrationError`. Invalid classes raise `InvalidRegisteredClassError`; both errors are exported from `bedrock.common.registry`.
+
+The shared `ClassRegistry[StorageBackend]` resolves declared paths on demand. `configure()` translates registry loading/validation errors to `StorageBackendNotConfiguredError` with the cause retained. Instance construction, configuration and cleanup remain the storage service's responsibility.
+
 ## Exceptions
 
 All inherit from `StorageError` (a `BedrockExc`): `StorageBackendNotConfiguredError`, `StorageConnectionError`, `StorageObjectNotFoundError`, `StorageKeyError`, `StorageUploadError`, `StorageDownloadError`, `StoragePermissionError`, `StorageUrlUnsupportedError`.

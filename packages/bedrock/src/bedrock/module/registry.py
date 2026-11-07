@@ -84,6 +84,7 @@ class ModuleRegistry:
         self._operation: str | None = None
         self._lock = threading.RLock()
         self._loading = False
+        self._rolling_back = False
 
     # ------------------------------------------------------------------
     # Public query API
@@ -147,6 +148,8 @@ class ModuleRegistry:
 
         The operation is failure-atomic: if it fails, every module it introduced
         is removed again and modules installed earlier are left untouched.
+        Rollback callbacks cannot introduce new modules through ``install()`` or
+        ``populate()``; attempts raise ``ModuleLifecycleError`` before loading them.
 
         This method is thread-safe.
 
@@ -159,7 +162,8 @@ class ModuleRegistry:
         Raises:
             DuplicateModuleError: If a dependency produces a naming conflict.
             InvalidManifestError: If a manifest is missing or invalid.
-            ModuleLifecycleError: If the ``on_load`` hook raises.
+            ModuleLifecycleError: If the ``on_load`` hook raises or a new module is
+                requested while installation rollback is running.
             ModuleStartupRollbackError: If installation failed and unwinding modules
                 that had already loaded also failed. Its ``failures`` hold the original
                 failure first, followed by the cleanup failures.
@@ -209,6 +213,9 @@ class ModuleRegistry:
         skipped, so calling this again after a failure only runs the hooks that
         have not succeeded yet. Processing stops at the first failing hook;
         ``registry_ready`` is only emitted once every module is ready.
+        If its notification fails, registry readiness is reset so startup can be
+        retried without repeating completed module hooks. Receivers may query the
+        ready registry during notification and must tolerate notification retries.
 
         Returns:
             All installed modules in install order.
@@ -251,8 +258,12 @@ class ModuleRegistry:
             if already_announced and not newly_ready:
                 return modules
 
-            self._validate_hooks()
-            registry_ready.send(self, registry=self, config=self.config)
+            try:
+                self._validate_hooks()
+                registry_ready.send(self, registry=self, config=self.config)
+            except BaseException:
+                self._ready = False
+                raise
             return modules
 
     def shutdown(self) -> None:
@@ -261,8 +272,9 @@ class ModuleRegistry:
         Every module that has not completed shutdown is attempted, even after
         earlier failures. A module whose shutdown completed is never shut down
         again, so repeated calls are harmless; modules whose hook failed are
-        attempted again on the next call. ``registry_shutdown`` is emitted once,
-        after every module has shut down.
+        attempted again on the next call. ``registry_shutdown`` is emitted after
+        every module has shut down. Failed notifications are retried on the next
+        call without repeating completed hooks; receivers must be retry-safe.
 
         Raises:
             ModuleLifecycleError: After all attempts, if any hook or ``module_shutdown``
@@ -284,8 +296,8 @@ class ModuleRegistry:
 
             if self._shut_down:
                 return
-            self._shut_down = True
             registry_shutdown.send(self, registry=self, config=self.config)
+            self._shut_down = True
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -349,6 +361,8 @@ class ModuleRegistry:
             ModuleLifecycleError: The original failure when rollback was clean.
             ModuleStartupRollbackError: If rollback itself failed for some modules.
         """
+        if self._rolling_back and any(path not in self._app_configs for path in import_paths):
+            raise ModuleLifecycleError("Cannot install new modules while installation rollback is running.")
         preexisting = set(self._app_configs)
         attempt = _InstallAttempt()
         try:
@@ -382,6 +396,7 @@ class ModuleRegistry:
             Failures that occurred while unwinding; empty when cleanup was clean.
         """
         failures: list[ModuleFailure] = []
+        self._rolling_back = True
         try:
             for name in reversed(introduced):
                 app = self._app_configs[name]
@@ -393,6 +408,7 @@ class ModuleRegistry:
             for name in introduced:
                 self._app_configs.pop(name, None)
             self._install_order[:] = [name for name in self._install_order if name not in removed]
+            self._rolling_back = False
         return failures
 
     def _shutdown_module(self, app: AppConfig) -> list[ModuleFailure]:

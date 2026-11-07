@@ -11,7 +11,7 @@ from urllib.parse import quote, urlencode, urlparse, urlunparse
 
 from pydantic_settings import BaseSettings
 
-from bedrock.common.registry import ClassRegistry
+from bedrock.common.registry import ClassRegistry, ClassRegistryError
 from bedrock.logging import get_logger
 
 from .base import StorageBackend
@@ -20,20 +20,30 @@ from .exc import StorageBackendNotConfiguredError, StorageError, StorageKeyError
 
 logger = get_logger(__name__)
 
-_BACKEND_REGISTRY = ClassRegistry(
-    {
+_BACKEND_REGISTRY: ClassRegistry[StorageBackend] = ClassRegistry(
+    base_class=StorageBackend,
+    lazy_classes={
         "local": "bedrock.contrib.storage.backends.local:LocalBackend",
         "s3": "bedrock.contrib.storage.backends.s3:S3Backend",
-    }
+    },
 )
 
 
 def register_backend(name: str, backend_cls: type[StorageBackend]) -> None:
     """Register a custom backend class under ``name`` for :meth:`StorageService.configure`.
 
+    The class must explicitly subclass :class:`StorageBackend` (nominal
+    inheritance; structural conformance alone is rejected). The base class
+    itself, abstract classes, and unrelated objects are rejected as well.
+
     Args:
-        name: Unique backend identifier (e.g. ``"stub"``).
-        backend_cls: The backend class implementing the :class:`StorageBackend` protocol.
+        name: Unique backend identifier (e.g. ``"stub"``). Built-in names
+            (``"local"``, ``"s3"``) and previously registered names are taken.
+        backend_cls: A concrete subclass of :class:`StorageBackend`.
+
+    Raises:
+        DuplicateRegistrationError: If ``name`` is already registered.
+        InvalidRegisteredClassError: If ``backend_cls`` is not a valid backend subclass.
     """
     _BACKEND_REGISTRY.register(name, backend_cls)
 
@@ -160,19 +170,21 @@ class StorageService:
             The newly configured backend instance.
 
         Raises:
-            StorageBackendNotConfiguredError: If the backend is not available.
+            StorageBackendNotConfiguredError: If the backend is unknown or its class cannot be loaded
+                (the underlying ``ClassRegistryError`` is chained as the cause).
             StorageConnectionError: If the backend cannot be initialized (e.g. missing bucket).
         """
-        if not _BACKEND_REGISTRY.has(name=backend_name):
+        if not _BACKEND_REGISTRY.has(backend_name):
             available = ", ".join(sorted(_BACKEND_REGISTRY.keys()))
             raise StorageBackendNotConfiguredError(
                 f"Unknown storage backend '{backend_name}'. Available: {available}. "
                 f"Install optional dependencies for additional backends."
             )
 
-        backend_cls = _BACKEND_REGISTRY.get(backend_name)
-        if backend_cls is None:
-            raise StorageBackendNotConfiguredError(f"Failed to load backend '{backend_name}'.")
+        try:
+            backend_cls = _BACKEND_REGISTRY.get(backend_name)
+        except ClassRegistryError as exc:
+            raise StorageBackendNotConfiguredError(f"Failed to load storage backend '{backend_name}': {exc}") from exc
 
         self._backend = backend_cls(settings=settings)
         logger.info("Storage backend configured: {}", backend_name)

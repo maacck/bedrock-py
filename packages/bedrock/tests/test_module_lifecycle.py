@@ -253,6 +253,118 @@ class TestFailureAtomicInstall:
         assert [app.name for app in registry.populate(["alpha", "beta"])] == ["alpha", "beta"]
 
 
+class TestRegistryNotificationRetry:
+    @pytest.mark.parametrize("operation", ["mark_ready", "shutdown"])
+    def test_failed_notification_is_retried_without_repeating_hooks(
+        self, fake_package: Path, lifecycle_log: list[str], operation: str
+    ) -> None:
+        _make_chain(fake_package, "notify")
+        registry = ModuleRegistry()
+        registry.install("notify")
+        lifecycle_log.clear()
+        signal = registry_ready if operation == "mark_ready" else registry_shutdown
+        attempts: list[str] = []
+        completed: list[str] = []
+
+        def receiver(sender: Any, **kwargs: Any) -> None:
+            attempts.append(operation)
+            if operation == "mark_ready":
+                assert [app.name for app in registry.all()] == ["notify"]
+            if len(attempts) == 1:
+                raise RuntimeError("temporary notification failure")
+            completed.append(operation)
+
+        signal.connect(receiver, weak=False)
+        try:
+            with pytest.raises(RuntimeError):
+                getattr(registry, operation)()
+            if operation == "mark_ready":
+                assert registry.ready is False
+            getattr(registry, operation)()
+            getattr(registry, operation)()
+        finally:
+            signal.disconnect(receiver)
+
+        assert attempts == [operation, operation]
+        assert completed == [operation]
+        hook = "ready" if operation == "mark_ready" else "on_shutdown"
+        assert lifecycle_log == [f"{hook}:notify"]
+
+    def test_notification_retry_after_adding_a_module(self, fake_package: Path, lifecycle_log: list[str]) -> None:
+        _make_chain(fake_package, "first", "second")
+        registry = ModuleRegistry()
+        registry.populate(["first"])
+        registry.install("second")
+        lifecycle_log.clear()
+        completed: list[str] = []
+        fail = True
+
+        def receiver(sender: Any, **kwargs: Any) -> None:
+            if fail:
+                raise RuntimeError("temporary notification failure")
+            completed.extend(app.name for app in registry.all())
+
+        registry_ready.connect(receiver, weak=False)
+        try:
+            with pytest.raises(RuntimeError):
+                registry.mark_ready()
+            fail = False
+            registry.mark_ready()
+            registry.mark_ready()
+        finally:
+            registry_ready.disconnect(receiver)
+
+        assert completed == ["first", "second"]
+        assert lifecycle_log == ["ready:second"]
+
+
+class TestRollbackInstallationBoundary:
+    @pytest.mark.parametrize("entrypoint", ["install", "populate"])
+    @pytest.mark.parametrize("callback", ["hook", "signal"])
+    def test_rollback_rejects_new_modules_and_releases_guard(
+        self,
+        fake_package: Path,
+        fail_hooks: set[tuple[str, str]],
+        lifecycle_log: list[str],
+        entrypoint: str,
+        callback: str,
+    ) -> None:
+        _make_chain(fake_package, "existing")
+        _make_chain(fake_package, "dependency", "broken")
+        _make_chain(fake_package, "late")
+        registry = ModuleRegistry()
+        registry.install("existing")
+        fail_hooks.add(("on_load", "broken"))
+
+        def install_during_cleanup(*args: Any, **kwargs: Any) -> None:
+            if entrypoint == "install":
+                registry.install("late")
+            else:
+                registry.populate(["late"])
+
+        if callback == "hook":
+            import importlib
+
+            bootstrap = importlib.import_module("dependency.bootstrap")
+            bootstrap.on_shutdown = install_during_cleanup
+        else:
+            module_shutdown.connect(install_during_cleanup, weak=False)
+        try:
+            with pytest.raises(ModuleStartupRollbackError) as exc_info:
+                registry.install("broken")
+        finally:
+            if callback == "signal":
+                module_shutdown.disconnect(install_during_cleanup)
+
+        assert registry.list_installed() == ["existing"]
+        assert "on_load:late" not in lifecycle_log
+        assert exc_info.value.failed_modules == ["broken", "dependency"]
+        assert isinstance(exc_info.value.failures[0].cause, RuntimeError)
+        assert isinstance(exc_info.value.failures[1].cause, ModuleLifecycleError)
+        registry.install("late")
+        assert registry.list_installed() == ["existing", "late"]
+
+
 class TestRetrySafeReadiness:
     def test_retry_skips_modules_that_are_already_ready(
         self,
@@ -481,9 +593,6 @@ class TestLifecycleStates:
 
 
 class TestFailureAttribution:
-    def _break_unwind(self, fail_hooks: set[tuple[str, str]], module: str) -> None:
-        fail_hooks.add(("on_shutdown", module))
-
     def test_failure_in_later_populate_path_is_attributed_to_that_path(
         self, fake_package: Path, fail_hooks: set[tuple[str, str]]
     ) -> None:
