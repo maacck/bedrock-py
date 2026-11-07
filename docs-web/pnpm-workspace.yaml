@@ -3,16 +3,21 @@ allowBuilds:
   sharp: true
   unrs-resolver: true
   workerd: true
+# Overrides raise transitive dependencies to patched releases (see `pnpm audit --prod --audit-level high`).
+# Remove an entry once every parent resolves to a patched version on its own.
 overrides:
   next>postcss: ^8.5.18
   nanoid: ^3.3.18
-  sharp: ^0.35.0
-  undici: ^7.29.0
+  sharp: ^0.35.5
+  undici: ^7.30.1
   ws: ^8.21.0
   form-data: ^4.0.6
-  js-yaml@^4.0.0: ^4.3.1
-  brace-expansion@^2.0.0: ^2.1.4
-  brace-expansion@^5.0.0: ^5.0.9
-  dompurify: ^3.4.12
-  qs: ^6.15.2
-  body-parser: ^2.3.0
+  js-yaml@^4.0.0: ^4.3.2
+  brace-expansion@^1.0.0: ^1.1.21
+  brace-expansion@^2.0.0: ^2.1.6
+  brace-expansion@^5.0.0: ^5.0.11
+  dompurify: ^3.4.17
+  qs: ^6.16.1
+  body-parser: ^2.4.0
+  # @node-minify/core (via @opennextjs/aws) pins glob to exactly 10.3.3; 10.5.x is the patched, same-major line.
+  glob@10.3.3: ^10.5.0

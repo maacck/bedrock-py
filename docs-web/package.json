@@ -3,10 +3,13 @@
   "version": "0.0.0",
   "private": true,
   "scripts": {
+    "prebuild": "node scripts/sync-changelog.mjs",
     "build": "next build",
+    "predev": "node scripts/sync-changelog.mjs",
     "dev": "next dev",
     "start": "next start",
     "test": "vitest run",
+    "pretypes:check": "node scripts/sync-changelog.mjs",
     "types:check": "fumadocs-mdx && next typegen && tsc --noEmit",
     "postinstall": "fumadocs-mdx",
     "lint": "eslint",
@@ -18,7 +21,7 @@
   },
   "dependencies": {
     "@ai-sdk/react": "^3.0.178",
-    "@opennextjs/cloudflare": "^1.19.7",
+    "@opennextjs/cloudflare": "^1.20.16",
     "@openrouter/ai-sdk-provider": "^2.9.0",
     "@orama/tokenizers": "^3.1.18",
     "@radix-ui/react-presence": "^1.1.5",
@@ -35,7 +38,7 @@
     "hast-util-to-jsx-runtime": "^2.3.6",
     "lucide-react": "^1.14.0",
     "mermaid": "^11.16.1",
-    "next": "16.2.12",
+    "next": "16.4.5",
     "next-themes": "^0.4.6",
     "radix-ui": "^1.4.3",
     "react": "^19.2.5",
@@ -48,7 +51,7 @@
     "tailwind-merge": "^3.5.0",
     "unist-util-visit": "^5.1.0",
     "workers-ai-provider": "^3.1.14",
-    "zod": "^4.4.3"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.2.4",
@@ -58,12 +61,12 @@
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "eslint": "^9.0.0",
-    "eslint-config-next": "16.2.12",
+    "eslint-config-next": "16.4.5",
     "jsdom": "^30.0.1",
     "postcss": "^8.5.18",
     "tailwindcss": "^4.2.4",
     "typescript": "^6.0.3",
-    "vitest": "^4.1.10",
-    "wrangler": "^4.88.0"
+    "vitest": "^4.1.12",
+    "wrangler": "^4.158.0"
   }
 }
