@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import inspect
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
@@ -18,6 +17,7 @@ from ._runtime import (
     Steps,
     discard_awaitable,
     loop_is_running,
+    run_in_worker,
 )
 from .entities import AppConfig, ModuleLifecycleState
 from .exc import (
@@ -131,7 +131,14 @@ class ModuleRegistry:
     * Cancelling an async operation leaves every module in a valid state and
       releases the operation. An interrupted installation still rolls back; an
       interrupted ``amark_ready`` or ``ashutdown`` resumes from the modules that
-      have not finished when called again.
+      have not finished when called again, so hooks must be safe to run again.
+      The cancellation is raised to the caller, but not before every synchronous
+      hook or receiver that already started in a worker thread has returned. A
+      blocking function cannot be forced to stop, so cancelling may wait for an
+      in-flight hook; repeated cancellation does not shorten that wait. Rollback,
+      the next operation and the release of the operation never overlap a running
+      worker, and an awaitable returned by a cancelled plain hook is released
+      instead of being left unawaited.
 
     Args:
         config: Optional host application configuration passed to hook callables.
@@ -430,7 +437,7 @@ class ModuleRegistry:
         finally:
             try:
                 if lease.outermost and self._adapter.is_open and self._is_idle():
-                    await asyncio.to_thread(self._adapter.close)
+                    await run_in_worker(self._adapter.close)
             finally:
                 self._gate.leave(lease)
 
@@ -477,7 +484,7 @@ class ModuleRegistry:
         if isinstance(effect, HookEffect):
             return await self._call_hook_async(effect.app, effect.hook_name)
         if isinstance(effect, SignalEffect):
-            return await effect.signal.asend(effect.sender, **effect.kwargs)
+            return await effect.signal.asend(effect.sender, _sync_wrapper=self._offload_receiver, **effect.kwargs)
         if isinstance(effect, CallEffect):
             return effect.fn()
         return await effect.factory()
@@ -865,11 +872,24 @@ class ModuleRegistry:
             if inspect.iscoroutinefunction(hook):
                 result = hook(**kwargs)
             else:
-                result = await asyncio.to_thread(hook, **kwargs)
+                result = await run_in_worker(hook, **kwargs)
             if inspect.isawaitable(result):
                 await result
         except Exception as exc:
             raise ModuleLifecycleError(f"Hook '{hook_name}' in module '{app.name}' raised an error: {exc}") from exc
+
+    @staticmethod
+    def _offload_receiver(receiver: Callable[..., Any]) -> Callable[..., Any]:
+        """Adapt a sync signal receiver for ``Signal.asend`` so a cancelled operation waits for it to finish.
+
+        This is the ``_sync_wrapper`` the signal API already provides; the default wrapper would let a cancelled
+        caller leave while the receiver thread keeps running.
+        """
+
+        async def offloaded(*args: Any, **kwargs: Any) -> Any:
+            return await run_in_worker(receiver, *args, **kwargs)
+
+        return offloaded
 
     def _adapt_receiver_sync(self, receiver: Callable[..., Any]) -> Callable[..., Any]:
         """Adapt an async signal receiver for ``Signal.send`` on the persistent adapter loop.

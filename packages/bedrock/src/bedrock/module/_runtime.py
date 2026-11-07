@@ -12,6 +12,8 @@ synchronous entrypoints use to adapt asynchronous hooks.
 from __future__ import annotations
 
 import asyncio
+import inspect
+import logging
 import threading
 import weakref
 from collections.abc import Awaitable, Callable, Generator, Iterator
@@ -23,6 +25,8 @@ from typing import Any, TypeVar
 from .exc import ModuleLifecycleError
 
 T = TypeVar("T")
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -78,6 +82,72 @@ def discard_awaitable(awaitable: Any) -> None:
     cancel = getattr(awaitable, "cancel", None)
     if callable(cancel):
         cancel()
+
+
+async def _drain(future: asyncio.Future[Any]) -> asyncio.CancelledError | None:
+    """Wait until ``future`` is done however often this task is cancelled; return the first cancellation seen."""
+    cancelled: asyncio.CancelledError | None = None
+    while not future.done():
+        try:
+            await asyncio.wait({future})
+        except asyncio.CancelledError as exc:
+            cancelled = cancelled or exc
+    return cancelled
+
+
+async def _dispose_unawaited(result: Any) -> None:
+    """Release an awaitable produced by a worker whose caller was cancelled, so nothing is left unmanaged."""
+    if asyncio.iscoroutine(result):
+        result.close()
+        return
+    if not inspect.isawaitable(result):
+        return
+    future = asyncio.ensure_future(result)
+    future.cancel()
+    await _drain(future)
+    if not future.cancelled():
+        future.exception()
+
+
+async def run_in_worker[**P, R](fn: Callable[P, R], /, *args: P.args, **kwargs: P.kwargs) -> R:
+    """Run ``fn`` in a worker thread and never abandon it while the calling task is cancelled.
+
+    A running thread cannot be stopped. Plain ``await asyncio.to_thread(...)`` lets a cancelled caller move on while
+    the thread keeps running, so the caller's cleanup, the operation gate and a retry could overlap its side effects.
+    Here a cancellation request is remembered and the call keeps waiting until the thread has finished, however often
+    it is cancelled. Only then is the cancellation raised. If the thread returned an awaitable, that awaitable is
+    released instead of being returned, because its caller will not await it. A failure of the thread is logged and
+    the cancellation wins.
+
+    Args:
+        fn: Synchronous callable to run in the worker thread.
+        *args: Positional arguments for ``fn``.
+        **kwargs: Keyword arguments for ``fn``.
+
+    Returns:
+        The return value of ``fn``.
+
+    Raises:
+        asyncio.CancelledError: If the calling task was cancelled, after the worker finished.
+        Exception: Whatever ``fn`` raised, when the calling task was not cancelled.
+    """
+    worker = asyncio.ensure_future(asyncio.to_thread(fn, *args, **kwargs))
+    cancelled = await _drain(worker)
+    if cancelled is None:
+        return worker.result()
+    if worker.cancelled():
+        raise cancelled
+    failure = worker.exception()
+    if failure is not None:
+        logger.warning(
+            "Worker %r failed after its caller was cancelled: %r",
+            getattr(fn, "__qualname__", fn),
+            failure,
+            exc_info=failure,
+        )
+    else:
+        await _dispose_unawaited(worker.result())
+    raise cancelled
 
 
 async def _await[T](awaitable: Awaitable[T]) -> T:

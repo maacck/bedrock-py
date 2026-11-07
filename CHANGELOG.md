@@ -42,7 +42,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ModuleAsyncRequiredError` (a `ModuleLifecycleError`) that names the async entrypoint, instead of nesting a
   loop or leaving a coroutine unawaited; `mark_ready()` and `shutdown()` check coroutine hooks before running
   anything. Both modes share one state machine, so rollback, retry, idempotency and aggregate errors are
-  identical, and cancelling an async operation leaves every module in a valid state.
+  identical, and cancelling an async operation leaves every module in a valid state. A cancelled async operation
+  waits for synchronous hooks and receivers already running in a worker thread before it rolls back or releases
+  the registry, because a blocking function cannot be forced to stop; repeated cancellation does not skip that
+  wait, and an awaitable returned by a cancelled plain hook is released instead of left unawaited.
 - `bedrock.shutdown()` / `bedrock.ashutdown()` stop every module, then release the initialized database: `db.close()`
   for the sync engine and `db.aclose()` for the async engine, each only if it exists, even when a module hook
   failed. A database failure is reported with the module failures as `ModuleFailure("bedrock.database", ...)`.
