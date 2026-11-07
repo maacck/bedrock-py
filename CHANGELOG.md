@@ -126,10 +126,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `shutdown()`. `failures` are always attributed to the module and step where they happened
   (`on_load`, `manifest`, `dependency`, `module_loaded`, `ready`, `on_shutdown`, ...), and the `__cause__` of
   every aggregated lifecycle error is an `ExceptionGroup` of all its failures.
-- `AppConfig.lifecycle_state` is a read-only property. Assigning to it raises `AttributeError`, and it is no
-  longer a constructor argument (`AppConfig` now rejects unknown keyword arguments). A module starts at
+- `AppConfig.lifecycle_state` is a read-only property. Assigning to it raises `AttributeError`, and passing it
+  to `AppConfig(...)` or `AppConfig.model_validate(...)` raises `ValidationError`. A module starts at
   `loading` and changes state only through `AppConfig.transition_to()`, which validates the transition and
-  accepts a `ModuleLifecycleState` or its string value.
+  accepts a `ModuleLifecycleState` or its string value. Every other `AppConfig` field keeps its behavior:
+  unknown keyword arguments are still ignored, and assignments are still validated and coerced.
 - `install()` is now a registry operation like `mark_ready()` and `shutdown()`. While it runs, an `on_load`
   hook, a `module_loaded` receiver, or a rollback hook that calls `shutdown()` or `mark_ready()` gets a
   `ModuleLifecycleError` ("Cannot call shutdown() while install() is running") instead of acting on a
@@ -141,6 +142,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   already reported `ready`, with no way to ready it from inside the hook. Install the module before
   `mark_ready()`, or call `install()` and then `mark_ready()` again, which readies only the new module.
   Installing an already installed module remains a no-op everywhere.
+- `registry.ready` records that readiness was announced. It stays `True` when a new module is installed
+  afterwards, and that module stays `loaded` until `mark_ready()` runs again. Check each module's
+  `lifecycle_state` instead of reading `registry.ready` as "every installed module is ready".
 
 ### Fixed
 
