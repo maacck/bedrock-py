@@ -56,16 +56,23 @@ cache.configure("redis", settings=settings)
 
 ### 注册自定义后端
 
+Custom backends must explicitly inherit `CacheBackend`, directly or indirectly. Register extensions from `bootstrap.py:on_load`:
+
 ```python
-from bedrock.contrib.cache import register_backend, CacheBackend
+from bedrock.contrib.cache import register_backend
+from bedrock.contrib.cache.backends.memory import InMemoryBackend
 
-class MyCustomBackend(CacheBackend):
-    # Implement required methods...
-    pass
 
-register_backend("custom", MyCustomBackend)
-cache.configure("custom")
+class MyCustomBackend(InMemoryBackend):
+    """Project-specific implementation inheriting the complete memory backend."""
+
+
+def on_load() -> None:
+    """Register the project backend once during module loading."""
+    register_backend("custom", MyCustomBackend)
 ```
+
+Call `cache.configure("custom")` after registration. Duplicate names raise `DuplicateRegistrationError`; invalid classes raise `InvalidRegisteredClassError` (both from `bedrock.common.registry`). Configuration retains lazy loading failures in the exception chain of `BackendNotConfiguredError`.
 
 ## CacheService API 参考
 

@@ -45,6 +45,12 @@ value = cache.get("user:1")  # -> {"name": "Alice"}
 
 Inside a Bedrock app, the cache module's `ready` hook already calls `cache.configure()` (memory). Reconfigure to Redis from your own `ready` hook or after `bedrock.setup()`. See `references/lifecycle.md`.
 
+## Custom Backend Registration
+
+Register extensions in `bootstrap.py:on_load` with `register_backend(name, backend_cls)`. The class must explicitly inherit `CacheBackend` (directly or indirectly) and implement its complete contract. Structural-only implementations are rejected. Names are process-local and cannot be replaced: registering an existing name, including `memory` or `redis`, raises `DuplicateRegistrationError`. Invalid classes raise `InvalidRegisteredClassError`; both errors are exported from `bedrock.common.registry`.
+
+The shared `ClassRegistry[CacheBackend]` loads built-in paths on demand. `configure()` translates registry loading/validation errors to `BackendNotConfiguredError` with the cause retained. The registry manages classes, not cache instances or their lifetimes.
+
 ## Core API
 
 `cache` is a `CacheService`. Expiration uses `ex` (seconds), `px` (milliseconds), or `ea` (Unix timestamp) — mutually exclusive. Omit all three to store without expiry.

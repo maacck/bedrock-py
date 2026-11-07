@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic_settings import BaseSettings
 
-from ...common.registry import ClassRegistry
+from ...common.registry import ClassRegistry, ClassRegistryError
 from ...logging import get_logger
 from .base import CacheBackend
 from .coder import CacheCoder, Coder
@@ -18,11 +18,12 @@ if TYPE_CHECKING:
     from .lock import CacheLock
     from .schema import CacheNamespace
 
-_BACKEND_REGISTRY = ClassRegistry(
-    {
+_BACKEND_REGISTRY = ClassRegistry[CacheBackend](
+    base_class=CacheBackend,
+    lazy_classes={
         "memory": "bedrock.contrib.cache.backends.memory:InMemoryBackend",
         "redis": "bedrock.contrib.cache.backends.redis:RedisBackend",
-    }
+    },
 )
 
 
@@ -31,7 +32,14 @@ def register_backend(name: str, backend_cls: type[CacheBackend]) -> None:
 
     Args:
         name: Unique backend identifier (e.g. ``"redis"``).
-        backend_cls: The backend class implementing the :class:`CacheBackend` protocol.
+        backend_cls: A concrete class that explicitly subclasses :class:`CacheBackend`.
+            Structural conformance alone is not enough.
+
+    Raises:
+        DuplicateRegistrationError: If ``name`` is already registered, including
+            the built-in ``"memory"`` and ``"redis"`` names.
+        InvalidRegisteredClassError: If ``backend_cls`` is not a concrete
+            subclass of :class:`CacheBackend`.
     """
     _BACKEND_REGISTRY.register(name, backend_cls)
 
@@ -78,18 +86,23 @@ class CacheService:
             The newly configured backend instance.
 
         Raises:
-            BackendNotConfiguredError: If the backend is not available.
+            BackendNotConfiguredError: If the backend name is unknown, or its class
+                cannot be loaded or is not a valid :class:`CacheBackend` subclass.
         """
-        if not _BACKEND_REGISTRY.has(name=backend_name):
+        if not _BACKEND_REGISTRY.has(backend_name):
             available = ", ".join(sorted(_BACKEND_REGISTRY.keys()))
             raise BackendNotConfiguredError(
                 f"Unknown cache backend '{backend_name}'. Available: {available}. "
                 f"Install optional dependencies for additional backends."
             )
 
-        backend_cls = _BACKEND_REGISTRY.get(backend_name)
-        if backend_cls is None:
-            raise BackendNotConfiguredError(f"Failed to load backend '{backend_name}'.")
+        try:
+            backend_cls = _BACKEND_REGISTRY.get(backend_name)
+        except ClassRegistryError as exc:
+            raise BackendNotConfiguredError(
+                f"Failed to load cache backend '{backend_name}': {exc.detail} "
+                f"Install the required optional dependencies."
+            ) from exc
 
         self._backend = backend_cls(settings=settings)
         logger.info("Cache backend configured: {}", backend_name)
@@ -361,23 +374,6 @@ class CacheService:
             sleep=sleep,
             prefix=prefix,
         )
-
-
-def _load_class(module_path: str, class_name: str) -> type[Any]:
-    """Dynamically load a class from a module path."""
-    from importlib import import_module
-
-    try:
-        module = import_module(module_path)
-    except ImportError as exc:
-        raise BackendNotConfiguredError(
-            f"Failed to import '{module_path}': {exc}. Install the required optional dependencies."
-        ) from exc
-
-    try:
-        return getattr(module, class_name)
-    except AttributeError as exc:
-        raise BackendNotConfiguredError(f"Module '{module_path}' does not define '{class_name}'.") from exc
 
 
 cache = CacheService()
