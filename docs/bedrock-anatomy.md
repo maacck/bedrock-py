@@ -184,6 +184,8 @@ Hook responsibilities:
 - `ready`: start work that requires the complete dependency graph.
 - `on_shutdown`: release owned resources; shutdown runs in reverse install order and attempts every module even if another module's hook fails. A failed `on_load` rolls the whole install back, and a module whose shutdown completed is never shut down again.
 
+Hooks and the lifecycle signal receivers must not call back into lifecycle operations: `shutdown()` and `mark_ready()` are rejected while another lifecycle operation (an installation, `mark_ready()`, or `shutdown()`) is running, and a new module cannot be installed during `mark_ready()` or `shutdown()`. `on_load` may install further modules; raise an error to abort an installation.
+
 Do not put request handling, seed data, migrations, or ordinary business workflows in bootstrap hooks. Current runtime hooks are synchronous; do not declare `async def` hooks until the runtime contract explicitly supports awaiting them.
 
 #### `installation.py`

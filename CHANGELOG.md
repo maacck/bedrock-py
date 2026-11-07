@@ -126,11 +126,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `shutdown()`. `failures` are always attributed to the module and step where they happened
   (`on_load`, `manifest`, `dependency`, `module_loaded`, `ready`, `on_shutdown`, ...), and the `__cause__` of
   every aggregated lifecycle error is an `ExceptionGroup` of all its failures.
-- `AppConfig` validates assignments, so assigning a plain string to `lifecycle_state` is coerced to
-  `ModuleLifecycleState` (invalid values raise `ValidationError`).
+- `AppConfig.lifecycle_state` is a read-only property. Assigning to it raises `AttributeError`, and passing it
+  to `AppConfig(...)` or `AppConfig.model_validate(...)` raises `ValidationError`. A module starts at
+  `loading` and changes state only through `AppConfig.transition_to()`, which validates the transition and
+  accepts a `ModuleLifecycleState` or its string value. Every other `AppConfig` field keeps its behavior:
+  unknown keyword arguments are still ignored, and assignments are still validated and coerced.
+- `install()` is now a registry operation like `mark_ready()` and `shutdown()`. While it runs, an `on_load`
+  hook, a `module_loaded` receiver, or a rollback hook that calls `shutdown()` or `mark_ready()` gets a
+  `ModuleLifecycleError` ("Cannot call shutdown() while install() is running") instead of acting on a
+  half-installed registry. To abort an installation from a hook, raise an error: the installation rolls back.
+  Installing further modules from `on_load` or `module_loaded` stays supported.
+- Installing a module that is not installed yet from a `ready` or `on_shutdown` hook, or from a
+  `module_ready`, `registry_ready`, `module_shutdown`, or `registry_shutdown` receiver, raises
+  `ModuleLifecycleError` before anything is loaded. Previously it left a `loaded` module in a registry that
+  already reported `ready`, with no way to ready it from inside the hook. Install the module before
+  `mark_ready()`, or call `install()` and then `mark_ready()` again, which readies only the new module.
+  Installing an already installed module remains a no-op everywhere.
+- `registry.ready` records that readiness was announced. It stays `True` when a new module is installed
+  afterwards, and that module stays `loaded` until `mark_ready()` runs again. Check each module's
+  `lifecycle_state` instead of reading `registry.ready` as "every installed module is ready".
 
 ### Fixed
 
+- Calling `shutdown()` from an `on_load` hook no longer shuts down other modules in the middle of the
+  installation and then fails on an invalid `loading` to `shutdown` transition that cut cleanup short.
+  Calling it from a `module_loaded` receiver no longer shuts down the registry during installation.
+  Both now fail with `ModuleLifecycleError`, and the failed installation still unwinds every module that
+  had loaded.
 - Failed `registry_ready` and `registry_shutdown` notifications can be retried without
   repeating completed module hooks. A failed ready notification resets `registry.ready`,
   so retrying `bedrock.setup()` also resumes notification delivery.
