@@ -67,9 +67,13 @@ myproject/
 
 ```python
 import bedrock
+from bedrock.logging import configure_logging
 
+configure_logging()
 bedrock.setup("myproject")
 ```
+
+`configure_logging()` belongs in the process entry point. Do not call it at import time inside a module that other code imports.
 
 Settings (`settings.py`):
 
@@ -116,11 +120,16 @@ Every Bedrock process starts with `bedrock.setup()`:
 
 ```python
 import bedrock
+from bedrock.logging import configure_logging
+
+configure_logging()
 bedrock.setup()  # Reads BEDROCK_APP env var, or pass app path explicitly
 bedrock.setup("myproject.app")  # Explicit app path
 ```
 
-Call once at process start. Safe to call multiple times.
+Call `bedrock.setup()` once at process start. It is safe to call multiple times, and it does not configure logging.
+
+Importing Bedrock does not remove loguru handlers or install Bedrock's sink. `configure_logging()` installs Bedrock's stderr sink (or `LOG_FILE` when that variable is set) and, on a later call, replaces only that sink. Handlers already present, including Loguru's preconfigured stderr handler, stay. `LOG_LEVEL`, `LOG_FORMAT`, `LOG_FILE`, `LOG_ROTATION`, `LOG_RETENTION`, `LOG_COMPRESSION`, and `LOG_SERIALIZE` are read when it runs. The `bedrock` CLI calls `configure_cli_logging()` before dispatching commands. That removes Loguru's preconfigured stderr handler so CLI lines are not duplicated and `LOG_*` controls CLI stderr; host handlers stay. Commands inside a module do not need to configure logging.
 
 ### 2. Module Structure (Standard)
 

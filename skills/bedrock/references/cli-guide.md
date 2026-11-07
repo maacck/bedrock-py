@@ -8,6 +8,8 @@ CLI commands for building and managing Bedrock applications.
 uv run bedrock <command> [options]
 ```
 
+The `bedrock` entry point calls `configure_cli_logging()` before it dispatches a command. That removes Loguru's preconfigured stderr handler and installs Bedrock's sink, so CLI log lines are not duplicated and `LOG_*` controls CLI stderr. Host sinks registered earlier stay. Importing Bedrock from a library process does not do this. Call `configure_logging()` from that process when you want Bedrock's sink beside the handlers you already installed.
+
 ---
 
 ## bedrock run

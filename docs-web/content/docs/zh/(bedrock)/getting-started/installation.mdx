@@ -99,6 +99,20 @@ apps = bedrock.apps
 print(f"Registry ready with {len(apps.all())} module(s) loaded")
 ```
 
+## 日志
+
+`import bedrock` 和 `bedrock.setup()` 都不会配置日志，也不会移除已经注册的 loguru sink。需要 Bedrock 的 stderr 输出或 `LOG_FILE` 轮转时，在进程入口调用 `configure_logging()`：
+
+```python
+import bedrock
+from bedrock.logging import configure_logging
+
+configure_logging()
+bedrock.setup("my_app.my_module")
+```
+
+`LOG_LEVEL`、`LOG_FORMAT`、`LOG_FILE`、`LOG_ROTATION`、`LOG_RETENTION`、`LOG_COMPRESSION` 和 `LOG_SERIALIZE` 在 `configure_logging()` 执行时读取。再次调用只会替换 Bedrock 自己安装的 sink。`bedrock` 命令行调用 `configure_cli_logging()`：它会先移除 Loguru 预配置的 stderr handler，使 CLI 日志只输出一次，并由 `LOG_*` 控制该 stderr。其他 handler 会保留。
+
 ## 验证安装
 
 安装完成后，验证 Bedrock 是否正常工作：
