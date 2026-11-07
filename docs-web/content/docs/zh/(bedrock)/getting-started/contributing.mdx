@@ -239,6 +239,8 @@ git checkout -b feat/my-feature
 
 按照上面的编码规范编写代码。保持改动聚焦——每个 PR 只处理一个功能或一个修复。
 
+如果改动了公开签名或行为，请在同一个 PR 中更新 `CHANGELOG.md`（`[Unreleased]` 下）、`en/` 与 `zh/` 中受影响的 Web Doc 页面，以及 `skills/` 下的 agent skills，确保它们与代码保持一致。
+
 ### 3. 运行测试
 
 ```bash

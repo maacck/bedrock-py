@@ -95,7 +95,24 @@ cd docs-web && npm run build  # Production build
 - Always Write Human-Readable Messages in `detail` attribute of BedrockExc.
 
 ## Documentation
-- Hand-write under `docs-web/content/docs/`
+- Hand-write under `docs-web/content/docs/`; `en/` and `zh/` must contain the same pages and cover the same APIs.
+
+## Change Alignment
+
+A change to a public signature, behavior, default, error type, configuration key, CLI command, or module/lifecycle contract is incomplete until every surface below matches the code **in the same change**:
+
+|Surface|Path|Update|
+|---|---|---|
+|Changelog|`CHANGELOG.md`|Entry under `## [Unreleased]`; breaking changes state the migration|
+|Web Doc|`docs-web/content/docs/{en,zh}/`|Affected pages in both languages; `meta.json` for new pages|
+|Agent skills|`skills/bedrock/`, `skills/bedrock-cli/`|`SKILL.md`, affected `references/*.md`, templates|
+|Playbooks|`packages/bedrock/src/bedrock/contrib/*/playbook/`|When a contrib API changes|
+
+Completion: no surface references a removed or renamed API, and every code example matches current signatures. Internal changes with no user-visible effect need none of these.
+
+## Release Alignment Check
+
+**MUST run** the alignment check in [`CONTRIBUTING.md` → Releasing](CONTRIBUTING.md#releasing) before bumping versions or tagging. Any failing item blocks the release.
 
 ## Anti-Patterns (This Project)
 

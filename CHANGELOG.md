@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Agent skills: one "Choosing a Mechanism" table (direct call, DI, `ClassRegistry`, hooks, signals) with
   failure/async semantics replaces four diverging comparisons; the hooks guide documents extension points
   where every implementation must succeed (fail-fast with DB rollback, collect-all, external side effects).
+- Contributing: public signature/behavior changes must update `CHANGELOG.md`, Web Doc (en + zh), and agent
+  skills in the same change (`AGENTS.md`, `CONTRIBUTING.md`, PR template); `CONTRIBUTING.md` gains a
+  Releasing section with a pre-release alignment check and bump steps.
 
 ## [0.3.0] - 2026-11-07
 
