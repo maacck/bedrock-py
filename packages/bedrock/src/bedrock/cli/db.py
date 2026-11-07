@@ -14,6 +14,7 @@ Usage::
     bedrock db downgrade myerp.wms base
     bedrock db heads myerp.wms
     bedrock db current myerp.wms
+    bedrock db check myerp.wms
     bedrock db history myerp.wms
 """
 
@@ -61,8 +62,12 @@ def _bootstrap_manager(app_import_path: str) -> MigrationsManager:
     if not apps.ready:
         apps.populate([app_import_path])
 
-    database_url = DbSettings().SQLALCHEMY_DATABASE_URI
-    return MigrationsManager(registry=apps, database_url=database_url)
+    settings = DbSettings()
+    return MigrationsManager(
+        registry=apps,
+        database_url=settings.SQLALCHEMY_DATABASE_URI,
+        lock_timeout=settings.MIGRATION_LOCK_TIMEOUT,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -185,6 +190,55 @@ def current(
     except MigrationError as exc:
         _console.print(f"[bold red]✗[/bold red] {exc}")
         raise typer.Exit(1) from exc
+
+
+@db_app.command()
+def check(
+    app_import_path: Annotated[str, typer.Argument(help="Import path of the target app, e.g. 'myerp.wms'.")],
+) -> None:
+    """Report whether each migration branch is at head without changing the database.
+
+    Prints the current and head revisions for the app and for every other
+    installed app that already has migration scripts. Exits with status 1 when
+    any reported branch is behind head or its revision is unknown.
+
+    Examples::
+
+        bedrock db check myerp.wms
+    """
+    manager = _bootstrap_manager(app_import_path)
+    try:
+        statuses = manager.check(app_import_path)
+    except BranchOwnershipError as exc:
+        _console.print(f"[bold red]✗ Branch ownership violation:[/bold red] {exc}")
+        raise typer.Exit(1) from exc
+    except MigrationError as exc:
+        _console.print(f"[bold red]✗[/bold red] {exc}")
+        raise typer.Exit(1) from exc
+
+    table = Table(show_header=True, header_style="bold cyan", box=None, show_edge=False)
+    table.add_column("Branch", style="blue", no_wrap=True)
+    table.add_column("Current", style="yellow", no_wrap=True)
+    table.add_column("Head", style="yellow", no_wrap=True)
+    table.add_column("State", no_wrap=True)
+
+    failed = False
+    for status in statuses:
+        if status.state != "at-head":
+            failed = True
+        state_style = {"at-head": "bold green", "behind": "bold yellow"}.get(status.state, "bold red")
+        table.add_row(
+            status.branch,
+            ", ".join(status.current) if status.current else "-",
+            ", ".join(status.head) if status.head else "-",
+            Text(status.state, style=state_style),
+        )
+
+    _console.print(table)
+    if failed:
+        _console.print("[bold red]✗[/bold red] One or more branches are behind head or have an unknown revision.")
+        raise typer.Exit(1)
+    _console.print("[bold green]✓[/bold green] All migration branches are at head.")
 
 
 @db_app.command()

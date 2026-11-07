@@ -229,11 +229,16 @@ bedrock db upgrade <app> [target]
 bedrock db downgrade <app> <target>
 bedrock db heads <app>
 bedrock db current <app>
+bedrock db check <app>
 bedrock db history <app>
 bedrock db uninstall <app>
 ```
 
-The CLI populates the registry for `<app>` and builds its database URL from `DATABASE_` settings. Use `--` before a negative positional target, for example `bedrock db downgrade myproject.modules.users -- -1`.
+The CLI populates the registry for `<app>` and builds its database URL from `DATABASE_` settings, so secret handling applies there too. Use `--` before a negative positional target, for example `bedrock db downgrade myproject.modules.users -- -1`.
+
+`upgrade` and `downgrade` (including `ensure_schema` and `uninstall`) take a PostgreSQL advisory lock or MySQL/MariaDB `GET_LOCK`. SQLite runs unlocked; migrate it from one process. The wait is `DATABASE_MIGRATION_LOCK_TIMEOUT`. A timeout raises `MigrationError`.
+
+`bedrock db check <app>` prints each loaded branch's current and head revisions without changing the database. It exits non-zero when any branch is `behind` or `unknown` (including a database that has never been migrated).
 
 ### Migration Directory Layout
 
@@ -579,12 +584,16 @@ Database settings use environment variables with the `DATABASE_` prefix. `DbSett
 | `DATABASE_HOST` | `str \| None` | `None` | Database host (required for non-SQLite) |
 | `DATABASE_PORT` | `int \| None` | `None` | Database port (required for non-SQLite) |
 | `DATABASE_USERNAME` | `str \| None` | `None` | Database username |
-| `DATABASE_PASSWORD` | `str \| None` | `None` | Database password |
-| `DATABASE_MAX_CONNECTIONS` | `int` | `10` | Setting exists but is not used by engine construction |
+| `DATABASE_PASSWORD` | `SecretStr \| None` | `None` | Database password. Omitted from `repr` and validation errors. Use `get_secret_value()` only when opening a connection. |
+| `DATABASE_ASYNC_DRIVER` | `str \| None` | `None` | Async DBAPI (`aiosqlite`, `asyncpg`, `psycopg`, `asyncmy`, `aiomysql`). Required for async sessions. |
+| `DATABASE_MAX_CONNECTIONS` | `int` | `10` | Per-process ceiling. Non-SQLite engines set `max_overflow = MAX_CONNECTIONS - POOL_SIZE`. Must be `>= POOL_SIZE`. |
 | `DATABASE_POOL_TIMEOUT` | `int` | `30` | Seconds to wait for a connection |
-| `DATABASE_POOL_SIZE` | `int` | `10` | Number of connections to maintain |
+| `DATABASE_POOL_SIZE` | `int` | `10` | Steady-state pool size |
 | `DATABASE_POOL_RECYCLE` | `int` | `1800` | Seconds before recycling a connection |
+| `DATABASE_MIGRATION_LOCK_TIMEOUT` | `float` | `30` | Seconds to wait for the migration lock. `0` does not wait. MySQL rounds a positive value up to whole seconds. |
 | `DATABASE_SCHEMA` | `str` | `"bedrock.db"` | Database name or file path |
+
+Defaults (`POOL_SIZE=10`, `MAX_CONNECTIONS=10`) cap a non-SQLite process at 10 connections. The previous engine left SQLAlchemy's implicit overflow of 10 in place (20 total). Raise `DATABASE_MAX_CONNECTIONS` to restore that capacity. SQLite ignores pool settings. The URL is built with `sqlalchemy.engine.URL.create`. `PASSWORD` is a `SecretStr`; the rendered URL is not part of settings `repr`.
 
 ### SQLite
 
@@ -730,6 +739,13 @@ The `db` singleton is a `DatabaseManager` instance. It owns the engine, session 
 | `db.clear_session()` | Close and unbind the current context-local session. |
 | `db.session_scope()` | Context manager — transactional scope with auto commit/rollback. Binds to context. |
 | `db.independent_session()` | Context manager — isolated transaction that does not bind to context. |
+| `db.aengine` | Async engine from the same settings. Requires `DATABASE_ASYNC_DRIVER`. |
+| `db.asession` | Context-local async session. Separate context variable from `db.session`. |
+| `db.asession_scope()` | Async transactional scope. Same commit, rollback, and nesting rules as `session_scope()`. |
+| `db.aindependent_session()` | Async transaction that does not bind `db.asession`. |
+| `db.close()` / `db.aclose()` | Dispose owned engines. Idempotent. `init()` works again afterwards. Does not shut down the module registry. |
+
+Async drivers install as extras: `aiosqlite` → `bedrock-core[async-sqlite]`; `asyncpg` and `psycopg` → `bedrock-core[async-postgresql]`; `asyncmy` and `aiomysql` → `bedrock-core[async-mysql]`. A missing package raises `DatabaseConfigurationError` and names the extra.
 
 ### Error Handling
 

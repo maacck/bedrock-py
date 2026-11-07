@@ -460,6 +460,7 @@ Key commands:
 - `bedrock run --app <app> <module> <command>` — Run a command from `<module>`'s Typer app (commands are grouped by module import path)
 - `bedrock manage install` — Install modules with migrations + hooks
 - `bedrock db revision <module> -m "msg"` — Create migration
-- `bedrock db upgrade <module>` — Apply migrations
+- `bedrock db upgrade <module>` — Apply migrations (PostgreSQL/MySQL take a migration lock; SQLite is single-process)
+- `bedrock db check <module>` — Exit non-zero unless every loaded branch is at head
 - `bedrock app info <module>` — Inspect module
 - `bedrock app playbook <module>` — View module playbook

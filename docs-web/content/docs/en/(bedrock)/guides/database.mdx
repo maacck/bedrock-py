@@ -47,12 +47,20 @@ Database settings use environment variables with the `DATABASE_` prefix. `DbSett
 | `DATABASE_HOST` | `str \| None` | `None` | Database host (required for non-SQLite) |
 | `DATABASE_PORT` | `int \| None` | `None` | Database port (required for non-SQLite) |
 | `DATABASE_USERNAME` | `str \| None` | `None` | Database username |
-| `DATABASE_PASSWORD` | `str \| None` | `None` | Database password |
-| `DATABASE_MAX_CONNECTIONS` | `int` | `10` | Maximum connection pool size |
+| `DATABASE_PASSWORD` | `SecretStr \| None` | `None` | Database password. Omitted from `repr` and validation errors. |
+| `DATABASE_ASYNC_DRIVER` | `str \| None` | `None` | Async DBAPI driver (`aiosqlite`, `asyncpg`, `psycopg`, `asyncmy`, `aiomysql`) |
+| `DATABASE_MAX_CONNECTIONS` | `int` | `10` | Per-process connection ceiling, including overflow |
 | `DATABASE_POOL_TIMEOUT` | `int` | `30` | Seconds to wait for a connection |
-| `DATABASE_POOL_SIZE` | `int` | `10` | Number of connections to maintain |
+| `DATABASE_POOL_SIZE` | `int` | `10` | Steady-state pool size |
 | `DATABASE_POOL_RECYCLE` | `int` | `1800` | Seconds before recycling a connection |
+| `DATABASE_MIGRATION_LOCK_TIMEOUT` | `float` | `30` | Seconds to wait for the migration lock. `0` does not wait. |
 | `DATABASE_SCHEMA` | `str` | `"bedrock.db"` | Database name or file path |
+
+`MAX_CONNECTIONS` is the total number of connections one process may check out. PostgreSQL and MySQL engines receive `pool_size`, `pool_timeout`, `pool_recycle`, and `max_overflow = MAX_CONNECTIONS - POOL_SIZE`. `MAX_CONNECTIONS` must be greater than or equal to `POOL_SIZE`. A smaller value raises `DatabaseConfigurationError` and the message names both settings. SQLite engines ignore the pool settings.
+
+The defaults (`POOL_SIZE=10`, `MAX_CONNECTIONS=10`) cap a process at 10 connections. Those defaults previously left SQLAlchemy's implicit overflow of 10 in place, so the engine allowed 20. Raise `DATABASE_MAX_CONNECTIONS` above `DATABASE_POOL_SIZE` when a deployment needs that extra capacity.
+
+`PASSWORD` is a Pydantic `SecretStr`. A plain string is accepted and stored as a secret. `repr(settings)` and validation errors do not contain the password or the rendered URL. The URL is built with `sqlalchemy.engine.URL.create`, so `@`, `:`, `/`, and `%` in the username or password round-trip. Read the secret with `settings.PASSWORD.get_secret_value()` only where the connection is opened.
 
 ### SQLite
 
@@ -131,6 +139,12 @@ The `db` singleton is a `DatabaseManager` instance. It owns the engine, session 
 | `db.clear_session()` | `clear_session()` | Close and unbind the current context-local session. |
 | `db.session_scope()` | `contextmanager → Session` | Transactional scope with auto commit/rollback. Binds to context. |
 | `db.independent_session()` | `contextmanager → Session` | Isolated transaction that does not bind to context. |
+| `db.aengine` | `property → AsyncEngine` | Async engine built from the same settings. Requires `DATABASE_ASYNC_DRIVER`. |
+| `db.asession` | `property → AsyncSession` | Current context-local async session. Separate context variable from `db.session`. |
+| `db.asession_scope()` | `async context manager → AsyncSession` | Async transactional scope with the same commit, rollback, and nesting rules as `session_scope()`. |
+| `db.aindependent_session()` | `async context manager → AsyncSession` | Async transaction that does not bind `db.asession`. |
+| `db.close()` | `close()` | Dispose owned engines. Safe to call twice. `init()` works again afterwards. |
+| `db.aclose()` | `async aclose()` | Dispose owned engines from async code. Safe to call twice and then `init()` again. |
 
 ### Error Handling
 
@@ -218,6 +232,33 @@ with db.session_scope() as session:
 - Event publishing with an independent transaction (a transactional outbox must instead share the main transaction)
 - Reads that must not see uncommitted data from the caller
 - Background tasks that need their own transaction lifecycle
+
+### Async Sessions
+
+Async services use the same scoping rules with an `a` prefix. Set `DATABASE_ASYNC_DRIVER` and install the extra that provides that driver:
+
+| Driver | Install |
+|--------|---------|
+| `aiosqlite` | `pip install 'bedrock-core[async-sqlite]'` |
+| `asyncpg`, `psycopg` | `pip install 'bedrock-core[async-postgresql]'` |
+| `asyncmy`, `aiomysql` | `pip install 'bedrock-core[async-mysql]'` |
+
+`db.asession_scope()` commits on a clean exit, rolls back on any exception, and refuses to nest when an async session is already bound. `db.aindependent_session()` does not bind `db.asession`. The async session uses its own context variable, so a sync session in the same task stays in place. A missing driver package raises `DatabaseConfigurationError` and names the extra to install.
+
+```python
+from bedrock.database import db, DbSettings
+
+db.init(settings=DbSettings(ASYNC_DRIVER="aiosqlite"))
+
+async with db.asession_scope() as session:
+    session.add(Product(name="Widget"))
+
+await db.aclose()
+```
+
+### Closing Engines
+
+`db.close()` and `db.aclose()` dispose the sync engine and, when one was created, the async engine. Calling either one again does nothing. After they return, `db.init()` can configure the manager again. These methods do not shut down the module registry. The caller that owns the process lifetime invokes them during shutdown.
 
 ### Binding an External Session
 
@@ -478,6 +519,22 @@ Each app's migrations directory is audited before operations. If a revision file
 ### First Install
 
 When the app's branch has no applied database revision, `ensure_schema()` creates its tables from SQLAlchemy metadata and stamps the branch at head. This avoids running migration scripts for a first installation even when revision files exist.
+
+### Migration Lock
+
+`upgrade` and `downgrade`, including `ensure_schema()` and `uninstall()`, take a database lock so two processes do not migrate the same database together.
+
+| Dialect | Lock | Wait |
+|---------|------|------|
+| PostgreSQL | `pg_try_advisory_lock` | Polled until `DATABASE_MIGRATION_LOCK_TIMEOUT` (default 30 seconds) |
+| MySQL, MariaDB | `GET_LOCK` | Same timeout, rounded up to whole seconds |
+| SQLite | none | Run migrations from a single process |
+
+A timeout raises `MigrationError`. SQLite has no shared lock in this manager.
+
+### `bedrock db check`
+
+`bedrock db check <app>` prints the current and head revisions for the app and for every other installed app that already has migration scripts. It does not change the database and does not create the Alembic version table. The process exits with status 1 when any reported branch is `behind` or `unknown`. `unknown` includes a database that has never been migrated. Use the command as a deploy gate before serving traffic. See [CLI Reference — Database Commands](/docs/guides/cli#database-commands-bedrock-db).
 
 ## Model Observer
 

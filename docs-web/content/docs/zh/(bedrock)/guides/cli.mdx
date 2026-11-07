@@ -207,6 +207,8 @@ bedrock db upgrade myapp.users abc123def456
 
 **重要：** 只会升级指定应用的分支，其他分支不会受到影响。
 
+升级和降级会获取迁移锁。PostgreSQL 使用 advisory lock，MySQL 和 MariaDB 使用 `GET_LOCK`，等待时间为 `DATABASE_MIGRATION_LOCK_TIMEOUT` 秒（默认 30）。SQLite 迁移不加锁，请只在一个进程中运行。超时会导致命令失败。
+
 ---
 
 ### `bedrock db downgrade`
@@ -269,6 +271,36 @@ bedrock db current <app_import_path>
 $ bedrock db current myapp.users
 
 Current revision: abc123def456
+```
+
+---
+
+### `bedrock db check`
+
+报告每个已加载迁移分支是否位于 head。该命令只读取数据库，不会修改它。
+
+```bash
+bedrock db check <app_import_path>
+```
+
+表格列出分支、已应用版本、脚本 head 和状态：
+
+| 状态 | 含义 | 退出码 |
+|-------|---------|-----------|
+| `at-head` | 已应用版本与分支 head 一致 | 参与退出码 0 |
+| `behind` | 已应用该分支上更早的版本 | 退出码 1 |
+| `unknown` | 尚未应用版本、分支没有脚本，或已应用的版本不属于该分支 | 退出码 1 |
+
+只有每个被报告的分支都是 `at-head` 时，进程才以 0 退出。
+
+**示例：**
+
+```bash
+$ bedrock db check myapp.users
+
+Branch        Current       Head          State
+myapp.users   abc123def456  abc123def456  at-head
+✓ All migration branches are at head.
 ```
 
 ---

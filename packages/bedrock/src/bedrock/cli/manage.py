@@ -41,8 +41,12 @@ def _bootstrap_migrations_manager():
     from bedrock.database.migrations_manager import MigrationsManager
     from bedrock.module import apps
 
-    database_url = DbSettings().SQLALCHEMY_DATABASE_URI
-    return MigrationsManager(registry=apps, database_url=database_url)
+    settings = DbSettings()
+    return MigrationsManager(
+        registry=apps,
+        database_url=settings.SQLALCHEMY_DATABASE_URI,
+        lock_timeout=settings.MIGRATION_LOCK_TIMEOUT,
+    )
 
 
 @manage_app.command()
