@@ -108,9 +108,12 @@ and returns its import path.
 | `files` | any relative path, e.g. `installation.py`, `commands.py`, `domains/x/service.py` | none |
 
 Source strings are dedented. `name` must be a plain identifier and unique within the test.
-After the test, the package and its submodules leave `sys.modules`, and SQLAlchemy models it defined
-are removed from `BedrockModel.metadata` and the mapper registry. The next test can therefore create
-a module with the same name and the same model classes without warnings.
+After the test, the package and its submodules leave `sys.modules`, and the tables it defined (mapped
+models and plain `Table` objects such as many-to-many association tables) are removed from
+`BedrockModel.metadata`, with the model classes removed from the mapper registry. The next test can
+therefore create a module with the same name and the same models without warnings. When the test
+also uses `bedrock_runtime`, this cleanup waits until the runtime has shut the modules down, so an
+`on_shutdown` hook can still import from its package regardless of fixture order.
 
 ## Database rollback
 

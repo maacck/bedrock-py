@@ -80,6 +80,43 @@ def test_cleanup_allows_redefining_model_without_warnings(tmp_path: Path, monkey
             assert "factory_test_table" not in BedrockModel.metadata.tables
 
 
+def test_cleanup_removes_unmapped_association_tables(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = """
+        from sqlalchemy import Column, ForeignKey, Table
+        from sqlalchemy.orm import Mapped, mapped_column, relationship
+        from bedrock.database.base import BedrockModel
+
+        factory_tags = Table(
+            "factory_post_tags",
+            BedrockModel.metadata,
+            Column("post_id", ForeignKey("factory_posts.id"), primary_key=True),
+            Column("tag_id", ForeignKey("factory_tags.id"), primary_key=True),
+        )
+
+        class FactoryTag(BedrockModel):
+            __tablename__ = "factory_tags"
+            id: Mapped[int] = mapped_column(primary_key=True)
+
+        class FactoryPost(BedrockModel):
+            __tablename__ = "factory_posts"
+            id: Mapped[int] = mapped_column(primary_key=True)
+            tags = relationship(FactoryTag, secondary=factory_tags)
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        for index in range(2):
+            root = tmp_path / str(index)
+            root.mkdir()
+            monkeypatch.syspath_prepend(str(root))
+            factory = ModuleFactory(root)
+            try:
+                factory("factory_m2m", models=source)
+                importlib.import_module("factory_m2m.models")
+            finally:
+                factory.cleanup()
+            assert not {"factory_post_tags", "factory_tags", "factory_posts"} & set(BedrockModel.metadata.tables)
+
+
 def test_rejects_invalid_and_duplicate_names(module_factory: ModuleFactory) -> None:
     for name in ("invalid.name", "invalid-name", "", "1invalid"):
         with pytest.raises(ValueError):

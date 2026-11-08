@@ -43,6 +43,25 @@ def _reset_settings_proxies() -> None:
         proxy._wrapped = None
 
 
+# One list of deferred cleanups per open ``isolated_runtime()``, innermost last.
+_AFTER_SHUTDOWN: list[list[Callable[[], object]]] = []
+
+
+def _defer_until_runtime_shutdown(callback: Callable[[], object]) -> bool:
+    """Run ``callback`` in the innermost open runtime's teardown, right after it shuts its modules down.
+
+    Fixtures that own resources the modules' ``on_shutdown`` hooks may still need (such as the temporary packages of
+    ``module_factory``) use this so their cleanup does not depend on fixture teardown order.
+
+    Returns:
+        ``False`` when no runtime is open; the caller then cleans up immediately.
+    """
+    if not _AFTER_SHUTDOWN:
+        return False
+    _AFTER_SHUTDOWN[-1].append(callback)
+    return True
+
+
 @contextmanager
 def isolated_runtime() -> Iterator[BedrockRuntime]:
     """Temporarily isolate the global module runtime and restore process state.
@@ -73,6 +92,7 @@ def isolated_runtime() -> Iterator[BedrockRuntime]:
     owners = (bedrock, module_package, registry_module, lifecycle_module)
     original_apps = [owner.apps for owner in owners]
     runtime = BedrockRuntime(ModuleRegistry(), [])
+    after_shutdown: list[Callable[[], object]] = []
 
     def record(
         kind: Literal["loaded", "ready", "registry_ready", "shutdown", "registry_shutdown"],
@@ -109,6 +129,7 @@ def isolated_runtime() -> Iterator[BedrockRuntime]:
 
     body_error: BaseException | None = None
     try:
+        _AFTER_SHUTDOWN.append(after_shutdown)
         for owner in owners:
             setattr(owner, "apps", runtime.registry)  # noqa: B010
         for signal, kind in (
@@ -134,6 +155,9 @@ def isolated_runtime() -> Iterator[BedrockRuntime]:
                 runtime.registry.shutdown()
 
         attempt(shutdown)
+        _AFTER_SHUTDOWN[:] = [entry for entry in _AFTER_SHUTDOWN if entry is not after_shutdown]
+        for callback in after_shutdown:
+            attempt(callback)
         attempt(restore_signals)
         attempt(container.reset)
         attempt(hooks.reset)

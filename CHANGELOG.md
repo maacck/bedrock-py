@@ -17,8 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     during the test, resets the DI container and hooks, restores `os.environ`, and drops cached
     `SettingsProxy` values. Backed by the `isolated_runtime()` context manager.
   - `module_factory(name, *, manifest=None, bootstrap=None, models=None, files=None)` writes
-    importable temporary Bedrock modules and removes them, including their SQLAlchemy models,
-    after the test, so the next test can reuse the name.
+    importable temporary Bedrock modules and removes them after the test, including their mapped
+    models and association tables, so the next test can reuse the name. With `bedrock_runtime`,
+    the cleanup waits until the runtime has shut the modules down.
   - `db_session` runs the test's database work on one connection inside an outer transaction that
     is rolled back afterwards; `commit()` in service code (including `db.session_scope()`) commits a
     savepoint. `rollback_session()` and `arollback_session()` provide the same isolation as context

@@ -98,8 +98,10 @@ def test_ready_hook_runs(bedrock_runtime, module_factory):
 | `files` | 任意相对路径，如 `installation.py`、`commands.py`、`domains/x/service.py` | 无 |
 
 源码字符串会先去除公共缩进。`name` 必须是普通标识符，并且在一个测试内唯一。
-测试结束后，该包及其子模块从 `sys.modules` 移除，它定义的 SQLAlchemy 模型从 `BedrockModel.metadata`
-和 mapper 注册表中移除。因此下一个测试可以创建同名模块和同名模型类，不会产生警告。
+测试结束后，该包及其子模块从 `sys.modules` 移除；它定义的表（映射模型的表，以及多对多关联表这类普通 `Table`）
+从 `BedrockModel.metadata` 移除，模型类也从 mapper 注册表中移除。因此下一个测试可以创建同名模块和同名模型，
+不会产生警告。测试同时使用 `bedrock_runtime` 时，这一清理会等到 runtime 关闭模块之后才执行，
+所以无论 fixture 的声明顺序如何，`on_shutdown` hook 都还能从自己的包里 import。
 
 ## 数据库回滚
 
