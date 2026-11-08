@@ -30,6 +30,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with `asyncio.run()`. The calling thread drives the loop and blocks; calls from several threads run one at a
   time. It works without `setup()`, and raises `RuntimeError` inside a running event loop, after `asetup()` on
   a loop that is still open, and from a thread that a coroutine on the runtime loop is waiting for.
+  `bedrock.shutdown()` and `ashutdown()` raise `RuntimeError` before shutting anything down when called from
+  work running on the runtime loop, which cannot close itself; call `shutdown()` after `run_async()` returns.
 
 ### Changed
 

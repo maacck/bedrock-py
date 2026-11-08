@@ -10,7 +10,7 @@ import sys
 from collections.abc import Awaitable
 from typing import TYPE_CHECKING
 
-from ._loop import discard_awaitable, loop_is_running, runtime_loop
+from ._loop import discard_awaitable, inside_runtime_loop, loop_is_running, runtime_loop
 from .module import ModuleAsyncRequiredError, apps
 from .module._runtime import AwaitEffect, CallEffect, run_in_worker
 from .module.registry import Finalizer
@@ -154,8 +154,11 @@ def shutdown() -> None:
         ModuleLifecycleError: After all attempts, if any module or database step failed.
         ModuleAsyncRequiredError: If an asynchronous engine or hook has to be released inside a running
             event loop. Raised before anything is shut down.
+        RuntimeError: When called from work running on the runtime loop, which cannot close itself (for
+            example inside a coroutine passed to :func:`run_async`). Raised before anything is shut down.
     """
     global _async_setup_loop
+    _refuse_inside_runtime_loop("shutdown")
     if loop_is_running() and _db_manager_has_async_engine():
         raise ModuleAsyncRequiredError(
             "The database has an initialized async engine, which cannot be released from shutdown() inside a "
@@ -175,12 +178,24 @@ async def ashutdown() -> None:
 
     Raises:
         ModuleLifecycleError: After all attempts, if any module or database step failed.
+        RuntimeError: When awaited by work running on the runtime loop (for example inside a coroutine passed to
+            :func:`run_async`). Raised before anything is shut down; call :func:`shutdown` after
+            :func:`run_async` returns instead.
     """
     global _async_setup_loop
+    _refuse_inside_runtime_loop("ashutdown")
     await apps._ashutdown_with_cleanups(_database_finalizers)
     _async_setup_loop = None
     if runtime_loop.is_open:
         await run_in_worker(runtime_loop.close)
+
+
+def _refuse_inside_runtime_loop(entrypoint: str) -> None:
+    if inside_runtime_loop():
+        raise RuntimeError(
+            f"bedrock.{entrypoint}() cannot run inside work on Bedrock's runtime loop, because it closes that loop. "
+            "Call bedrock.shutdown() after bedrock.run_async() returns."
+        )
 
 
 def run_async[T](awaitable: Awaitable[T]) -> T:

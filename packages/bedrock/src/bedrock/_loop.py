@@ -66,6 +66,11 @@ async def _await[T](awaitable: Awaitable[T]) -> T:
     return await awaitable
 
 
+def inside_runtime_loop() -> bool:
+    """Return whether the caller is work running on the runtime loop, or a ``to_thread`` worker that work started."""
+    return _driving.get()
+
+
 class RuntimeLoop:
     """The persistent event loop shared by synchronous lifecycle entrypoints and ``run_async()``.
 

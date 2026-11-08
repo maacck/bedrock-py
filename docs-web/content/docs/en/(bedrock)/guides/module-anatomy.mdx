@@ -354,6 +354,7 @@ bedrock.shutdown()
 - **No background thread.** The calling thread drives the loop and blocks until the coroutine finishes. Calls from several threads run one at a time.
 - **Works without `setup()`.** The loop is created on first use. `bedrock.shutdown()` cancels work left on it and closes it once everything is released; the next call starts a new loop. If a shutdown step fails, the loop stays open so a retried shutdown closes clients on the loop that opened them.
 - **It raises `RuntimeError` and closes the coroutine without running it** when called from a thread with a running event loop (`await` the coroutine there instead), when Bedrock was set up with `asetup()` on an event loop that is still open (its hooks' clients live on that loop), or from a thread that a coroutine on the runtime loop is waiting for, such as a function passed to `asyncio.to_thread()`.
+- **Shut down outside it.** `bedrock.shutdown()` and `await bedrock.ashutdown()` raise `RuntimeError` before shutting anything down when called from work running on the runtime loop (inside a coroutine passed to `run_async()`, or a thread it waits for), because that loop cannot close itself. Call `bedrock.shutdown()` after `run_async()` returns.
 
 ### Signals
 

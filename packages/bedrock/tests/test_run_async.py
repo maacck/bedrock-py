@@ -150,6 +150,25 @@ def test_a_worker_thread_of_the_loop_raises_instead_of_deadlocking() -> None:
         bedrock.run_async(nested())
 
 
+@pytest.mark.usefixtures("bedrock_runtime")
+@pytest.mark.parametrize("shutdown_from", ["await_ashutdown", "thread_shutdown"])
+def test_shutdown_from_runtime_loop_work_refuses_before_shutting_down(client_module: str, shutdown_from: str) -> None:
+    bedrock.setup(client_module)
+
+    async def stop() -> None:
+        if shutdown_from == "await_ashutdown":
+            await bedrock.ashutdown()
+        else:
+            await asyncio.to_thread(bedrock.shutdown)
+
+    with pytest.raises(RuntimeError, match="after bedrock.run_async"):
+        bedrock.run_async(stop())
+
+    assert not _client().closed
+    bedrock.shutdown()
+    assert _client().closed
+
+
 def test_calls_from_several_threads_run_one_at_a_time() -> None:
     active, peak, results = 0, 0, []
     lock = threading.Lock()
