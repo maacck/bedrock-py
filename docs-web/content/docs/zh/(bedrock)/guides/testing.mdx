@@ -50,7 +50,7 @@ def test_orders_start_after_billing(bedrock_runtime, module_factory):
 
 1. 尚未关闭的模块通过 `registry.shutdown()` 关闭。
 2. 测试期间连接到生命周期 signal（`bedrock.module.signals`）的 receiver 被移除。
-3. 关闭 Bedrock 的运行时循环（见 `bedrock.run_async()`），下一个测试会使用新的循环。
+3. 关闭 Bedrock 的运行时循环（见 `bedrock.run_async()`），下一个测试会使用新的循环。如果循环仍开着且数据库已有异步 engine，会先在该循环上执行 `db.aclose()`，因为连接池中的异步连接属于这个循环；同步 engine 和 `db.init()` 的配置保留，下次异步访问会新建 engine。
 4. DI 容器和 hook 注册表被重置，与 `clean_container`、`clean_hooks` 相同。
 5. 恢复 `os.environ`。
 6. 每个 `SettingsProxy` 丢弃缓存的 settings，下次访问时重新读取环境变量。fixture 开始时也会做一次，

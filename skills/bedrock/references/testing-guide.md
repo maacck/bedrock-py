@@ -43,7 +43,9 @@ def test_orders_start_after_billing(bedrock_runtime, module_factory):
 - Teardown (pass or fail), every step attempted, first failure raised afterwards:
   1. `registry.shutdown()` if any module is not shut down;
   2. remove receivers connected to `bedrock.module.signals` during the test;
-  3. close Bedrock's runtime loop (the `bedrock.run_async()` loop), so the next test gets a fresh one;
+  3. if the runtime loop is open, `await db.aclose()` on it (pooled async connections are bound to that loop; the sync
+     engine and `db.init()` configuration stay), then close Bedrock's runtime loop (the `bedrock.run_async()` loop),
+     so the next test gets a fresh loop and a fresh async engine;
   4. `container.reset()` and `hooks.reset()`;
   5. restore `os.environ`;
   6. drop the cache of every `SettingsProxy` (also done at start, so `monkeypatch.setenv` reaches settings an earlier

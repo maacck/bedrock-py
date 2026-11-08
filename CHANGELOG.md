@@ -14,7 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `bedrock_runtime` gives each test a `BedrockRuntime` with a fresh module `registry`, which `bedrock.setup()`, `asetup()`,
     `shutdown()` and `ashutdown()` act on, records lifecycle events as `LifecycleEvent(kind, module)`,
     and on teardown shuts the registry's modules down, removes lifecycle-signal receivers added
-    during the test, resets the DI container and hooks, restores `os.environ`, and drops cached
+    during the test, releases an async database engine used on the runtime loop before closing that loop (the
+    synchronous engine stays), resets the DI container and hooks, restores `os.environ`, and drops cached
     `SettingsProxy` values. Backed by the `isolated_runtime()` context manager, which yields the same `BedrockRuntime`.
   - `module_factory(name, *, manifest=None, bootstrap=None, models=None, files=None)` writes
     importable temporary Bedrock modules and removes them after the test, including their mapped

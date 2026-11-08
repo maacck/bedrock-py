@@ -53,7 +53,7 @@ When the test ends, whether it passed or failed:
 
 1. Modules that are not shut down yet are shut down with `registry.shutdown()`.
 2. Receivers connected to the lifecycle signals (`bedrock.module.signals`) during the test are removed.
-3. Bedrock's runtime loop (see `bedrock.run_async()`) is closed, so the next test starts a fresh one.
+3. Bedrock's runtime loop (see `bedrock.run_async()`) is closed, so the next test starts a fresh one. If the loop is open and the database has an async engine, `db.aclose()` runs on the loop first, because pooled async connections belong to it; the synchronous engine and the `db.init()` configuration stay, and the next async access builds a new engine.
 4. The DI container and the hook registry are reset, like `clean_container` and `clean_hooks`.
 5. `os.environ` is restored.
 6. Every `SettingsProxy` drops its cached settings, so the next access reads the environment again.
