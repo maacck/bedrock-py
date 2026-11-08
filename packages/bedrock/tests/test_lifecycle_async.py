@@ -1107,18 +1107,23 @@ class TestCancellationDrainsWorkerHooks:
         blocker = _BlockingHook()
         later: list[str] = []
 
-        def blocking_receiver(sender: Any, **kwargs: Any) -> None:
-            if kwargs["module"].name == "rcv_b":
-                blocker(registry)
+        def make_receiver() -> Callable[..., None]:
+            # Receiver order follows set iteration, so whichever receiver runs first blocks; any later one records.
+            def receiver(sender: Any, **kwargs: Any) -> None:
+                if kwargs["module"].name != "rcv_b":
+                    return
+                if blocker.started.is_set():
+                    later.append("ran")
+                else:
+                    blocker(registry)
 
-        def later_receiver(sender: Any, **kwargs: Any) -> None:
-            if kwargs["module"].name == "rcv_b":
-                later.append("ran")
+            return receiver
 
+        first_receiver, second_receiver = make_receiver(), make_receiver()
         if signal_name == "module_shutdown":
             await registry.apopulate(["rcv_b"])
-        signal.connect(blocking_receiver, weak=False)
-        signal.connect(later_receiver, weak=False)
+        signal.connect(first_receiver, weak=False)
+        signal.connect(second_receiver, weak=False)
         try:
             operation = registry.ainstall("rcv_b") if signal_name == "module_loaded" else registry.ashutdown()
             task = asyncio.create_task(operation)
@@ -1134,8 +1139,8 @@ class TestCancellationDrainsWorkerHooks:
             with pytest.raises(asyncio.CancelledError):
                 await task
         finally:
-            signal.disconnect(blocking_receiver)
-            signal.disconnect(later_receiver)
+            signal.disconnect(first_receiver)
+            signal.disconnect(second_receiver)
 
         assert later == []
         assert blocker.running == 0
