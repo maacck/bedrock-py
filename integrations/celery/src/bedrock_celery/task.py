@@ -5,11 +5,10 @@ import inspect
 from collections.abc import Callable
 from typing import Any, ClassVar
 
+import bedrock
 from bedrock.database import db
 from bedrock.di import container
 from celery import Task
-
-from .worker import run_on_worker_loop
 
 
 class BedrockTask(Task):
@@ -17,17 +16,18 @@ class BedrockTask(Task):
 
     Use it as the app's task class (``Celery(..., task_cls=BedrockTask)``) or per task (``base=BedrockTask``).
 
-    A ``def`` task runs inside ``db.session_scope()``; an ``async def`` task runs on the worker process's event
-    loop inside ``db.asession_scope()``. Either way the task never commits on its behalf: services work in
-    ``db.session`` / ``db.asession`` and commit, and whatever is still uncommitted when the task ends is rolled
-    back. Because a session is bound, ``db.session_scope()`` / ``db.asession_scope()`` raise ``RuntimeError``
-    inside a task; use ``db.independent_session()`` / ``db.aindependent_session()`` for side transactions.
+    A ``def`` task runs inside ``db.session_scope()``; an ``async def`` task runs on Bedrock's runtime loop (see
+    ``bedrock.run_async()``) inside ``db.asession_scope()``. Either way the task never commits on its behalf:
+    services work in ``db.session`` / ``db.asession`` and commit, and whatever is still uncommitted when the task
+    ends is rolled back. Because a session is bound, ``db.session_scope()`` / ``db.asession_scope()`` raise
+    ``RuntimeError`` inside a task; use ``db.independent_session()`` / ``db.aindependent_session()`` for side
+    transactions.
     """
 
     _runs_async: ClassVar[bool] = False
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
-        """Turn an ``async def`` ``run`` into a sync one that runs it on the worker loop.
+        """Turn an ``async def`` ``run`` into a sync one that runs it with ``bedrock.run_async()``.
 
         Celery calls ``run`` synchronously, with the task's request pushed for the calling thread. Running the
         coroutine to completion inside that call keeps ``self.request`` and ``self.retry()`` working.
@@ -46,8 +46,6 @@ class BedrockTask(Task):
 
         Raises:
             DatabaseNotConfiguredError: When ``db.init()`` has not been called in the worker process.
-            ImproperlyConfigured: For an async task when the worker process was not set up, or when the pool
-                runs tasks concurrently.
         """
         if self._runs_async:
             with container.scope("task"):
@@ -61,7 +59,7 @@ class BedrockTask(Task):
 
 
 def _run_with_async_session(fn: Callable[..., Any]) -> Callable[..., Any]:
-    """Wrap the coroutine function *fn* so a sync call runs it on the worker loop with a bound async session."""
+    """Wrap the coroutine function *fn* so a sync call runs it on the runtime loop with a bound async session."""
 
     async def in_session(*args: Any, **kwargs: Any) -> Any:
         async with db.asession_scope() as session:
@@ -72,6 +70,6 @@ def _run_with_async_session(fn: Callable[..., Any]) -> Callable[..., Any]:
 
     @functools.wraps(fn)
     def run(*args: Any, **kwargs: Any) -> Any:
-        return run_on_worker_loop(lambda: in_session(*args, **kwargs))
+        return bedrock.run_async(in_session(*args, **kwargs))
 
     return run

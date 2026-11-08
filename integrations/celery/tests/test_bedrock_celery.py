@@ -10,12 +10,12 @@ import time
 from collections.abc import Iterator
 from pathlib import Path
 
+import bedrock
 import pytest
 from bedrock.database import DbSettings, db
 from bedrock.di import Lifetime, container
-from bedrock.exc import ImproperlyConfigured
 from bedrock.testing.runtime import isolated_runtime
-from bedrock_celery import BedrockTask, setup_worker_process, shutdown_worker_process
+from bedrock_celery import BedrockTask
 from celery import Celery
 from sqlalchemy import String, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -137,8 +137,7 @@ def runtime(probe_path: Path, tmp_path: Path) -> Iterator[None]:
         try:
             yield
         finally:
-            shutdown_worker_process()
-            db.close()
+            bedrock.shutdown()  # releases the async engine on the runtime loop, then closes the loop
 
 
 def _stored_names() -> list[str]:
@@ -165,8 +164,8 @@ def test_failing_sync_task_keeps_only_what_it_committed() -> None:
 
 
 @pytest.mark.usefixtures("runtime")
-def test_async_task_runs_on_the_loop_the_process_was_set_up_on() -> None:
-    setup_worker_process("probe_app")
+def test_async_task_runs_on_the_loop_setup_ran_async_hooks_on() -> None:
+    bedrock.setup("probe_app")
 
     result = awrite_items.apply(task_id="task-1").get()
 
@@ -176,30 +175,18 @@ def test_async_task_runs_on_the_loop_the_process_was_set_up_on() -> None:
 
 
 @pytest.mark.usefixtures("runtime")
-def test_async_task_requires_a_set_up_worker_process() -> None:
-    with pytest.raises(ImproperlyConfigured, match="connect_worker"):
-        awrite_items.apply().get()
+def test_async_tasks_from_several_threads_share_the_loop() -> None:
+    bedrock.setup("probe_app")
+    results: list[dict[str, object]] = []
 
-    assert _stored_names() == []
+    threads = [threading.Thread(target=lambda: results.append(awrite_items.apply().get())) for _ in range(3)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
 
-
-@pytest.mark.usefixtures("runtime")
-def test_async_task_refuses_a_thread_that_does_not_own_the_loop() -> None:
-    setup_worker_process("probe_app")
-    errors: list[BaseException] = []
-
-    def call() -> None:
-        try:
-            awrite_items.apply().get()
-        except BaseException as exc:  # noqa: BLE001
-            errors.append(exc)
-
-    thread = threading.Thread(target=call)
-    thread.start()
-    thread.join()
-
-    assert len(errors) == 1 and isinstance(errors[0], ImproperlyConfigured)
-    assert "prefork or solo" in errors[0].detail
+    assert [result["same_loop"] for result in results] == [True, True, True]
+    assert _stored_names() == ["committed"] * 3
 
 
 WORKER_MODULE = """
@@ -238,7 +225,7 @@ def _wait_for(condition, timeout: float = 30) -> None:
         time.sleep(0.1)
 
 
-@pytest.mark.parametrize(("pool", "children"), [("prefork", 2), ("solo", 0)])
+@pytest.mark.parametrize(("pool", "children"), [("prefork", 2), ("solo", 0), ("threads", 0)])
 def test_worker_sets_bedrock_up_in_each_process_that_runs_tasks(
     probe_path: Path, tmp_path: Path, pool: str, children: int
 ) -> None:

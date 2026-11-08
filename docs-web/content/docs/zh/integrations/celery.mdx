@@ -7,10 +7,9 @@ description: 安装 bedrock-celery，在 Celery worker 中运行 Bedrock 模块
 
 | 组件 | 作用 |
 | --- | --- |
-| `connect_worker(app)` | 在每个 worker 进程中启动 Bedrock（使用 prefork 进程池时在 fork 之后），进程退出时关闭 |
+| `connect_worker(app)` | 在每个 worker 进程中调用 `bedrock.setup()`（使用 prefork 进程池时在 fork 之后），进程退出时调用 `bedrock.shutdown()` |
 | `BedrockTask` | 为每个任务提供独立的 DI 作用域和数据库 session，任务结束时回滚仍未提交的内容 |
-| `async def` 任务 | 在 worker 进程的事件循环上运行，使用 `db.asession`，与生命周期钩子打开的异步客户端共用同一个循环 |
-| `setup_worker_process(app)` / `shutdown_worker_process()` | 不经过 worker 的同一套生命周期，用于测试和 eager 执行 |
+| `async def` 任务 | 通过 [`bedrock.run_async()`](/docs/guides/module-anatomy#在同步代码中调用异步代码) 在 Bedrock 的运行时循环上运行，使用 `db.asession`，与生命周期钩子打开的异步客户端共用同一个循环 |
 
 ## 安装
 
@@ -137,7 +136,7 @@ celery -A shop.adapters.worker.app worker --pool prefork
 | `prefork`（默认） | 每个子进程启动后（`worker_process_init`）；父进程从不启动 | 该子进程退出时（`worker_process_shutdown`） |
 | `solo`、`threads`、`gevent`、`eventlet` | 在 worker 进程中启动一次（`worker_init`） | worker 停止时（`worker_shutdown`） |
 
-每个启动了 Bedrock 的进程都有自己的事件循环。Bedrock 在这个循环上用 `bedrock.asetup()` 启动、用 `bedrock.ashutdown()` 关闭，因此异步 `on_load` 钩子和异步任务使用同一个循环：钩子打开的异步客户端可以在任务中使用。关闭时也会关闭数据库 engine。因 `worker_max_tasks_per_child` 被替换的子进程会重新启动 Bedrock。
+钩子的运行方式与直接调用 `bedrock.setup()` 完全一样：同步钩子在启动 Bedrock 的线程中运行，异步钩子在 Bedrock 的运行时循环上运行。异步任务通过 `bedrock.run_async()` 使用同一个循环，因此钩子打开的异步客户端可以在任务中使用。`bedrock.shutdown()` 也会关闭数据库 engine 和运行时循环。因 `worker_max_tasks_per_child` 被替换的子进程会重新启动 Bedrock。
 
 在创建 Celery 应用的模块中调用一次 `connect_worker()`。它不配置日志；如果需要 Bedrock 的日志输出，请在那里调用 `bedrock.logging.configure_logging()`。
 
@@ -155,43 +154,39 @@ celery -A shop.adapters.worker.app worker --pool prefork
 
 ## 异步任务
 
-用 `async def` 声明任务即可调用异步 service。Celery 以同步方式运行任务，因此 `BedrockTask` 在这次调用中把协程放到 worker 进程的事件循环上运行完毕：`self.request`、`self.retry()` 和其他任务选项与 `def` 任务中的行为一致。
+用 `async def` 声明任务即可调用异步 service。Celery 以同步方式运行任务，因此 `BedrockTask` 在这次调用中用 `bedrock.run_async()` 把协程运行完毕：`self.request`、`self.retry()` 和其他任务选项与 `def` 任务中的行为一致。`def` 任务也可以自己调用 `bedrock.run_async()` 完成单次异步调用。
 
-- **运行异步任务的 worker 请使用 prefork 或 solo 进程池。**异步任务在启动进程的那个线程上逐个运行。在一个进程内同时运行多个任务的进程池（`threads`、`gevent`、`eventlet`）不支持异步任务：从其他线程调用异步任务，或在另一个异步任务运行期间调用，会抛出 `ImproperlyConfigured`。`def` 任务没有这个限制。
+- **一个进程内的异步部分一次只运行一个任务。**运行时循环没有自己的线程，由任务所在的线程驱动。使用 `threads` 进程池时，多个线程的异步任务轮流使用这个循环，`def` 任务仍然并发运行。异步任务已在 `prefork`、`solo` 和 `threads` 进程池下测试。
 - 异步任务只绑定 `db.asession`。请在其中使用异步 service，而不是使用 `db.session` 的 service。
-- 不要在任务中创建自己的事件循环（`asyncio.run()`）：异步 engine 和客户端属于创建它们的那个循环。
+- 不要在任务中调用 `asyncio.run()`：它每次调用都会新建并关闭一个循环，而异步 engine 和客户端属于创建它们的那个循环。请使用 `bedrock.run_async()`。
 
 ## 测试
 
-任务可以用 `task.apply()` eager 执行。`def` 任务只需要 `db.init()`。异步任务需要 worker 循环，因此在 fixture 中启动进程：
+任务可以用 `task.apply()` eager 执行。`def` 任务只需要 `db.init()`。异步任务不启动 Bedrock 也能运行；如果它们依赖 `on_load` 钩子打开的客户端，就先启动 Bedrock：
 
 ```python
+import bedrock
 import pytest
-from bedrock_celery import setup_worker_process, shutdown_worker_process
 
 from shop.adapters.worker.inventory.tasks import arestock
 
 
 @pytest.fixture
-def worker_process():
-    setup_worker_process("shop.inventory")
+def bedrock_app():
+    bedrock.setup("shop.inventory")
     yield
-    shutdown_worker_process()  # 同时关闭数据库 engine
+    bedrock.shutdown()  # 同时关闭数据库 engine 和运行时循环
 
 
-def test_arestock(worker_process):
+def test_arestock(bedrock_app):
     assert arestock.apply(args=("A1", 3)).get() == 3
 ```
-
-没有这个 fixture 时，异步任务会抛出 `ImproperlyConfigured`。
 
 ## API 参考
 
 | 名称 | 签名 | 说明 |
 | --- | --- | --- |
 | `connect_worker` | `connect_worker(app: str \| None = None) -> None` | 连接 worker 信号；在创建 Celery 应用的地方调用一次 |
-| `BedrockTask` | `Celery(..., task_cls=BedrockTask)` 或 `@app.task(base=BedrockTask)` | 每个任务一个 DI 作用域和数据库 session；在 worker 循环上运行 `async def` 任务 |
-| `setup_worker_process` | `setup_worker_process(app: str \| None = None) -> None` | 在当前进程的新事件循环上启动 Bedrock；已启动时什么都不做 |
-| `shutdown_worker_process` | `shutdown_worker_process() -> None` | 关闭 Bedrock 并关闭循环；未启动时什么都不做 |
+| `BedrockTask` | `Celery(..., task_cls=BedrockTask)` 或 `@app.task(base=BedrockTask)` | 每个任务一个 DI 作用域和数据库 session；用 `bedrock.run_async()` 运行 `async def` 任务 |
 
 这个包不提供任务发现、beat 调度、重试策略或异常映射：这些留给你的应用。
