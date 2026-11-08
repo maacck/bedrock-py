@@ -36,6 +36,8 @@ class InMemoryBackend(CacheBackend):
         settings: Configuration for this backend.
     """
 
+    holds_async_resources = False
+
     def __init__(self, settings: MemoryCacheSettings | None = None) -> None:
         self._settings = settings or MemoryCacheSettings()
         self._store: dict[str, CacheEntry] = {}

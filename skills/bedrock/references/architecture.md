@@ -78,7 +78,7 @@ registry_ready signal emitted
 
 ### Shutdown
 
-Reverse install order: shutdown attempts each module's `on_shutdown` and reports failures together in `ModuleLifecycleError.failures`; `registry_shutdown` fires after all modules shut down. Failed shutdown hooks can be retried; completed shutdowns are skipped. `mark_ready()` and `shutdown()` are not re-entrant, are rejected from `on_load` hooks and `module_loaded` receivers while a module installs, and no new module can be installed from hooks or receivers during either.
+Reverse install order: shutdown attempts each module's `on_shutdown` and reports failures together in `ModuleLifecycleError.failures`; `registry_shutdown` fires after all modules shut down. Failed shutdown hooks can be retried; completed shutdowns are skipped. Each operation also has an async twin (`ainstall`, `apopulate`, `amark_ready`, `ashutdown`) that runs the same state machine; hooks may be plain or `async def`, sync entrypoints inside a running loop raise `ModuleAsyncRequiredError`, and `bedrock.shutdown()` / `ashutdown()` release the database after all module hooks. `mark_ready()` and `shutdown()` are not re-entrant, are rejected from `on_load` hooks and `module_loaded` receivers while a module installs, and no new module can be installed from hooks or receivers during either.
 
 Installation is failure-atomic: newly installed modules are removed on failure and successfully loaded modules receive best-effort reverse shutdown. `populate()` rolls back its whole installation phase, but a ready failure retains installed modules for retry. Cleanup failures raise `ModuleStartupRollbackError`. Each module's read-only `lifecycle_state` is a `ModuleLifecycleState` (`loading`, `loaded`, `ready`, `shutdown`).
 

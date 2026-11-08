@@ -2,17 +2,32 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
-import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from typing import Any
 
+from ._runtime import (
+    CallEffect,
+    Effect,
+    HookEffect,
+    LoopAdapter,
+    OperationGate,
+    SignalEffect,
+    Steps,
+    discard_awaitable,
+    drain,
+    is_protected,
+    loop_is_running,
+    run_in_worker,
+)
 from .entities import AppConfig, ModuleLifecycleState
 from .exc import (
     AppRegistryNotReady,
     DuplicateModuleError,
     InvalidModuleCallableError,
+    ModuleAsyncRequiredError,
     ModuleDependencyError,
     ModuleFailure,
     ModuleLifecycleError,
@@ -20,6 +35,16 @@ from .exc import (
 )
 from .manifest import build_app_config
 from .signals import module_loaded, module_ready, module_shutdown, registry_ready, registry_shutdown
+
+Finalizer = tuple[str, str, Effect]
+"""A cleanup step as ``(owner, phase, effect)``, run after every module hook; see ``ModuleRegistry._shutdown_with``."""
+
+_ASYNC_ENTRYPOINT_HINT = {
+    "install": "await registry.ainstall(...)",
+    "populate": "await registry.apopulate(...) (or await bedrock.asetup())",
+    "mark_ready": "await registry.amark_ready()",
+    "shutdown": "await registry.ashutdown() (or await bedrock.ashutdown())",
+}
 
 
 class _InstallAttempt:
@@ -50,6 +75,29 @@ class ModuleRegistry:
     each module's optional ``bootstrap.py`` and called directly by the registry.
     External code may observe lifecycle events through the module signals.
 
+    Every lifecycle operation has a synchronous entrypoint (``install``,
+    ``populate``, ``mark_ready``, ``shutdown``) and an asynchronous one with the
+    ``a`` prefix (``ainstall``, ``apopulate``, ``amark_ready``, ``ashutdown``).
+    Both run the same implementation, so the guarantees below hold for either.
+
+    Hook and receiver adaptation:
+
+    * A hook may be a plain function or a coroutine function. The registry calls
+      it and awaits whatever it returns when that is awaitable, so a plain function
+      may also return an awaitable only when it has async work to do.
+    * Async entrypoints await async hooks and receivers on the running loop and
+      run synchronous hooks and receivers in a worker thread (``asyncio.to_thread``),
+      like ``hooks.acall`` and ``Signal.asend``.
+    * Sync entrypoints call synchronous hooks directly and adapt async work on a
+      persistent private event loop, but only when the calling thread has no running
+      loop. The loop stays open until every module has shut down, so an async client
+      opened by one hook is closed by another on the same loop. Inside a running loop
+      they raise ``ModuleAsyncRequiredError`` naming the async entrypoint, without
+      nesting loops or leaving a coroutine unawaited. Registries whose hooks are all
+      synchronous keep working from sync entrypoints inside a running loop.
+    * Start up and shut down a registry through the same entrypoint family. Async
+      clients are bound to the loop that opened them.
+
     Lifecycle guarantees:
 
     * Installation is failure-atomic. If installing a module (or any dependency
@@ -61,21 +109,51 @@ class ModuleRegistry:
     * Each module moves forward through ``loading -> loaded -> ready -> shutdown``
       (see ``ModuleLifecycleState``). ``mark_ready`` skips modules that are
       already ready, so it can be retried after a failed ``ready`` hook.
+      ``ready`` reports that readiness was announced; a module installed later
+      stays ``loaded`` until ``mark_ready`` runs again, so read each module's
+      ``lifecycle_state`` rather than treating ``ready`` as "every module is ready".
     * ``shutdown`` attempts every module that is not yet shut down in reverse
       install order even when some hooks fail, then raises a single
       ``ModuleLifecycleError`` listing all failures. A module whose shutdown
       completed is never shut down again.
-    * ``install``, ``mark_ready`` and ``shutdown`` each run as one registry
-      operation, and the only nesting allowed is ``install`` from an ``on_load``
-      hook or a ``module_loaded`` receiver (including during its rollback, which
-      rejects new modules). Any other call from a hook or a signal receiver
-      raises ``ModuleLifecycleError`` before it changes anything: ``shutdown`` or
-      ``mark_ready`` while a module is installing, ``mark_ready`` or ``shutdown``
-      inside each other, and ``install`` of a new module while ``mark_ready`` or
-      ``shutdown`` runs. A hook that must abort an installation raises an error,
-      which rolls the installation back. The guard is plain registry state
-      rather than a thread lock, so it also protects against interleaving on a
-      single thread.
+    * ``install``, ``populate``, ``mark_ready`` and ``shutdown`` each run as one
+      registry operation, and the only nesting allowed is ``install`` from an
+      ``on_load`` hook or a ``module_loaded`` receiver (including during its
+      rollback, which rejects new modules). Any other call from a hook or a
+      signal receiver raises ``ModuleLifecycleError`` before it changes anything:
+      ``shutdown`` or ``mark_ready`` while a module is installing, ``mark_ready``
+      or ``shutdown`` inside each other, and ``install`` of a new module while
+      ``mark_ready`` or ``shutdown`` runs. A hook that must abort an installation
+      raises an error, which rolls the installation back.
+    * Operations are serialized without holding a thread lock across an ``await``.
+      A call from inside the running operation is detected through the context it
+      runs in, which includes child tasks and ``to_thread`` workers started from a
+      hook, and is rejected as above. An unrelated thread or task waits for the
+      running operation to finish. A synchronous call from another task on the
+      thread that owns the running operation raises instead of deadlocking.
+    * Cancelling an async operation leaves every module in a valid state and
+      releases the operation. An interrupted installation still rolls back; an
+      interrupted ``amark_ready`` or ``ashutdown`` resumes from the modules that
+      have not finished when called again, so hooks must be safe to run again.
+      The cancellation is raised to the caller, but not before every synchronous
+      hook or receiver that already started in a worker thread has returned. A
+      blocking function cannot be forced to stop, so cancelling may wait for an
+      in-flight hook; repeated cancellation does not shorten that wait. Rollback,
+      the next operation and the release of the operation never overlap a running
+      worker, and an awaitable returned by a cancelled plain hook is released
+      instead of being left unawaited.
+    * Installation rollback is not interruptible by the caller. Cancelling an
+      ``ainstall`` or ``apopulate`` while it rolls back (whether the rollback
+      started from an error or from the first cancellation) never aborts a
+      cleanup hook or skips a module: every introduced module is still unwound in
+      reverse order, the operation stays held until that is done, and then
+      ``CancelledError`` is raised. When an ordinary error started the rollback,
+      the error stays as the ``__cause__`` of the ``CancelledError``. Cleanup
+      failures keep their usual aggregate when no cancellation happened; when
+      ``CancelledError`` propagates they are logged and added as notes. A cleanup
+      hook that itself raises ``CancelledError`` or ``KeyboardInterrupt`` stops the
+      unwind: that module and the modules it depends on stay registered in their
+      current state, and ``shutdown`` finishes them later.
 
     Args:
         config: Optional host application configuration passed to hook callables.
@@ -87,8 +165,8 @@ class ModuleRegistry:
         self._install_order: list[str] = []
         self._ready = False
         self._shut_down = False
-        self._operation: str | None = None
-        self._lock = threading.RLock()
+        self._gate = OperationGate()
+        self._adapter = LoopAdapter()
         self._loading = False
         self._rolling_back = False
 
@@ -168,7 +246,8 @@ class ModuleRegistry:
         ``module_loaded`` receivers may install further modules, but cannot call
         ``mark_ready()`` or ``shutdown()``; raise an error to abort the installation.
 
-        This method is thread-safe.
+        This method is thread-safe. Asynchronous hooks are adapted as described on the
+        class; use :meth:`ainstall` inside a running event loop.
 
         Args:
             import_path: Python import path of the module, e.g. ``"bedrock_app"``.
@@ -182,12 +261,35 @@ class ModuleRegistry:
             ModuleLifecycleError: If the ``on_load`` hook raises, or a new module is
                 requested while installation rollback, ``mark_ready()`` or ``shutdown()``
                 is running.
+            ModuleAsyncRequiredError: If a hook or receiver needs an event loop but one is
+                already running in this thread.
             ModuleStartupRollbackError: If installation failed and unwinding modules
                 that had already loaded also failed. Its ``failures`` hold the original
                 failure first, followed by the cleanup failures.
         """
-        with self._lock:
-            return self._install_atomically([import_path])[0]
+        paths = [import_path]
+        return self._run_sync("install", lambda: self._install_atomically(paths), self._introduces(paths))[0]
+
+    async def ainstall(self, import_path: str) -> AppConfig:
+        """Install a module and its dependencies by import path, awaiting asynchronous hooks.
+
+        Same contract as :meth:`install`. Asynchronous ``on_load`` hooks and ``module_loaded``
+        receivers are awaited in dependency order; synchronous ones run in a worker thread.
+
+        Args:
+            import_path: Python import path of the module, e.g. ``"bedrock_app"``.
+
+        Returns:
+            The installed ``AppConfig``.
+
+        Raises:
+            DuplicateModuleError: If a dependency produces a naming conflict.
+            InvalidManifestError: If a manifest is missing or invalid.
+            ModuleLifecycleError: As for :meth:`install`.
+            ModuleStartupRollbackError: As for :meth:`install`.
+        """
+        paths = [import_path]
+        return (await self._run_async("install", lambda: self._install_atomically(paths), self._introduces(paths)))[0]
 
     def populate(self, import_paths: list[str]) -> list[AppConfig]:
         """Install a list of modules in declared order, then mark all ready.
@@ -199,7 +301,7 @@ class ModuleRegistry:
         ``populate`` again with the same paths) can resume without re-running
         ready hooks that already succeeded.
 
-        The registry lock is held for the whole call, so other threads wait
+        The whole call is one registry operation, so other threads and tasks wait
         until it finishes.
 
         Args:
@@ -211,18 +313,28 @@ class ModuleRegistry:
         Raises:
             ModuleLifecycleError: If ``populate`` is called while already populating,
                 or if a hook fails.
+            ModuleAsyncRequiredError: If a hook or receiver needs an event loop but one is
+                already running in this thread.
             ModuleStartupRollbackError: If installation failed and cleanup also failed.
         """
-        with self._lock:
-            if self._loading:
-                raise ModuleLifecycleError("populate() is not reentrant.")
-            self._loading = True
+        return self._run_sync("populate", lambda: self._populate(import_paths))
 
-            try:
-                self._install_atomically(import_paths)
-                return self.mark_ready()
-            finally:
-                self._loading = False
+    async def apopulate(self, import_paths: list[str]) -> list[AppConfig]:
+        """Install a list of modules, then mark all ready, awaiting asynchronous hooks.
+
+        Same contract as :meth:`populate`.
+
+        Args:
+            import_paths: Ordered list of import paths to install.
+
+        Returns:
+            All installed modules in dependency-resolved order.
+
+        Raises:
+            ModuleLifecycleError: As for :meth:`populate`.
+            ModuleStartupRollbackError: As for :meth:`populate`.
+        """
+        return await self._run_async("populate", lambda: self._populate(import_paths))
 
     def mark_ready(self) -> list[AppConfig]:
         """Call each loaded module's ``ready`` hook then emit registry-level signals.
@@ -243,46 +355,23 @@ class ModuleRegistry:
                 module and holds the hook's exception), if a module is still loading or
                 has already been shut down, or if called from a hook or signal receiver
                 while ``install``, ``mark_ready`` or ``shutdown`` is already running.
+            ModuleAsyncRequiredError: If a ``ready`` hook is asynchronous and an event loop is
+                already running in this thread. Raised before any hook runs.
         """
-        with self._lock, self._lifecycle_operation("mark_ready"):
-            modules = [self._app_configs[name] for name in self._install_order]
-            blocked = [
-                app.name
-                for app in modules
-                if app.lifecycle_state in (ModuleLifecycleState.LOADING, ModuleLifecycleState.SHUTDOWN)
-            ]
-            if blocked:
-                raise ModuleLifecycleError(
-                    f"Cannot mark the registry ready: modules still loading or already shut down: {', '.join(blocked)}."
-                )
+        return self._run_sync("mark_ready", self._mark_ready)
 
-            newly_ready = 0
-            for app in modules:
-                if app.lifecycle_state != ModuleLifecycleState.LOADED:
-                    continue
-                try:
-                    self._call_hook(app, "ready")
-                except ModuleLifecycleError as exc:
-                    error = self._aggregate_error(
-                        "Readiness failed", [ModuleFailure(module=app.name, phase="ready", error=exc)]
-                    )
-                    raise error from error.__cause__
-                app.transition_to(ModuleLifecycleState.READY)
-                newly_ready += 1
-                module_ready.send(app, registry=self, module=app, config=self.config)
+    async def amark_ready(self) -> list[AppConfig]:
+        """Call each loaded module's ``ready`` hook, awaiting asynchronous hooks.
 
-            already_announced = self._ready
-            self._ready = True
-            if already_announced and not newly_ready:
-                return modules
+        Same contract as :meth:`mark_ready`.
 
-            try:
-                self._validate_hooks()
-                registry_ready.send(self, registry=self, config=self.config)
-            except BaseException:
-                self._ready = False
-                raise
-            return modules
+        Returns:
+            All installed modules in install order.
+
+        Raises:
+            ModuleLifecycleError: As for :meth:`mark_ready`.
+        """
+        return await self._run_async("mark_ready", self._mark_ready)
 
     def shutdown(self) -> None:
         """Call each module's ``on_shutdown`` hook in reverse install order.
@@ -299,30 +388,296 @@ class ModuleRegistry:
                 receiver failed. ``failures`` lists every failure with its original cause.
                 Also raised if called from a hook or signal receiver while ``install``,
                 ``mark_ready`` or ``shutdown`` is already running.
+            ModuleAsyncRequiredError: If an ``on_shutdown`` hook is asynchronous and an event
+                loop is already running in this thread. Raised before any hook runs.
         """
-        with self._lock, self._lifecycle_operation("shutdown"):
-            modules = [self._app_configs[name] for name in reversed(self._install_order)]
-            failures: list[ModuleFailure] = []
+        self._run_sync("shutdown", lambda: self._shutdown_with(None))
 
-            for app in modules:
-                if app.lifecycle_state == ModuleLifecycleState.SHUTDOWN:
-                    continue
-                failures.extend(self._shutdown_module(app))
+    async def ashutdown(self) -> None:
+        """Call each module's ``on_shutdown`` hook in reverse install order, awaiting asynchronous hooks.
 
-            if failures:
-                raise self._aggregate_error(f"Shutdown failed for {len(failures)} step(s)", failures)
+        Same contract as :meth:`shutdown`. The coroutine completes only after every awaited
+        hook has finished; nothing started by the registry keeps running afterwards.
 
-            if self._shut_down:
-                return
-            registry_shutdown.send(self, registry=self, config=self.config)
-            self._shut_down = True
+        Raises:
+            ModuleLifecycleError: As for :meth:`shutdown`.
+        """
+        await self._run_async("shutdown", lambda: self._shutdown_with(None))
+
+    def _shutdown_with_cleanups(self, finalizers: Callable[[], list[Finalizer]]) -> None:
+        """Sync shutdown followed by process-level cleanup steps; used by ``bedrock.lifecycle.shutdown``."""
+        self._run_sync("shutdown", lambda: self._shutdown_with(finalizers))
+
+    async def _ashutdown_with_cleanups(self, finalizers: Callable[[], list[Finalizer]]) -> None:
+        """Async shutdown followed by process-level cleanup steps; used by ``bedrock.lifecycle.ashutdown``."""
+        await self._run_async("shutdown", lambda: self._shutdown_with(finalizers))
 
     # ------------------------------------------------------------------
-    # Internal helpers
+    # Operation plumbing (shared by the sync and async entrypoints)
     # ------------------------------------------------------------------
 
-    def _install(self, import_path: str, _chain: list[str], attempt: _InstallAttempt) -> AppConfig:
-        """Recursive install implementation (must be called under lock).
+    def _introduces(self, import_paths: Sequence[str]) -> Callable[[], bool]:
+        """Return a check telling whether installing ``import_paths`` would add a module."""
+        return lambda: any(path not in self._app_configs for path in import_paths)
+
+    def _run_sync(
+        self,
+        name: str,
+        steps: Callable[[], Steps[Any]],
+        introduces: Callable[[], bool] | None = None,
+    ) -> Any:
+        """Run one operation from a synchronous entrypoint."""
+        lease = self._gate.enter(name, introduces)
+        try:
+            if lease.outermost:
+                self._preflight_async_hooks(name)
+            return self._drive_sync(steps())
+        finally:
+            try:
+                if lease.outermost:
+                    self._close_adapter_if_idle()
+            finally:
+                self._gate.leave(lease)
+
+    async def _run_async(
+        self,
+        name: str,
+        steps: Callable[[], Steps[Any]],
+        introduces: Callable[[], bool] | None = None,
+    ) -> Any:
+        """Run one operation from an asynchronous entrypoint."""
+        lease = await self._gate.aenter(name, introduces)
+        try:
+            return await self._drive_async(steps())
+        finally:
+            try:
+                if lease.outermost and self._adapter.is_open and self._is_idle():
+                    await run_in_worker(self._adapter.close)
+            finally:
+                self._gate.leave(lease)
+
+    def _drive_sync(self, steps: Steps[Any]) -> Any:
+        """Execute the effects of ``steps`` synchronously and return its result."""
+        try:
+            effect = next(steps)
+            while True:
+                try:
+                    value = self._perform_sync(effect)
+                except BaseException as exc:
+                    effect = steps.throw(exc)
+                else:
+                    effect = steps.send(value)
+        except StopIteration as stop:
+            return stop.value
+
+    async def _drive_async(self, steps: Steps[Any]) -> Any:
+        """Execute the effects of ``steps`` on the running loop and return its result.
+
+        Protected effects (installation rollback) run as a child task that this driver keeps waiting for however
+        often the caller is cancelled. The first such cancellation is held back and raised when ``steps`` ends,
+        after the whole protected section ran, so cleanup keeps its owner and the operation gate until it is done.
+        """
+        deferred: asyncio.CancelledError | None = None
+        try:
+            effect = next(steps)
+            while True:
+                try:
+                    if is_protected(effect):
+                        task = asyncio.ensure_future(self._perform_async(effect))
+                        cancelled = await drain(task)
+                        deferred = deferred or cancelled
+                        value = task.result()
+                    else:
+                        value = await self._perform_async(effect)
+                except BaseException as exc:
+                    effect = steps.throw(exc)
+                else:
+                    effect = steps.send(value)
+        except StopIteration as stop:
+            if deferred is not None:
+                raise deferred from None
+            return stop.value
+        except BaseException as exc:
+            if deferred is not None and not isinstance(exc, asyncio.CancelledError):
+                raise deferred from exc
+            raise
+
+    def _perform_sync(self, effect: Effect) -> Any:
+        if isinstance(effect, HookEffect):
+            return self._call_hook_sync(effect.app, effect.hook_name)
+        if isinstance(effect, SignalEffect):
+            return effect.signal.send(effect.sender, _async_wrapper=self._adapt_receiver_sync, **effect.kwargs)
+        if isinstance(effect, CallEffect):
+            return effect.fn()
+        if loop_is_running():
+            raise self._async_required("An asynchronous cleanup step")
+        return self._adapter.run(effect.factory())
+
+    async def _perform_async(self, effect: Effect) -> Any:
+        if isinstance(effect, HookEffect):
+            return await self._call_hook_async(effect.app, effect.hook_name)
+        if isinstance(effect, SignalEffect):
+            return await effect.signal.asend(effect.sender, _sync_wrapper=self._offload_receiver, **effect.kwargs)
+        if isinstance(effect, CallEffect):
+            return effect.fn()
+        return await effect.factory()
+
+    def _preflight_async_hooks(self, name: str) -> None:
+        """Refuse to start ``mark_ready`` or ``shutdown`` in a running loop when a coroutine hook would be needed.
+
+        Raising before the first hook keeps the registry untouched. Installation cannot be checked ahead because
+        dependencies are discovered while installing; there the first awaitable hook raises, and the usual
+        rollback applies.
+        """
+        if not loop_is_running():
+            return
+        if name == "mark_ready":
+            hook_name, targets = (
+                "ready",
+                [app for app in self._modules() if app.lifecycle_state is ModuleLifecycleState.LOADED],
+            )
+        elif name == "shutdown":
+            hook_name = "on_shutdown"
+            targets = [
+                app for app in reversed(self._modules()) if app.lifecycle_state is not ModuleLifecycleState.SHUTDOWN
+            ]
+        else:
+            return
+        offenders = [app.name for app in targets if inspect.iscoroutinefunction(app.get_hook(hook_name))]
+        if offenders:
+            raise self._async_required(f"The '{hook_name}' hook of module(s) {', '.join(offenders)}", name)
+
+    def _async_required(self, subject: str, entrypoint: str | None = None) -> ModuleAsyncRequiredError:
+        """Build the error for async work requested from a sync entrypoint inside a running loop."""
+        entrypoint = entrypoint or self._gate.entrypoint() or "install"
+        hint = _ASYNC_ENTRYPOINT_HINT.get(entrypoint, "the matching async entrypoint")
+        return ModuleAsyncRequiredError(
+            f"{subject} is asynchronous and cannot run from {entrypoint}() inside a running event loop. "
+            f"Use {hint} instead."
+        )
+
+    def _modules(self) -> list[AppConfig]:
+        return [self._app_configs[name] for name in self._install_order]
+
+    def _is_idle(self) -> bool:
+        return all(app.lifecycle_state is ModuleLifecycleState.SHUTDOWN for app in self._app_configs.values())
+
+    def _close_adapter_if_idle(self) -> None:
+        """Close the sync adapter loop once no module that could own a client on it is still alive."""
+        if self._adapter.is_open and self._is_idle():
+            self._adapter.close()
+
+    # ------------------------------------------------------------------
+    # Operations (written once; executed by the sync or async driver)
+    # ------------------------------------------------------------------
+
+    def _populate(self, import_paths: list[str]) -> Steps[list[AppConfig]]:
+        if self._loading:
+            raise ModuleLifecycleError("populate() is not reentrant.")
+        self._loading = True
+        try:
+            with self._gate.phase("install"):
+                yield from self._install_atomically(import_paths)
+            with self._gate.phase("mark_ready"):
+                return (yield from self._mark_ready())
+        finally:
+            self._loading = False
+
+    def _mark_ready(self) -> Steps[list[AppConfig]]:
+        modules = self._modules()
+        blocked = [
+            app.name
+            for app in modules
+            if app.lifecycle_state in (ModuleLifecycleState.LOADING, ModuleLifecycleState.SHUTDOWN)
+        ]
+        if blocked:
+            raise ModuleLifecycleError(
+                f"Cannot mark the registry ready: modules still loading or already shut down: {', '.join(blocked)}."
+            )
+
+        newly_ready = 0
+        for app in modules:
+            if app.lifecycle_state != ModuleLifecycleState.LOADED:
+                continue
+            try:
+                yield HookEffect(app, "ready")
+            except ModuleAsyncRequiredError:
+                raise
+            except ModuleLifecycleError as exc:
+                error = self._aggregate_error(
+                    "Readiness failed", [ModuleFailure(module=app.name, phase="ready", error=exc)]
+                )
+                raise error from error.__cause__
+            app.transition_to(ModuleLifecycleState.READY)
+            newly_ready += 1
+            yield SignalEffect(module_ready, app, {"registry": self, "module": app, "config": self.config})
+
+        already_announced = self._ready
+        self._ready = True
+        if already_announced and not newly_ready:
+            return modules
+
+        try:
+            self._validate_hooks()
+            yield SignalEffect(registry_ready, self, {"registry": self, "config": self.config})
+        except BaseException:
+            self._ready = False
+            raise
+        return modules
+
+    def _shutdown_with(self, finalizers: Callable[[], list[Finalizer]] | None) -> Steps[None]:
+        """Shut down every module, then run ``finalizers`` whether or not module cleanup succeeded.
+
+        ``finalizers`` is how process-level infrastructure, such as the database, is released after every
+        module hook, ``module_shutdown`` receiver and ``registry_shutdown`` receiver has run. Each finalizer
+        step is attempted even when an earlier step or a module failed. A cancellation skips them: the
+        interrupted shutdown is resumed by calling it again.
+        """
+        error: Exception | None = None
+        try:
+            yield from self._shutdown_modules()
+        except Exception as exc:
+            error = exc
+
+        step_failures: list[ModuleFailure] = []
+        if finalizers is not None:
+            for owner, phase, effect in finalizers():
+                try:
+                    yield effect
+                except Exception as exc:
+                    step_failures.append(ModuleFailure(module=owner, phase=phase, error=exc))
+
+        if step_failures:
+            if isinstance(error, ModuleLifecycleError) and error.failures:
+                earlier = list(error.failures)
+            elif error is not None:
+                earlier = [ModuleFailure(module="bedrock", phase="registry_shutdown", error=error)]
+            else:
+                earlier = []
+            failures = [*earlier, *step_failures]
+            raise self._aggregate_error(f"Shutdown failed for {len(failures)} step(s)", failures)
+        if error is not None:
+            raise error
+
+    def _shutdown_modules(self) -> Steps[None]:
+        modules = [self._app_configs[name] for name in reversed(self._install_order)]
+        failures: list[ModuleFailure] = []
+
+        for app in modules:
+            if app.lifecycle_state == ModuleLifecycleState.SHUTDOWN:
+                continue
+            failures.extend((yield from self._shutdown_module(app)))
+
+        if failures:
+            raise self._aggregate_error(f"Shutdown failed for {len(failures)} step(s)", failures)
+
+        if self._shut_down:
+            return
+        yield SignalEffect(registry_shutdown, self, {"registry": self, "config": self.config})
+        self._shut_down = True
+
+    def _install(self, import_path: str, _chain: list[str], attempt: _InstallAttempt) -> Steps[AppConfig]:
+        """Recursive install implementation (must be called inside an install operation).
 
         Args:
             import_path: Import path to install.
@@ -349,7 +704,7 @@ class ModuleRegistry:
 
         chain = _chain + [import_path]
         for dep in app.manifest.depends_on:
-            self._install(dep, chain, attempt)
+            yield from self._install(dep, chain, attempt)
 
         with attempt.guard(import_path, "install"):
             if import_path in self._app_configs:
@@ -359,15 +714,15 @@ class ModuleRegistry:
         self._install_order.append(import_path)
 
         with attempt.guard(import_path, "on_load"):
-            self._call_hook(app, "on_load")
+            yield HookEffect(app, "on_load")
         app.transition_to(ModuleLifecycleState.LOADED)
         with attempt.guard(import_path, "module_loaded"):
-            module_loaded.send(app, registry=self, module=app, config=self.config)
+            yield SignalEffect(module_loaded, app, {"registry": self, "module": app, "config": self.config})
 
         return app
 
-    def _install_atomically(self, import_paths: list[str]) -> list[AppConfig]:
-        """Install import paths as one failure-atomic operation (must be called under lock).
+    def _install_atomically(self, import_paths: list[str]) -> Steps[list[AppConfig]]:
+        """Install import paths as one failure-atomic operation (must be called inside an install operation).
 
         Args:
             import_paths: Import paths to install in order.
@@ -385,32 +740,60 @@ class ModuleRegistry:
         if not introduces_modules:
             return [self._app_configs[import_path] for import_path in import_paths]
 
-        with self._lifecycle_operation("install"):
-            preexisting = set(self._app_configs)
-            attempt = _InstallAttempt()
-            try:
-                return [self._install(import_path, [], attempt) for import_path in import_paths]
-            except BaseException as exc:
-                introduced = [name for name in self._install_order if name not in preexisting]
-                unwind_failures = self._rollback(introduced)
-                if not unwind_failures or not isinstance(exc, Exception):
-                    raise
+        preexisting = set(self._app_configs)
+        attempt = _InstallAttempt()
+        try:
+            installed: list[AppConfig] = []
+            for import_path in import_paths:
+                installed.append((yield from self._install(import_path, [], attempt)))
+            return installed
+        except BaseException as exc:
+            introduced = [name for name in self._install_order if name not in preexisting]
+            unwind_failures = yield from self._rollback(introduced)
+            if not unwind_failures:
+                raise
+            if not isinstance(exc, Exception):
+                self._report_cleanup_failures_beside(exc, unwind_failures)
+                raise
 
-                original = attempt.failure or ModuleFailure(module=import_paths[0], phase="install", error=exc)
-                error = self._aggregate_error(
-                    f"Installation of {', '.join(import_paths)} failed ({exc}) and cleanup was incomplete",
-                    [original, *unwind_failures],
-                    error_type=ModuleStartupRollbackError,
-                )
-                raise error from error.__cause__
+            original = attempt.failure or ModuleFailure(module=import_paths[0], phase="install", error=exc)
+            error = self._aggregate_error(
+                f"Installation of {', '.join(import_paths)} failed ({exc}) and cleanup was incomplete",
+                [original, *unwind_failures],
+                error_type=ModuleStartupRollbackError,
+            )
+            raise error from error.__cause__
 
-    def _rollback(self, introduced: list[str]) -> list[ModuleFailure]:
-        """Remove modules introduced by a failed installation (must be called under lock).
+    @staticmethod
+    def _report_cleanup_failures_beside(interruption: BaseException, failures: list[ModuleFailure]) -> None:
+        """Keep cleanup failures visible when a cancellation or interrupt is what propagates.
+
+        The interruption must keep its type, so the failures are logged and attached to it as notes.
+        """
+        from ..logging import get_logger
+
+        logger = get_logger(__name__)
+        for failure in failures:
+            logger.warning(
+                f"Cleanup of module '{failure.module}' failed during {failure.phase} while installation "
+                f"was interrupted by {type(interruption).__name__}: {failure.error}"
+            )
+            interruption.add_note(
+                f"Cleanup of module '{failure.module}' failed during {failure.phase}: {failure.error}"
+            )
+
+    def _rollback(self, introduced: list[str]) -> Steps[list[ModuleFailure]]:
+        """Remove modules introduced by a failed installation (must be called inside an install operation).
 
         Modules that completed ``on_load`` are unwound best-effort with their
         ``on_shutdown`` hook in reverse install order. A module that never
         finished loading, or that was already shut down, has nothing to release. Every introduced module is
-        removed from membership and install order, whatever the unwind outcome.
+        removed from membership and install order, whatever the unwind outcome, with one exception: if an
+        ``on_shutdown`` hook or ``module_shutdown`` receiver is interrupted by something that is not an
+        ``Exception`` (it raised ``CancelledError`` itself, or ``KeyboardInterrupt``), the unwind stops. The
+        interrupted module and the modules it depends on stay registered in their current state, so a later
+        ``shutdown`` finishes their cleanup instead of losing them. Cleanup effects are protected: the async driver
+        never lets a cancellation of the caller interrupt them.
 
         Args:
             introduced: Names of modules added by the failed operation, in install order.
@@ -419,22 +802,27 @@ class ModuleRegistry:
             Failures that occurred while unwinding; empty when cleanup was clean.
         """
         failures: list[ModuleFailure] = []
+        retained: list[str] = []
         self._rolling_back = True
         try:
-            for name in reversed(introduced):
-                app = self._app_configs[name]
+            for index in range(len(introduced) - 1, -1, -1):
+                app = self._app_configs[introduced[index]]
                 if app.lifecycle_state in (ModuleLifecycleState.LOADING, ModuleLifecycleState.SHUTDOWN):
                     continue
-                failures.extend(self._shutdown_module(app))
+                try:
+                    failures.extend((yield from self._shutdown_module(app, protected=True)))
+                except BaseException:
+                    retained = introduced[: index + 1]
+                    raise
         finally:
-            removed = set(introduced)
-            for name in introduced:
+            removed = set(introduced) - set(retained)
+            for name in removed:
                 self._app_configs.pop(name, None)
             self._install_order[:] = [name for name in self._install_order if name not in removed]
             self._rolling_back = False
         return failures
 
-    def _shutdown_module(self, app: AppConfig) -> list[ModuleFailure]:
+    def _shutdown_module(self, app: AppConfig, protected: bool = False) -> Steps[list[ModuleFailure]]:
         """Shut down one module and report failures instead of raising.
 
         The module is marked ``SHUTDOWN`` only after its ``on_shutdown`` hook
@@ -444,18 +832,21 @@ class ModuleRegistry:
 
         Args:
             app: Module to shut down.
+            protected: Whether a cancellation of the async caller must not interrupt the hook and receivers.
 
         Returns:
             Failures recorded for this module; empty on success.
         """
         try:
-            self._call_hook(app, "on_shutdown")
+            yield HookEffect(app, "on_shutdown", protected)
         except Exception as exc:
             return [ModuleFailure(module=app.name, phase="on_shutdown", error=exc)]
 
         app.transition_to(ModuleLifecycleState.SHUTDOWN)
         try:
-            module_shutdown.send(app, registry=self, module=app, config=self.config)
+            yield SignalEffect(
+                module_shutdown, app, {"registry": self, "module": app, "config": self.config}, protected
+            )
         except Exception as exc:
             wrapped = ModuleLifecycleError(
                 f"Receiver of 'module_shutdown' for module '{app.name}' raised an error: {exc}"
@@ -475,13 +866,17 @@ class ModuleRegistry:
         Args:
             summary: Human-readable lead sentence.
             failures: Failures to aggregate, in the order they occurred.
-            error_type: Concrete error class to build.
+            error_type: Concrete error class to build. Failures that all need an async entrypoint produce
+                ``ModuleAsyncRequiredError`` instead of the default.
 
         Returns:
             The aggregate error. It always has ``failures`` set, and its ``__cause__``
             is always an ``ExceptionGroup`` holding the error of every failure, in order.
             Each hook failure error chains to the exception the module's own code raised.
         """
+        if error_type is ModuleLifecycleError and failures:
+            if all(isinstance(failure.error, ModuleAsyncRequiredError) for failure in failures):
+                error_type = ModuleAsyncRequiredError
         details = "; ".join(f"{failure.error}" for failure in failures)
         error = error_type(f"{summary}: {details}", failures=tuple(failures))
         error.__cause__ = ExceptionGroup(
@@ -489,46 +884,12 @@ class ModuleRegistry:
         )
         return error
 
-    @contextmanager
-    def _lifecycle_operation(self, name: str) -> Iterator[None]:
-        """Mark ``install``, ``mark_ready`` or ``shutdown`` as running and reject calls that must not nest.
+    # ------------------------------------------------------------------
+    # Hook and receiver invocation
+    # ------------------------------------------------------------------
 
-        The guard is plain registry state: it is not a lock, so hooks and signal
-        receivers that call back into the registry fail fast instead of re-running
-        hooks, and an async implementation can reuse it between coroutines. Only
-        ``install`` may nest inside ``install``, because ``on_load`` hooks and
-        ``module_loaded`` receivers may install further modules. The outer operation
-        is restored on exit. Must be called under the registry lock.
-
-        Args:
-            name: Operation starting: ``"install"``, ``"mark_ready"`` or ``"shutdown"``.
-
-        Yields:
-            Nothing; the guard is released on exit, including on failure.
-
-        Raises:
-            ModuleLifecycleError: If another operation is running and ``name`` may not nest in it.
-        """
-        outer = self._operation
-        if outer is not None and not (name == "install" and outer == "install"):
-            if name == "install":
-                advice = (
-                    "install modules before readiness or shutdown starts, "
-                    "then call mark_ready() again to ready the new modules."
-                )
-            elif outer == "install":
-                advice = "raise an error from the hook to abort the installation and roll it back instead."
-            else:
-                advice = "lifecycle hooks and signal receivers must not call back into it."
-            raise ModuleLifecycleError(f"Cannot call {name}() while {outer}() is running; {advice}")
-        self._operation = name
-        try:
-            yield
-        finally:
-            self._operation = outer
-
-    def _call_hook(self, app: AppConfig, hook_name: str) -> None:
-        """Call a bootstrap hook if present using keyword injection only.
+    def _call_hook_sync(self, app: AppConfig, hook_name: str) -> None:
+        """Call a bootstrap hook if present using keyword injection only, adapting an awaitable result.
 
         Hooks must accept keyword invocation using the injected names
         ``registry``, ``app``, ``container``, and ``hooks``. Hooks may declare
@@ -541,14 +902,76 @@ class ModuleRegistry:
 
         Raises:
             ModuleLifecycleError: If the hook raises an exception.
+            ModuleAsyncRequiredError: If the hook is asynchronous and a loop is already running.
         """
         hook = app.get_hook(hook_name)
         if hook is None:
             return
         try:
-            hook(**self._get_hook_kwargs(app=app, hook_name=hook_name, hook=hook))
+            kwargs = self._get_hook_kwargs(app=app, hook_name=hook_name, hook=hook)
+            subject = f"Hook '{hook_name}' in module '{app.name}'"
+            if loop_is_running() and inspect.iscoroutinefunction(hook):
+                raise self._async_required(subject)
+            result = hook(**kwargs)
+            if inspect.isawaitable(result):
+                if loop_is_running():
+                    discard_awaitable(result)
+                    raise self._async_required(subject)
+                self._adapter.run(result)
+        except ModuleAsyncRequiredError:
+            raise
         except Exception as exc:
             raise ModuleLifecycleError(f"Hook '{hook_name}' in module '{app.name}' raised an error: {exc}") from exc
+
+    async def _call_hook_async(self, app: AppConfig, hook_name: str) -> None:
+        """Async twin of :meth:`_call_hook_sync`: await coroutine hooks, thread-offload plain ones.
+
+        A plain function that returns an awaitable has it awaited here, on the running loop.
+
+        Raises:
+            ModuleLifecycleError: If the hook raises an exception.
+        """
+        hook = app.get_hook(hook_name)
+        if hook is None:
+            return
+        try:
+            kwargs = self._get_hook_kwargs(app=app, hook_name=hook_name, hook=hook)
+            if inspect.iscoroutinefunction(hook):
+                result = hook(**kwargs)
+            else:
+                result = await run_in_worker(hook, **kwargs)
+            if inspect.isawaitable(result):
+                await result
+        except Exception as exc:
+            raise ModuleLifecycleError(f"Hook '{hook_name}' in module '{app.name}' raised an error: {exc}") from exc
+
+    @staticmethod
+    def _offload_receiver(receiver: Callable[..., Any]) -> Callable[..., Any]:
+        """Adapt a sync signal receiver for ``Signal.asend`` so a cancelled operation waits for it to finish.
+
+        This is the ``_sync_wrapper`` the signal API already provides; the default wrapper would let a cancelled
+        caller leave while the receiver thread keeps running.
+        """
+
+        async def offloaded(*args: Any, **kwargs: Any) -> Any:
+            return await run_in_worker(receiver, *args, **kwargs)
+
+        return offloaded
+
+    def _adapt_receiver_sync(self, receiver: Callable[..., Any]) -> Callable[..., Any]:
+        """Adapt an async signal receiver for ``Signal.send`` on the persistent adapter loop.
+
+        This is the ``_async_wrapper`` the signal API already provides; the default wrapper would run each
+        receiver on a throwaway loop. In a running loop the receiver is not called at all.
+        """
+
+        def adapted(*args: Any, **kwargs: Any) -> Any:
+            if loop_is_running():
+                name = getattr(receiver, "__qualname__", repr(receiver))
+                raise self._async_required(f"Signal receiver '{name}'")
+            return self._adapter.run(receiver(*args, **kwargs))
+
+        return adapted
 
     def _get_hook_kwargs(self, app: AppConfig, hook_name: str, hook: Any) -> dict[str, Any]:
         """Return injected kwargs for a bootstrap hook or raise on invalid signatures.

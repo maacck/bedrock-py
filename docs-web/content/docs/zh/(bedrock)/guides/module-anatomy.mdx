@@ -303,6 +303,40 @@ shutdown()
 - **`mark_ready()` 或 `shutdown()` 运行期间不能安装新模块。** 在 `ready` 或 `on_shutdown` 钩子，或 `module_ready`、`registry_ready`、`module_shutdown`、`registry_shutdown` 接收器中，对尚未安装的模块调用 `install()`（或 `populate()`），会在加载任何内容之前抛出 `ModuleLifecycleError`，registry 保持不变。就绪流程面向固定的模块集合，中途安装的模块会处于 `loaded` 状态，而 registry 已经报告 `ready`。请在 `mark_ready()` 之前安装模块，或先调用 `install()` 再次调用 `mark_ready()`，后者只会让新模块就绪。重复安装已安装的模块始终是空操作。
 - **汇总的失败带有归因。** 汇总错误的 `failures` 中各项标明模块和步骤，其 `__cause__` 是 `ExceptionGroup`。其他错误（包括 `module_ready` 接收器错误）可能直接传播。
 
+### 异步生命周期
+
+每个生命周期操作都有同步入口和带 `a` 前缀的异步入口。两者运行同一份实现，因此上文的失败语义对两者同样成立。
+
+| 同步 | 异步 | 进程级 |
+|------|------|--------|
+| `install()` | `ainstall()` | |
+| `populate()` | `apopulate()` | `bedrock.setup()` / `await bedrock.asetup()` |
+| `mark_ready()` | `amark_ready()` | |
+| `shutdown()` | `ashutdown()` | `bedrock.shutdown()` / `await bedrock.ashutdown()` |
+
+钩子和信号接收器名称不变，可以是普通函数或 `async def`。普通函数若返回可等待对象，也会被等待：
+
+```python
+async def on_load(*, registry, app) -> None:
+    app_state.client = await open_client()
+
+
+async def on_shutdown(*, registry, app) -> None:
+    await app_state.client.aclose()
+```
+
+- **异步入口**在运行中的事件循环上等待异步钩子，并在工作线程中运行普通钩子（与 `hooks.acall`、`Signal.asend` 一致）。同步与异步混合的依赖图按依赖顺序启动，按逆序关闭。
+- **同步入口**直接调用普通钩子。异步钩子运行在一个私有事件循环上，该循环会保持打开，直到所有模块都已关闭，因此由 `on_load` 打开的客户端会在同一个循环上被 `on_shutdown` 关闭。仅当调用线程没有运行中的事件循环时才可使用。
+- **在运行中的事件循环里**，需要运行异步工作的同步入口会抛出 `ModuleAsyncRequiredError`（`ModuleLifecycleError` 的子类），并指明应使用的异步入口；它不会启动嵌套事件循环，也不会留下未被等待的协程。`mark_ready()` 和 `shutdown()` 会在运行任何钩子之前检查协程钩子，因此不会改变状态；`install()` 与其他安装失败一样回滚。钩子全部是普通函数的 registry，仍可在事件循环内使用同步入口。
+- **全程使用同一族入口。**异步客户端绑定到打开它的事件循环，因此请用同一族入口启动和停止（`asetup()` 配 `ashutdown()`，或 `setup()` 配 `shutdown()`）。对绑定事件循环的客户端，混用不受支持。
+- **操作在 `await` 之间保持串行。**守卫不持有线程锁。无关的任务和线程会等待正在运行的操作；来自钩子、接收器，或它们启动的任务、`to_thread` 工作线程的调用会按上文被拒绝。在持有运行中操作的线程上，来自另一个任务的同步调用会直接抛出异常而不是死锁。异步操作被取消时，`CancelledError` 会继续传播，所有模块保持有效状态，被中断的安装仍会回滚，再次调用 `amark_ready()` 或 `ashutdown()` 会从尚未完成的模块继续，因此钩子必须能够安全地重复执行。已在工作线程中开始运行的阻塞同步钩子或接收器无法被强制停止，所以取消只会在它返回之后才抛出：取消可能需要等待仍在执行的钩子，重复取消不会缩短等待，回滚、下一次操作以及操作的释放都不会与仍在运行的工作线程重叠。取消之后由普通钩子返回的可等待对象会被释放而不会被等待。协程钩子则会被直接取消。失败或被取消的安装所做的回滚是例外：回滚期间再次取消不会中止清理钩子，也不会跳过任何模块。所有新引入的模块仍会按相反顺序被清理，期间操作保持被占用，然后才抛出 `CancelledError`，并把触发回滚的安装错误作为它的 `__cause__`；清理失败会被记录日志，并作为备注附加到 `CancelledError` 上。如果清理钩子本身抛出 `CancelledError` 或 `KeyboardInterrupt`，回滚会停止，该模块及其依赖的模块会以当前状态保留在注册表中，之后可由 `shutdown()` 完成清理。保证在抛出 `ModuleAsyncRequiredError` 之前不做任何改动的预检只覆盖协程钩子，不覆盖会返回可等待对象的普通钩子。
+
+#### 关闭进程级基础设施
+
+数据库是进程级基础设施，而不是模块。`bedrock.shutdown()` 和 `bedrock.ashutdown()` 会先停止所有模块，再释放已初始化的数据库：同步引擎用 `db.close()`，异步引擎用 `db.aclose()`，只处理实际存在的引擎。即使某个模块钩子失败也会如此，数据库的失败会加入同一个汇总错误。如果从未使用过数据库，则不会初始化或重建任何内容。存在异步引擎时，在运行中的事件循环里调用 `bedrock.shutdown()` 会在改变任何状态之前抛出 `ModuleAsyncRequiredError`，请使用 `await bedrock.ashutdown()`。被取消的 `ashutdown()` 不会释放数据库，请再次调用。
+
+同时拥有同步和异步客户端的模块需要释放两者。请让 `on_shutdown` 保持为普通函数：关闭同步客户端，并返回关闭异步客户端的可等待对象，这样只有异步关闭完成后才算关闭完成。`bedrock.contrib.cache` 和 `bedrock.contrib.metric` 就是这样做的。
+
 ### Signals
 
 每次生命周期转换都会发出一个外部代码可观察的 signal：

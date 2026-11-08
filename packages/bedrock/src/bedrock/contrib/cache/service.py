@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from pydantic_settings import BaseSettings
@@ -10,7 +11,7 @@ from ...common.registry import ClassRegistry, ClassRegistryError
 from ...logging import get_logger
 from .base import CacheBackend
 from .coder import CacheCoder, Coder
-from .exc import BackendNotConfiguredError
+from .exc import BackendNotConfiguredError, CacheCloseError
 
 logger = get_logger(__name__)
 
@@ -25,6 +26,25 @@ _BACKEND_REGISTRY = ClassRegistry[CacheBackend](
         "redis": "bedrock.contrib.cache.backends.redis:RedisBackend",
     },
 )
+
+
+@dataclass(eq=False)
+class _OpenBackend:
+    """A backend instance whose sync and async clients may still hold resources."""
+
+    backend: CacheBackend
+    sync_open: bool = True
+    async_open: bool = True
+
+    @property
+    def async_pending(self) -> bool:
+        """Return whether the async side still has something to close."""
+        return self.async_open and getattr(self.backend, "holds_async_resources", True)
+
+    @property
+    def finished(self) -> bool:
+        """Return whether both sides are closed."""
+        return not self.sync_open and not self.async_pending
 
 
 def register_backend(name: str, backend_cls: type[CacheBackend]) -> None:
@@ -70,6 +90,7 @@ class CacheService:
 
     def __init__(self) -> None:
         self._backend = None
+        self._open: list[_OpenBackend] = []
 
     def configure(
         self,
@@ -105,6 +126,7 @@ class CacheService:
             ) from exc
 
         self._backend = backend_cls(settings=settings)
+        self._open.append(_OpenBackend(self._backend))
         logger.info("Cache backend configured: {}", backend_name)
         return self._backend
 
@@ -321,16 +343,75 @@ class CacheService:
         return await self.get_backend().adecr(key, delta)
 
     def close(self) -> None:
-        """Close backend connections."""
-        if self._backend is not None:
-            self._backend.close()
-            self._backend = None
+        """Close the synchronous side of every backend this service has created.
+
+        Backends that were replaced by :meth:`configure` are closed too, so no client is stranded.
+        A backend with async resources stays tracked until :meth:`aclose` releases them; see
+        :meth:`has_async_resources`. Every backend is attempted even when one fails; a backend whose
+        close failed stays current or tracked, so the next call attempts it again. The call is safe to repeat.
+
+        Raises:
+            CacheCloseError: After all attempts, if any backend failed to close.
+        """
+        self._track_current()
+        failed: list[tuple[_OpenBackend, Exception]] = []
+        for entry in list(self._open):
+            if not entry.sync_open:
+                continue
+            try:
+                entry.backend.close()
+            except Exception as exc:
+                failed.append((entry, exc))
+            else:
+                entry.sync_open = False
+        self._settle(failed, "sync")
 
     async def aclose(self) -> None:
-        """Close async backend connections."""
-        if self._backend is not None:
-            await self._backend.aclose()
+        """Close the asynchronous side of every backend this service has created.
+
+        Counterpart of :meth:`close` for async clients, such as the Redis asyncio client. Backends
+        that declare ``holds_async_resources = False`` are skipped. A backend whose sync side is still
+        open stays tracked until :meth:`close` releases it. The call is safe to repeat.
+
+        Raises:
+            CacheCloseError: After all attempts, if any backend failed to close.
+        """
+        self._track_current()
+        failed: list[tuple[_OpenBackend, Exception]] = []
+        for entry in list(self._open):
+            if not entry.async_pending:
+                continue
+            try:
+                await entry.backend.aclose()
+            except Exception as exc:
+                failed.append((entry, exc))
+            else:
+                entry.async_open = False
+        self._settle(failed, "async")
+
+    def has_async_resources(self) -> bool:
+        """Return whether :meth:`aclose` still has a backend to release.
+
+        Lifecycle hooks use this to decide whether shutdown needs to await anything.
+        """
+        self._track_current()
+        return any(entry.async_pending for entry in self._open)
+
+    def _track_current(self) -> None:
+        """Make sure a backend assigned without :meth:`configure` is tracked for closing."""
+        if self._backend is not None and all(entry.backend is not self._backend for entry in self._open):
+            self._open.append(_OpenBackend(self._backend))
+
+    def _settle(self, failed: list[tuple[_OpenBackend, Exception]], side: str) -> None:
+        """Forget finished backends, drop the current one unless its close failed, and report failures."""
+        self._open = [entry for entry in self._open if not entry.finished]
+        if self._backend is not None and all(entry.backend is not self._backend for entry, _ in failed):
             self._backend = None
+        if failed:
+            errors = [exc for _, exc in failed]
+            raise CacheCloseError(
+                f"Failed to close {len(errors)} cache backend(s) ({side}): " + "; ".join(str(exc) for exc in errors)
+            ) from ExceptionGroup("cache close failures", errors)
 
     def namespace(self, prefix: str) -> CacheNamespace:
         """Create a typed cache namespace bound to this service."""

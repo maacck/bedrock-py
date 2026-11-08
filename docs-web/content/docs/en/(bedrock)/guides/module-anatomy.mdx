@@ -304,6 +304,40 @@ The registry keeps its state consistent when a lifecycle step fails, so startup 
 - **New modules cannot be installed while `mark_ready()` or `shutdown()` runs.** Calling `install()` (or `populate()`) for a module that is not installed yet from a `ready` or `on_shutdown` hook, or from a `module_ready`, `registry_ready`, `module_shutdown`, or `registry_shutdown` receiver, raises `ModuleLifecycleError` before anything is loaded, so the registry is unchanged. Readiness is decided for a fixed set of modules, and a module installed halfway through would be `loaded` in a registry that already reports `ready`. Install the module before `mark_ready()`, or call `install()` and then `mark_ready()` again, which readies only the new module. Installing an already installed module is always a no-op.
 - **Aggregated failures are attributed.** Entries in an aggregate error's `failures` name the module and step, and its `__cause__` is an `ExceptionGroup`. Other errors, including `module_ready` receiver errors, can propagate directly.
 
+### Async Lifecycle
+
+Every lifecycle operation has a synchronous entrypoint and an `a`-prefixed asynchronous one. They run the same implementation, so the failure semantics above apply to both.
+
+| Sync | Async | Process level |
+|------|-------|---------------|
+| `install()` | `ainstall()` | |
+| `populate()` | `apopulate()` | `bedrock.setup()` / `await bedrock.asetup()` |
+| `mark_ready()` | `amark_ready()` | |
+| `shutdown()` | `ashutdown()` | `bedrock.shutdown()` / `await bedrock.ashutdown()` |
+
+Hooks and signal receivers keep their names and may be plain functions or `async def`. A plain function that returns an awaitable has it awaited as well:
+
+```python
+async def on_load(*, registry, app) -> None:
+    app_state.client = await open_client()
+
+
+async def on_shutdown(*, registry, app) -> None:
+    await app_state.client.aclose()
+```
+
+- **Async entrypoints** await async hooks on the running loop and run plain hooks in a worker thread (like `hooks.acall` and `Signal.asend`). Mixed sync and async graphs start in dependency order and shut down in reverse order.
+- **Sync entrypoints** call plain hooks directly. They run async hooks on a private event loop that stays open until every module has shut down, so a client opened by `on_load` is closed by `on_shutdown` on the same loop. This only works when the calling thread has no running event loop.
+- **Inside a running loop**, a sync entrypoint that needs to run async work raises `ModuleAsyncRequiredError` (a `ModuleLifecycleError`) naming the async entrypoint to use. It never starts a nested loop or leaves a coroutine unawaited. `mark_ready()` and `shutdown()` check for coroutine hooks before running any, so they change nothing; `install()` rolls back like any other install failure. A registry whose hooks are all plain functions keeps working from sync entrypoints inside a loop.
+- **Use one family end to end.** An async client is bound to the loop that opened it, so start and stop through the same entrypoint family (`asetup()` with `ashutdown()`, or `setup()` with `shutdown()`). Mixing them is unsupported for loop-bound clients.
+- **Operations are serialized across `await`.** The guard does not hold a thread lock. Unrelated tasks and threads wait for the running operation; a call from a hook, a receiver, or a task or `to_thread` worker they started is rejected as described above. A synchronous call from a different task on the thread that owns the running operation raises instead of deadlocking. If an async operation is cancelled, `CancelledError` propagates, every module stays in a valid state, an interrupted install still rolls back, and calling `amark_ready()` or `ashutdown()` again resumes with the modules that have not finished, so hooks must be safe to run again. A blocking synchronous hook or receiver that already started in a worker thread cannot be forced to stop, so the cancellation is raised only after it returns: cancelling may wait for an in-flight hook, repeated cancellation does not shorten the wait, and neither the rollback, the next operation nor the release of the operation overlaps a running worker. An awaitable returned by a plain hook after cancellation is released instead of awaited. A coroutine hook is cancelled directly. The rollback of a failed or cancelled install is the exception: cancelling during it does not abort a cleanup hook or skip a module. Every introduced module is still unwound in reverse order while the operation stays held, then `CancelledError` is raised, with the install error that started the rollback as its `__cause__`; cleanup failures are logged and added to the `CancelledError` as notes. If a cleanup hook itself raises `CancelledError` or `KeyboardInterrupt`, the unwind stops and that module and the modules it depends on stay registered in their current state, so `shutdown()` can finish them. The check that guarantees nothing changes before a `ModuleAsyncRequiredError` covers coroutine hooks only, not plain hooks that return an awaitable.
+
+#### Shutting down process infrastructure
+
+The database is process infrastructure, not a module. `bedrock.shutdown()` and `bedrock.ashutdown()` stop every module first and then release an initialized database: `db.close()` for the sync engine and `db.aclose()` for the async engine, each only if it exists. This also happens when a module hook failed, and a database failure is added to the same aggregate error. Nothing is initialized or rebuilt if the database was never used. `bedrock.shutdown()` called inside a running loop while an async engine exists raises `ModuleAsyncRequiredError` before anything changes; use `await bedrock.ashutdown()`. A cancelled `ashutdown()` does not release the database; call it again.
+
+A module that owns both sync and async clients releases both. Keep `on_shutdown` a plain function that closes the sync client and returns the awaitable that closes the async one, so shutdown completes only after the async close does. `bedrock.contrib.cache` and `bedrock.contrib.metric` do this.
+
 ### Signals
 
 Each lifecycle transition emits a signal that external code can observe:

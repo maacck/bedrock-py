@@ -54,8 +54,8 @@ class DatabaseManager:
 
     ``close()`` disposes the synchronous engine. ``aclose()`` disposes the
     asynchronous engine. Call both when both were built. Neither method shuts
-    down the module registry; process shutdown wiring belongs to the caller
-    that owns the process lifetime.
+    down the module registry. ``bedrock.shutdown()`` and ``bedrock.ashutdown()``
+    stop every module and then call whichever of them applies.
     """
 
     def __init__(self) -> None:
@@ -142,6 +142,16 @@ class DatabaseManager:
         self._async_engine = None
         self._async_session_factory = None
         self._forget_config_if_idle()
+
+    @property
+    def has_async_engine(self) -> bool:
+        """Return whether an async engine has been built and not yet disposed.
+
+        Reading this never builds an engine, unlike :attr:`aengine`. Top-level lifecycle shutdown uses it to
+        decide whether :meth:`aclose` has anything to release.
+        """
+
+        return self._async_engine is not None
 
     @property
     def engine(self) -> Engine:
