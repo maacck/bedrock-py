@@ -262,6 +262,9 @@ metric-prometheus = [
 metric-sentry = [
     { name = "sentry-sdk" },
 ]
+rate-limit-redis = [
+    { name = "redis" },
+]
 storage-s3 = [
     { name = "boto3" },
 ]
@@ -295,11 +298,12 @@ requires-dist = [
     { name = "pydantic-settings", specifier = ">=2.14.2" },
     { name = "pyyaml", specifier = ">=6.0.2" },
     { name = "redis", marker = "extra == 'cache-redis'", specifier = ">=4.2.0" },
+    { name = "redis", marker = "extra == 'rate-limit-redis'", specifier = ">=4.2.0" },
     { name = "sentry-sdk", marker = "extra == 'metric-sentry'", specifier = ">=2.44.0" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.49" },
     { name = "typer", specifier = ">=0.24.1" },
 ]
-provides-extras = ["cache-redis", "metric-prometheus", "metric-sentry", "storage-s3", "async-sqlite", "async-postgresql", "async-mysql"]
+provides-extras = ["cache-redis", "rate-limit-redis", "metric-prometheus", "metric-sentry", "storage-s3", "async-sqlite", "async-postgresql", "async-mysql"]
 
 [package.metadata.requires-dev]
 dev = [

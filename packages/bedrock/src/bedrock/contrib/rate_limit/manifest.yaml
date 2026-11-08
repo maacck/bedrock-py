@@ -1,0 +1,3 @@
+title: Bedrock Rate Limit
+version: "0.1.0"
+description: Token-bucket rate limiting with a Redis backend
