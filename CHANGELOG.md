@@ -5,17 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.3.2] - 2026-11-09
 
 ### Added
 
 - **Testing**: runtime-level pytest fixtures in `bedrock.testing` (enabled with
   `pytest_plugins = ["bedrock.testing"]`):
-  - `bedrock_runtime` gives each test a fresh module registry that `bedrock.setup()`, `asetup()`,
+  - `bedrock_runtime` gives each test a `BedrockRuntime` with a fresh module `registry`, which `bedrock.setup()`, `asetup()`,
     `shutdown()` and `ashutdown()` act on, records lifecycle events as `LifecycleEvent(kind, module)`,
     and on teardown shuts the registry's modules down, removes lifecycle-signal receivers added
     during the test, resets the DI container and hooks, restores `os.environ`, and drops cached
-    `SettingsProxy` values. Backed by the `isolated_runtime()` context manager.
+    `SettingsProxy` values. Backed by the `isolated_runtime()` context manager, which yields the same `BedrockRuntime`.
   - `module_factory(name, *, manifest=None, bootstrap=None, models=None, files=None)` writes
     importable temporary Bedrock modules and removes them after the test, including their mapped
     models and association tables, so the next test can reuse the name. With `bedrock_runtime`,
@@ -33,9 +33,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `bedrock.shutdown()` and `ashutdown()` raise `RuntimeError` before shutting anything down when called from
   work running on the runtime loop, which cannot close itself; call `shutdown()` after `run_async()` returns.
 - **Rate limit**: new `bedrock.contrib.rate_limit` module, a framework-agnostic token bucket (GCRA).
-  `RateLimitPolicy(name, limit, period)` lets `limit` units be spent at once and returns one every
+  `RateLimitPolicy(name=..., limit=..., period=...)` lets `limit` units be spent at once and returns one every
   `period / limit`. `rate_limit.hit(policy, key, cost=1)` / `ahit()` return
-  `RateLimitDecision(allowed, limit, remaining, retry_after, reset_after)` with durations in seconds; denied hits
+  `RateLimitDecision` (fields `allowed`, `limit`, `remaining`, `retry_after`, `reset_after`) with durations in seconds; denied hits
   consume nothing. `reset()` / `areset()` refill a bucket. Keys are hashed before storage. The built-in Redis
   backend (extra `bedrock-core[rate-limit-redis]`, Redis 5+) evaluates each hit atomically in one Lua script
   on the server clock; it is selected by `RATE_LIMIT_BACKEND` (default `redis`) and configured by
