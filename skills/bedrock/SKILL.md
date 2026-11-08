@@ -42,6 +42,7 @@ Test fixtures (isolated runtime, temporary modules, DB rollback): `pytest_plugin
 - **Using caching / distributed locks** → View `bedrock app playbook bedrock.contrib.cache`
 - **Instrumenting metrics** → View `bedrock app playbook bedrock.contrib.metric`
 - **Using file/object storage** → View `bedrock app playbook bedrock.contrib.storage`
+- **Rate limiting commands, jobs, or outbound calls** → View `bedrock app playbook bedrock.contrib.rate_limit`
 
 ## Contrib Packages
 
@@ -52,6 +53,7 @@ Bedrock ships first-party contrib packages, each documented by a playbook (view 
 | Cache | `bedrock.contrib.cache` | In-memory / Redis cache with TTL, distributed locks, typed namespaces |
 | Metrics | `bedrock.contrib.metric` | Counter/gauge/timer instrumentation with StatsD, Sentry, and Prometheus providers |
 | Storage | `bedrock.contrib.storage` | File/object storage with local and S3-compatible backends |
+| Rate limit | `bedrock.contrib.rate_limit` | Token-bucket rate limiting with a Redis backend and replaceable backends |
 
 ## Quick Start: New Project
 

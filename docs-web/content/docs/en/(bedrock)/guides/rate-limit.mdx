@@ -1,0 +1,156 @@
+---
+title: Rate Limit
+description: Token-bucket rate limiting with a Redis backend and sync/async API
+---
+
+Bedrock ships a first-party rate limiter for commands, jobs, and outbound calls. It knows nothing about HTTP: services consume units from a named policy and receive a decision; adapters decide what a denial means for their transport. The whole subsystem lives under `bedrock.contrib.rate_limit`.
+
+## Quick Start
+
+```python
+from datetime import timedelta
+from bedrock.contrib.rate_limit import RateLimitPolicy, rate_limit
+
+LOGIN = RateLimitPolicy(name="idp.login", limit=5, period=timedelta(minutes=15))
+
+decision = rate_limit.hit(LOGIN, f"{tenant_id}:{email}")
+if not decision.allowed:
+    raise LoginThrottledError(retry_after=decision.retry_after)  # your domain error
+
+# After a successful login
+rate_limit.reset(LOGIN, f"{tenant_id}:{email}")
+
+# Async variants
+decision = await rate_limit.ahit(LOGIN, key, cost=2)
+await rate_limit.areset(LOGIN, key)
+```
+
+## Configuration
+
+The built-in backend is Redis 5 or newer. Install the extra and point it at your server:
+
+```bash
+uv add "bedrock-core[rate-limit-redis]"
+```
+
+```bash
+RATE_LIMIT_BACKEND=redis                 # default
+RATE_LIMIT_REDIS_URL=redis://redis:6379/0
+RATE_LIMIT_REDIS_KEY_PREFIX=rate_limit:  # default
+```
+
+Add `bedrock.contrib.rate_limit` to the `depends_on` of every module that uses it. The module's `ready` hook calls `rate_limit.configure()`, which reads `RATE_LIMIT_BACKEND`; the first call does the same when the module was never readied. Without the extra, startup fails with `RateLimitBackendNotConfiguredError` naming `bedrock-core[rate-limit-redis]`. Creating the client does not connect: an unreachable server surfaces on the first call as `RateLimitBackendError`.
+
+`RATE_LIMIT_REDIS_*` settings are independent of the cache's `CACHE_REDIS_*`. Use the same URL to share a server, or a different one to isolate limits from cached data.
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `RATE_LIMIT_REDIS_URL` | `redis://localhost:6379/0` | Connection URL |
+| `RATE_LIMIT_REDIS_DB` | `0` | Database number |
+| `RATE_LIMIT_REDIS_PASSWORD` | unset | Password |
+| `RATE_LIMIT_REDIS_KEY_PREFIX` | `rate_limit:` | Prefix for every key |
+| `RATE_LIMIT_REDIS_MAX_CONNECTIONS` | `50` | Pool size of each client |
+
+To configure in code instead, pass a name and settings:
+
+```python
+from bedrock.contrib.rate_limit import RedisRateLimitSettings, rate_limit
+
+rate_limit.configure("redis", settings=RedisRateLimitSettings(url="redis://limits:6379/0"))
+```
+
+### Registering a Custom Backend
+
+A custom backend implements the `RateLimitBackend` protocol and evaluates the token bucket below atomically per key. Register it from `bootstrap.py:on_load` and select it with `RATE_LIMIT_BACKEND`:
+
+```python
+from bedrock.contrib.rate_limit import register_backend
+
+def on_load(**kwargs) -> None:
+    register_backend("dynamo", DynamoRateLimitBackend)          # class or factory taking settings=
+```
+
+`register_backend_lazy(name, "module:attribute", install_requirement=...)` defers the import until the backend is selected. Registering the same object or path again is a no-op; a different backend under a taken name, including `redis`, raises `DuplicateRegistrationError`. `configure()` checks member names only, so cover a custom backend with contract tests.
+
+## Semantics
+
+A policy is a token bucket evaluated with GCRA:
+
+- `limit` units are available at once; one unit returns every `period / limit`.
+- `hit(policy, key, cost=1)` consumes `cost` units (an integer from 1 to `limit`) when they are available. A denied hit consumes nothing.
+- `RateLimitDecision` reports `allowed`, `limit`, `remaining` (units available now), `retry_after` (seconds until this cost would be allowed; `0.0` when allowed), and `reset_after` (seconds until the bucket is full).
+- Redis evaluates each hit in one Lua script using the server clock, so concurrent callers and application instances never exceed the limit.
+
+With `limit=5, period=15 min`, five attempts pass immediately, the sixth is denied with `retry_after ≈ 180`, and one attempt returns every three minutes.
+
+Policies are module constants. The name is part of every storage key, so two policies with the same name must be equal; using a different one raises `RateLimitPolicyConflictError`.
+
+### Keys
+
+Keys are hashed (BLAKE2b) before they reach the backend, so emails, IP addresses, or API keys are never stored. Include the tenant yourself in multi-tenant code: `f"{tenant_id}:{subject}"`.
+
+### Failing Open or Closed
+
+When the backend fails, `hit()` raises `RateLimitBackendError`. Choose the behavior per call site:
+
+```python
+from bedrock.contrib.rate_limit import RateLimitBackendError
+
+try:
+    decision = rate_limit.hit(LOGIN, key)
+except RateLimitBackendError:
+    raise ServiceUnavailableError()    # fail closed: protect credentials
+
+try:
+    allowed = rate_limit.hit(VENDOR_CALLS, provider_id).allowed
+except RateLimitBackendError:
+    allowed = True                     # fail open: keep serving
+```
+
+### Sync Code and the Async API
+
+Synchronous code that needs `ahit()` runs it with `bedrock.run_async(...)`, not `asyncio.run()`, so the async client stays on the runtime loop that closes it at shutdown.
+
+## RateLimitService API Reference
+
+The `rate_limit` singleton is a `RateLimitService` instance.
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `hit` | `hit(policy, key, cost=1) -> RateLimitDecision` | Consume units if available |
+| `ahit` | `async ahit(policy, key, cost=1) -> RateLimitDecision` | Async `hit` |
+| `reset` | `reset(policy, key) -> None` | Refill the bucket |
+| `areset` | `async areset(policy, key) -> None` | Async `reset` |
+| `configure` | `configure(backend_name=None, settings=None) -> RateLimitBackend` | Select a backend; `None` reads `RATE_LIMIT_BACKEND` |
+| `get_backend` | `get_backend() -> RateLimitBackend` | Current backend, configured lazily |
+| `close` / `aclose` | `close()`, `async aclose()` | Release sync / async clients of every backend created |
+| `has_async_resources` | `has_async_resources() -> bool` | Whether `aclose()` has work to do |
+
+## Exception Hierarchy
+
+All exceptions inherit from `RateLimitError` (a `BedrockExc`):
+
+```python
+from bedrock.contrib.rate_limit import (
+    InvalidRateLimitArgumentError,       # empty key, or cost outside 1..limit
+    InvalidRateLimitPolicyError,         # blank name, limit <= 0, period < 1 µs per unit
+    RateLimitBackendError,               # backend failed; no connection details in the message
+    RateLimitBackendNotConfiguredError,  # unknown backend or missing dependency
+    RateLimitCloseError,                 # closing a backend failed
+    RateLimitError,
+    RateLimitPolicyConflictError,        # different policy under the same name
+)
+```
+
+## Anti-Patterns
+
+**Don't map decisions to HTTP inside services.** Return or raise a domain error carrying `retry_after`; the HTTP adapter turns it into a 429 and `Retry-After` header.
+
+**Don't share a bucket across tenants by accident.** Put the tenant in the key.
+
+**Don't build policies per call.** Define them once; different parameters under one name raise `RateLimitPolicyConflictError`.
+
+## See Also
+
+- [Cache](./cache) — Cache and distributed locks
+- [Provider](./provider) — The catalog behind `register_backend`
