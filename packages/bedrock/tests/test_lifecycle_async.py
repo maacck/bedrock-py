@@ -9,6 +9,7 @@ import threading
 from collections.abc import Callable, Iterator
 from typing import Any
 
+import bedrock
 import pytest
 from bedrock.module import (
     ModuleAsyncRequiredError,
@@ -183,7 +184,6 @@ class TestStartupAndShutdownOrder:
             "on_shutdown:life_a",
         ]
         assert set(_states(registry).values()) == {ModuleLifecycleState.SHUTDOWN}
-        assert not registry._adapter.is_open
 
     @pytest.mark.parametrize("mode", MODES)
     def test_mixed_graph(
@@ -254,8 +254,8 @@ class TestStartupAndShutdownOrder:
         assert sorted(seen) == ["async", "async", "sync", "sync"]
 
 
-class TestAdapterLoopLifetime:
-    def test_one_loop_serves_startup_and_shutdown_then_closes(
+class TestRuntimeLoop:
+    def test_one_loop_serves_startup_shutdown_and_run_async(
         self, module_factory: ModuleFactory, kinds: dict[str, str]
     ) -> None:
         _chain(module_factory, "loop_a", "loop_b")
@@ -266,44 +266,17 @@ class TestAdapterLoopLifetime:
         loops = builtins._hook_loops  # type: ignore[attr-defined]
         startup_loop = loops[("on_load", "loop_a")]
         assert startup_loop is loops[("ready", "loop_b")]
-        assert not startup_loop.is_closed()
+        assert bedrock.run_async(_running_loop()) is startup_loop
 
         registry.shutdown()
 
         assert loops[("on_shutdown", "loop_a")] is startup_loop
-        assert startup_loop.is_closed()
-        assert not registry._adapter.is_open
+        # The loop is process-wide: another registry or run_async() may still hold clients on it.
+        assert not startup_loop.is_closed()
 
-    def test_loop_stays_open_while_a_module_is_not_shut_down(
-        self, module_factory: ModuleFactory, kinds: dict[str, str], failures: set[tuple[str, str]]
-    ) -> None:
-        _chain(module_factory, "keep_a", "keep_b")
-        kinds.update({"keep_a": "async", "keep_b": "async"})
-        failures.add(("on_shutdown", "keep_b"))
-        registry = ModuleRegistry()
-        registry.populate(["keep_b"])
 
-        with pytest.raises(ModuleLifecycleError):
-            registry.shutdown()
-        assert registry._adapter.is_open
-
-        failures.clear()
-        registry.shutdown()
-        assert not registry._adapter.is_open
-
-    def test_failed_first_install_does_not_keep_a_loop(
-        self, module_factory: ModuleFactory, kinds: dict[str, str], failures: set[tuple[str, str]]
-    ) -> None:
-        _chain(module_factory, "fail_a")
-        kinds["fail_a"] = "async"
-        failures.add(("on_load", "fail_a"))
-        registry = ModuleRegistry()
-
-        with pytest.raises(ModuleLifecycleError):
-            registry.install("fail_a")
-
-        assert registry.list_installed() == []
-        assert not registry._adapter.is_open
+async def _running_loop() -> asyncio.AbstractEventLoop:
+    return asyncio.get_running_loop()
 
 
 class TestSyncEntrypointsInsideARunningLoop:
@@ -1061,40 +1034,6 @@ class TestCancellationDrainsWorkerHooks:
             await task
 
         assert builtins._awaitable_started == []  # type: ignore[attr-defined]
-        assert _pending_tasks() == []
-
-    @pytest.mark.asyncio
-    async def test_cancelled_shutdown_waits_for_the_adapter_loop_to_close(
-        self, module_factory: ModuleFactory, kinds: dict[str, str], monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        _chain(module_factory, "adp_a")
-        kinds["adp_a"] = "async"
-        registry = ModuleRegistry()
-        await asyncio.to_thread(registry.populate, ["adp_a"])
-        assert registry._adapter.is_open
-        blocker = _BlockingHook()
-        real_close = registry._adapter.close
-
-        def slow_close() -> None:
-            blocker(registry)
-            real_close()
-
-        monkeypatch.setattr(registry._adapter, "close", slow_close)
-        task = asyncio.create_task(registry.ashutdown())
-        await _wait_until(blocker.started.is_set)
-        task.cancel()
-        task.cancel()
-        competitor = asyncio.create_task(registry.ainstall("adp_a"))
-        await _settle()
-
-        assert not task.done()
-        assert not competitor.done()
-
-        blocker.release.set()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-        await asyncio.wait_for(competitor, timeout=5)
-        assert not registry._adapter.is_open
         assert _pending_tasks() == []
 
     @pytest.mark.asyncio

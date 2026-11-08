@@ -16,6 +16,7 @@ import bedrock
 from .. import conf
 from .. import lifecycle as lifecycle_module
 from .. import module as module_package
+from .._loop import runtime_loop
 from ..di import container
 from ..hooks import hooks
 from ..module import ModuleLifecycleState, ModuleRegistry, signals
@@ -169,6 +170,8 @@ def isolated_runtime() -> Iterator[BedrockRuntime]:
         for callback in after_shutdown:
             attempt(callback)
         attempt(restore_signals)
+        attempt(runtime_loop.close)
+        attempt(lambda: setattr(lifecycle_module, "_async_setup_loop", None))
         attempt(container.reset)
         attempt(hooks.reset)
         attempt(restore_environ)
