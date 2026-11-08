@@ -103,7 +103,7 @@ A change to a public signature, behavior, default, error type, configuration key
 
 |Surface|Path|Update|
 |---|---|---|
-|Changelog|`CHANGELOG.md`|Entry under `## [Unreleased]`; breaking changes state the migration|
+|Changelog|`CHANGELOG.md`; `integrations/<framework>/CHANGELOG.md` for an integration|Entry under `## [Unreleased]`; breaking changes state the migration|
 |Web Doc|`docs-web/content/docs/{en,zh}/`|Affected pages in both languages; `meta.json` for new pages|
 |Agent skills|`skills/bedrock/`, `skills/bedrock-cli/`|`SKILL.md`, affected `references/*.md`, templates|
 |Playbooks|`packages/bedrock/src/bedrock/contrib/*/playbook/`|When a contrib API changes|
