@@ -30,14 +30,24 @@ user = await cache.aget("user:456")
 
 ### 后端选择
 
+将 `CACHE_BACKEND` 设为已注册的后端名称，默认为 `memory`。缓存模块的 `ready` 钩子会调用 `cache.configure()`；脚本中从未配置过缓存时，第一次操作也会这样做，因此两种情况都会读取 `CACHE_BACKEND`。各后端从自己的前缀（`CACHE_MEMORY_`、`CACHE_REDIS_`）读取设置：
+
+```bash
+CACHE_BACKEND=redis
+CACHE_REDIS_URL=redis://localhost:6379/0
+CACHE_REDIS_KEY_PREFIX=myapp:
+```
+
+名称未知时，启动会因 `BackendNotConfiguredError` 失败，错误信息会指出该名称来自 `CACHE_BACKEND`。在 `on_load` 钩子中登记的自定义后端也可以这样选择，因为 `ready` 在所有模块加载完成后才运行。
+
+也可以在代码中传入名称来选择；显式传入的名称会忽略 `CACHE_BACKEND`：
+
 ```python
 from bedrock.contrib.cache import cache
 
-# In-memory backend (default, auto-configured on first use)
+cache.configure()         # backend named by CACHE_BACKEND (memory when unset)
 cache.configure("memory")
-
-# Redis backend (requires: uv add bedrock-core[cache-redis])
-cache.configure("redis")
+cache.configure("redis")  # requires: uv add bedrock-core[cache-redis]
 ```
 
 ### 自定义设置
@@ -57,7 +67,7 @@ cache.configure("redis", settings=settings)
 
 ### 注册自定义后端
 
-自定义后端必须直接或间接显式继承 `CacheBackend`，并实现完整契约。在 `bootstrap.py:on_load` 中注册扩展：
+自定义后端需要实现 `CacheBackend` 协议，可以继承它（直接继承，或继承已有后端），也可以只按结构实现。在 `bootstrap.py:on_load` 中注册扩展：
 
 ```python
 from bedrock.contrib.cache import register_backend
@@ -73,7 +83,20 @@ def on_load() -> None:
     register_backend("custom", MyCustomBackend)
 ```
 
-注册后使用 `cache.configure("custom")` 选择后端。重复名称（包括内置名称）会抛出 `DuplicateRegistrationError`；无效类会抛出 `InvalidRegisteredClassError`，两者均来自 `bedrock.common.registry`。配置时的惰性加载失败会包装为 `BackendNotConfiguredError`，并保留原始异常链。应用自己的惰性类目录可使用 [ClassRegistry](./class-registry)。
+注册后使用 `cache.configure("custom")` 选择后端。`register_backend()` 也接受一个接收 `settings=` 的 factory。`configure()` 会检查创建出的对象是否具备 `CacheBackend` 的全部成员（只检查名称，不检查签名），因此请为自定义后端编写契约测试。
+
+如果希望后端模块及其 SDK 在被选中之前不进入内存，可以改为登记路径：
+
+```python
+from bedrock.contrib.cache import register_backend_lazy
+
+
+def on_load() -> None:
+    """Register the backend by path; nothing is imported until cache.configure("acme") runs."""
+    register_backend_lazy("acme", "acme_cache.backend:AcmeBackend", install_requirement="acme-cache[redis]")
+```
+
+在同一名称下再次登记同一个对象或同一路径不会产生任何效果。已被占用的名称（包括内置的 `memory` 和 `redis`）登记不同的后端会抛出 `DuplicateRegistrationError`；名称为空、路径格式错误或对象不可调用会抛出 `InvalidRegisteredClassError`，两者均来自 `bedrock.common.registry`。名称未知、模块或其 SDK 无法导入（信息会给出安装要求，例如 `bedrock-core[cache-redis]`），或创建出的对象没有实现 `CacheBackend` 时，`configure()` 会抛出 `BackendNotConfiguredError`，原因是对应的 [provider](./provider) 错误。后端构造器抛出的其他异常原样传播。
 
 ## CacheService API 参考
 

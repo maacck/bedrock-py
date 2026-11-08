@@ -10,8 +10,8 @@ class ProviderError(BedrockExc):
     detail: str = "Provider operation failed."
 
 
-# ponytail: also inherits the ClassRegistry error so contrib `register_backend` callers that catch the 0.3.0
-# type keep working once contrib moves onto ProviderCatalog; drop the second base when ClassRegistry retires.
+# ponytail: also inherits the ClassRegistry error so cache/storage `register_backend` callers that catch the 0.3.0
+# type keep working; drop the second base in the next breaking release.
 class InvalidProviderSpecError(ProviderError, InvalidRegisteredClassError):
     """Raised when a registration is malformed: empty name, bad import path, or non-callable factory."""
 

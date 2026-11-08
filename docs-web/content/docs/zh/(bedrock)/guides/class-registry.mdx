@@ -115,7 +115,7 @@ codecs = ClassRegistry[Codec](
 | `ClassLoadError` | 模块导入或属性查找失败；`__cause__` 保留原始异常 |
 | `InvalidRegisteredClassError` | 基类不是类，或实现违反类契约 |
 
-不要将每个 `ClassLoadError` 都理解为缺少 SDK：扩展代码可能抛出了其他异常。Cache 和 Storage 会将解析失败转换为已有的配置错误，并将注册表错误保留为原因。
+不要将每个 `ClassLoadError` 都理解为缺少 SDK：扩展代码可能抛出了其他异常。Cache 和 Storage 后端通过 [`bedrock.provider`](./provider) 登记，而不是 `ClassRegistry`。
 
 导入路径是可执行配置。只应接受来自可信代码或部署配置的路径，绝不要直接接受请求参数中的路径。请求可以选择已注册且授权的名称。继承验证发生在导入之后，并非安全沙箱。
 
@@ -128,4 +128,4 @@ codecs = ClassRegistry[Codec](
 3. 将 `get()` 周围的 `None` 检查和 `KeyError` 处理替换为上述注册表异常处理。
 4. 移除通过 `instances`、`update`、`remove` 和 `all` 进行的修改；使用显式注册和 `keys()`。重复注册不再被静默忽略。
 5. `DictManager` 已移除。将其加载类的调用方迁移到 `ClassRegistry`，不要保留未经验证的加载路径。
-6. 自定义 Cache 和 Storage 后端必须显式继承 `CacheBackend` / `StorageBackend`，包括以前仅依赖结构匹配的实现。它们的 `register_backend()` 辅助函数会拒绝重复名称，包括内置名称。
+6. 自定义 Cache 和 Storage 后端不再通过 `ClassRegistry` 登记。它们的 `register_backend()` 和 `register_backend_lazy()` 辅助函数使用 [`bedrock.provider`](./provider)：继承 `CacheBackend` / `StorageBackend` 不再是必须的，再次登记同一个对象不会产生任何效果。

@@ -21,6 +21,12 @@ class StorageConnectionError(StorageError):
     detail: str = "Failed to connect to the storage backend."
 
 
+class StorageCloseError(StorageError):
+    """Raised when one or more storage backends fail to close; the failures are the cause."""
+
+    detail: str = "Failed to close one or more storage backends."
+
+
 class StorageObjectNotFoundError(StorageError):
     """Raised when a storage object does not exist."""
 

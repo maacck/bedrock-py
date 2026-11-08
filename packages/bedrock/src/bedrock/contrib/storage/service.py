@@ -4,53 +4,75 @@ import base64
 import binascii
 import re
 import warnings
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import BinaryIO
 from urllib.parse import quote, urlencode, urlparse, urlunparse
 
 from pydantic_settings import BaseSettings
 
-from bedrock.common.registry import ClassRegistry, ClassRegistryError
 from bedrock.logging import get_logger
+from bedrock.provider import ProviderCatalog, ProviderError, ProviderNotFoundError, ProviderSpec
 
 from .base import StorageBackend
 from .entities import StorageListResult, StorageObject, StoragePresignedUrl, StorageUploadResult
-from .exc import StorageBackendNotConfiguredError, StorageError, StorageKeyError
+from .exc import StorageBackendNotConfiguredError, StorageCloseError, StorageError, StorageKeyError
 
 logger = get_logger(__name__)
 
-_BACKEND_REGISTRY: ClassRegistry[StorageBackend] = ClassRegistry(
-    base_class=StorageBackend,
-    lazy_classes={
-        "local": "bedrock.contrib.storage.backends.local:LocalBackend",
-        "s3": "bedrock.contrib.storage.backends.s3:S3Backend",
-    },
+_BUILTIN_SPECS: tuple[ProviderSpec, ...] = (
+    ProviderSpec("local", "bedrock.contrib.storage.backends.local:LocalBackend"),
+    ProviderSpec("s3", "bedrock.contrib.storage.backends.s3:S3Backend", "bedrock-core[storage-s3]"),
 )
 
+_BACKEND_REGISTRY: ProviderCatalog[StorageBackend] = ProviderCatalog(protocol=StorageBackend, specs=_BUILTIN_SPECS)
 
-def register_backend(name: str, backend_cls: type[StorageBackend]) -> None:
-    """Register a custom backend class under ``name`` for :meth:`StorageService.configure`.
 
-    The class must explicitly subclass :class:`StorageBackend` (nominal
-    inheritance; structural conformance alone is rejected). The base class
-    itself, abstract classes, and unrelated objects are rejected as well.
+def register_backend(name: str, backend_cls: Callable[..., StorageBackend]) -> None:
+    """Register an imported storage backend class or factory for :meth:`StorageService.configure`.
+
+    The module defining ``backend_cls`` is already imported. To defer that import, and the optional SDK it
+    pulls in, use :func:`register_backend_lazy`.
 
     Args:
-        name: Unique backend identifier (e.g. ``"stub"``). Built-in names
-            (``"local"``, ``"s3"``) and previously registered names are taken.
-        backend_cls: A concrete subclass of :class:`StorageBackend`.
+        name: Unique backend identifier (e.g. ``"stub"``).
+        backend_cls: A backend class, or a factory accepting ``settings=``, whose result structurally
+            implements :class:`StorageBackend`. Inheritance is not required; the result is checked by
+            :meth:`StorageService.configure`.
 
     Raises:
-        DuplicateRegistrationError: If ``name`` is already registered.
-        InvalidRegisteredClassError: If ``backend_cls`` is not a valid backend subclass.
+        DuplicateRegistrationError: If ``name`` is already registered to anything else, including the
+            built-in ``"local"`` and ``"s3"`` names (raised as :class:`bedrock.provider.ProviderConflictError`).
+            Registering the same object again is a no-op.
+        InvalidRegisteredClassError: If ``name`` is empty or ``backend_cls`` is not callable (raised as
+            :class:`bedrock.provider.InvalidProviderSpecError`).
     """
     _BACKEND_REGISTRY.register(name, backend_cls)
 
 
+def register_backend_lazy(name: str, path: str, *, install_requirement: str | None = None) -> None:
+    """Register a storage backend by ``module:attribute`` path without importing it.
+
+    The module is imported only when :meth:`StorageService.configure` selects ``name``.
+
+    Args:
+        name: Unique backend identifier.
+        path: Trusted path to a backend class or a factory accepting ``settings=``.
+        install_requirement: Requirement named in the configuration error when the import fails,
+            e.g. ``"acme-storage[gcs]"``.
+
+    Raises:
+        DuplicateRegistrationError: If ``name`` is already registered to anything else (raised as
+            :class:`bedrock.provider.ProviderConflictError`). Registering an equal path again is a no-op.
+        InvalidRegisteredClassError: If the name, path, or requirement is malformed (raised as
+            :class:`bedrock.provider.InvalidProviderSpecError`).
+    """
+    _BACKEND_REGISTRY.register_lazy(name, path, install_requirement=install_requirement)
+
+
 def list_backends() -> list[str]:
-    """Return all registered backend names."""
-    return sorted(_BACKEND_REGISTRY.keys())
+    """Return all registered backend names in sorted order, without importing any backend."""
+    return _BACKEND_REGISTRY.names()
 
 
 def normalize_storage_key(key: str) -> str:
@@ -148,6 +170,7 @@ class StorageService:
 
     def __init__(self) -> None:
         self._backend = None
+        self._replaced: list[StorageBackend] = []
 
     def configure(
         self,
@@ -167,28 +190,33 @@ class StorageService:
                 kept); :meth:`generate_presigned_url` is never rewritten.
 
         Returns:
-            The newly configured backend instance.
+            The newly configured backend instance. A backend it replaces stays open until :meth:`close`.
 
         Raises:
-            StorageBackendNotConfiguredError: If the backend is unknown or its class cannot be loaded
-                (the underlying ``ClassRegistryError`` is chained as the cause).
-            StorageConnectionError: If the backend cannot be initialized (e.g. missing bucket).
+            StorageBackendNotConfiguredError: If the backend name is unknown, cannot be loaded (missing
+                dependency named by its install requirement), or does not implement :class:`StorageBackend`.
+                The provider error is the cause; the previous backend stays configured.
+            StorageConnectionError: If the backend cannot be initialized (e.g. missing bucket). Any exception
+                raised by the backend constructor propagates unchanged.
         """
-        if not _BACKEND_REGISTRY.has(backend_name):
-            available = ", ".join(sorted(_BACKEND_REGISTRY.keys()))
+        try:
+            backend = _BACKEND_REGISTRY.create(backend_name, settings=settings)
+        except ProviderNotFoundError as exc:
+            available = ", ".join(_BACKEND_REGISTRY.names())
             raise StorageBackendNotConfiguredError(
                 f"Unknown storage backend '{backend_name}'. Available: {available}. "
                 f"Install optional dependencies for additional backends."
-            )
+            ) from exc
+        except ProviderError as exc:
+            raise StorageBackendNotConfiguredError(
+                f"Failed to load storage backend '{backend_name}': {exc.detail}"
+            ) from exc
 
-        try:
-            backend_cls = _BACKEND_REGISTRY.get(backend_name)
-        except ClassRegistryError as exc:
-            raise StorageBackendNotConfiguredError(f"Failed to load storage backend '{backend_name}': {exc}") from exc
-
-        self._backend = backend_cls(settings=settings)
+        if self._backend is not None:
+            self._replaced.append(self._backend)
+        self._backend = backend
         logger.info("Storage backend configured: {}", backend_name)
-        return self._backend
+        return backend
 
     def get_backend(self) -> StorageBackend:
         """Return the current backend.
@@ -205,13 +233,38 @@ class StorageService:
 
     def list_backends(self) -> list[str]:
         """Return all registered backend names."""
-        return sorted(_BACKEND_REGISTRY.keys())
+        return list_backends()
 
     def close(self) -> None:
-        """Close backend connections and reset the configured backend."""
+        """Close the current backend and every backend it replaced, then reset the configured backend.
+
+        Replaced backends are closed here, not by :meth:`configure`. Each backend is closed independently;
+        a backend whose ``close()`` fails stays tracked so calling ``close()`` again retries it. Safe to repeat.
+
+        Raises:
+            StorageCloseError: If one or more backends failed to close. The failures are the cause, grouped
+                in an ``ExceptionGroup``.
+        """
+        errors: list[Exception] = []
+        still_open: list[StorageBackend] = []
+        for backend in self._replaced:
+            try:
+                backend.close()
+            except Exception as exc:
+                errors.append(exc)
+                still_open.append(backend)
+        self._replaced = still_open
         if self._backend is not None:
-            self._backend.close()
-            self._backend = None
+            try:
+                self._backend.close()
+            except Exception as exc:
+                errors.append(exc)
+            else:
+                self._backend = None
+        if errors:
+            raise StorageCloseError(
+                f"Failed to close {len(errors)} storage backend(s): " + "; ".join(str(exc) for exc in errors)
+            ) from ExceptionGroup("storage close failures", errors)
 
     def upload(
         self,

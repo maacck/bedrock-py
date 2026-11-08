@@ -96,9 +96,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `@runtime_checkable` Protocol, so implementations need not inherit it. `resolve(name)` returns the class or
   factory for application-side construction, without validation. Re-registering the same target is a no-op;
   a different target under a used name raises `ProviderConflictError`. Load failures raise `ProviderLoadError`
-  naming the spec's `install_requirement` and keeping the original exception as `__cause__`. Cache and storage
-  still use `ClassRegistry`. Provider guide (en/zh) and the `provider-guide.md` skill reference describe when
-  to use `ClassRegistry` instead.
+  naming the spec's `install_requirement` and keeping the original exception as `__cause__`. Provider guide
+  (en/zh) and the `provider-guide.md` skill reference describe when to use `ClassRegistry` instead.
+- `register_backend_lazy(name, "module:attribute", install_requirement=None)` in `bedrock.contrib.cache` and
+  `bedrock.contrib.storage` registers a backend by path; the module is imported only when `configure()`
+  selects it. `StorageCloseError` is new.
+- **`CACHE_BACKEND`** selects the cache backend by registered name (default `memory`). `cache.configure()`
+  without a name, the cache module's `ready` hook, and the lazy configure on first use all read it, so
+  `CACHE_BACKEND=redis` with `CACHE_REDIS_*` switches an app to Redis without code. `configure()`'s
+  `backend_name` default changes from `"memory"` to `None`; an explicit name ignores the variable. An unknown
+  name raises `BackendNotConfiguredError` saying it came from `CACHE_BACKEND`.
+
+### Changed
+
+- **Cache and storage backends** are registered in a `bedrock.provider.ProviderCatalog` instead of a
+  `ClassRegistry`. `register_backend()` accepts a class or a factory taking `settings=`; inheriting
+  `CacheBackend` / `StorageBackend` is optional, and `configure()` rejects an object that lacks a protocol
+  member. Registering the same object again is a no-op; a different backend under a taken name still raises
+  `DuplicateRegistrationError`. A missing optional SDK now raises `BackendNotConfiguredError` /
+  `StorageBackendNotConfiguredError` naming the extra (`bedrock-core[cache-redis]`,
+  `bedrock-core[storage-s3]`); before, S3 raised a bare `ModuleNotFoundError`. The configuration error's
+  `__cause__` is now a `bedrock.provider` error instead of a `ClassRegistryError`. Importing
+  `bedrock.contrib.cache.backends.redis` without `redis` no longer fails; constructing `RedisBackend` does.
+- **Storage**: `storage.close()` also closes backends replaced by earlier `configure()` calls. A backend
+  whose `close()` fails stays tracked and is retried by the next call; failures raise `StorageCloseError`
+  after every backend was attempted, instead of the backend's own exception. A failed `configure()` keeps the
+  previous backend. Importing `bedrock.contrib.storage` no longer imports backend modules; `LocalBackend`,
+  `S3Backend` and their settings are loaded on first access.
 
 ### Fixed
 

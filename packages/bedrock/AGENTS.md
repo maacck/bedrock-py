@@ -59,5 +59,5 @@ src/bedrock/
 - Do not put HTTP-specific types (Request, Response) in service or entity layers. Keep them at adapter boundaries.
 - Do not subclass `BedrockExc` without setting a `detail` string. Error messages depend on it.
 - Do not instantiate settings eagerly at module level without `SettingsProxy` if the environment may not be ready at import time.
-- Do not hardcode cache backend names. Use `register_backend()` and the `ClassRegistry` pattern.
+- Do not hardcode cache or storage backend names. Register them with `register_backend()` / `register_backend_lazy()`, which use `bedrock.provider.ProviderCatalog`.
 - Do not import `contrib` modules from core code. Core must not depend on contrib.

@@ -7,7 +7,7 @@ Pluggable cache with in-memory and Redis backends, typed namespaces/slots, custo
 | Concern | Import |
 |---------|--------|
 | Cache singleton | `from bedrock.contrib.cache import cache` |
-| Register a backend | `from bedrock.contrib.cache import register_backend` |
+| Register a backend | `from bedrock.contrib.cache import register_backend, register_backend_lazy` |
 | Typed namespace / slot | `from bedrock.contrib.cache import CacheNamespace, CacheSlot` |
 | Coder protocol | `from bedrock.contrib.cache import CacheCoder` |
 | Default / bytes coder | `from bedrock.contrib.cache.coder import Coder, BytesCoder` |
@@ -35,21 +35,21 @@ bedrock app playbook bedrock.contrib.cache references/slots.md
 ```python
 from bedrock.contrib.cache import cache
 
-cache.configure("memory")  # default; also used lazily on first operation
-cache.configure("redis")   # requires: uv add bedrock-core[cache-redis]
+cache.configure()          # backend named by CACHE_BACKEND (default "memory"); also used lazily on first operation
+cache.configure("redis")   # explicit name ignores CACHE_BACKEND; requires: uv add bedrock-core[cache-redis]
 # INFO: Cache backend configured: memory / redis
 
 cache.set("user:1", {"name": "Alice"}, ex=300)
 value = cache.get("user:1")  # -> {"name": "Alice"}
 ```
 
-Inside a Bedrock app, the cache module's `ready` hook already calls `cache.configure()` (memory). Reconfigure to Redis from your own `ready` hook or after `bedrock.setup()`. See `references/lifecycle.md`.
+Inside a Bedrock app, the cache module's `ready` hook calls `cache.configure()`, so set `CACHE_BACKEND=redis` (plus `CACHE_REDIS_*`) to use Redis without code. An unknown name fails startup with `BackendNotConfiguredError` naming `CACHE_BACKEND`. See `references/lifecycle.md`.
 
 ## Custom Backend Registration
 
-Register extensions in `bootstrap.py:on_load` with `register_backend(name, backend_cls)`. The class must explicitly inherit `CacheBackend` (directly or indirectly) and implement its complete contract. Structural-only implementations are rejected. Names are process-local and cannot be replaced: registering an existing name, including `memory` or `redis`, raises `DuplicateRegistrationError`. Invalid classes raise `InvalidRegisteredClassError`; both errors are exported from `bedrock.common.registry`.
+Register extensions in `bootstrap.py:on_load` with `register_backend(name, backend_cls)` (an imported class, or a factory taking `settings=`) or `register_backend_lazy(name, "module:attribute", install_requirement=...)` (imported only when `configure()` selects it). The backend implements `CacheBackend` by inheritance or structurally; `configure()` checks member names only, so cover custom backends with contract tests. Registering the same object or path again is a no-op; a different backend under a taken name, including `memory` or `redis`, raises `DuplicateRegistrationError`. Malformed registrations raise `InvalidRegisteredClassError`; both errors are exported from `bedrock.common.registry`.
 
-The shared `ClassRegistry[CacheBackend]` loads built-in paths on demand. `configure()` translates registry loading/validation errors to `BackendNotConfiguredError` with the cause retained. The registry manages classes, not cache instances or their lifetimes.
+Backends live in a `bedrock.provider.ProviderCatalog[CacheBackend]` that imports built-in paths on demand. `configure()` translates an unknown name, a failed import (the message names the install requirement, e.g. `bedrock-core[cache-redis]`), or an object that does not implement `CacheBackend` to `BackendNotConfiguredError` with the provider error as the cause. Other constructor errors propagate unchanged. The catalog does not own instances; the service does.
 
 ## Core API
 
@@ -116,11 +116,11 @@ Memory is process-local. Use Redis for multiple processes. Redis `clear()` scans
 
 | Hook / method | What happens |
 |---------------|----------------|
-| `ready` | `cache.configure()` → memory backend |
+| `ready` | `cache.configure()` → backend named by `CACHE_BACKEND` (default memory) |
 | `on_shutdown` | `cache.close()`, then returns `cache.aclose()` when a backend still holds async clients (Redis); the registry awaits it before the module counts as shut down |
 | `on_load` | not implemented |
-| `cache.configure(name, settings=None)` | Replace the active backend; logs the backend name at INFO |
-| `cache.get_backend()` | Lazy memory configure if unset |
+| `cache.configure(name=None, settings=None)` | Replace the active backend; `None` reads `CACHE_BACKEND` (default `"memory"`); logs the backend name at INFO |
+| `cache.get_backend()` | Lazy `configure()` if unset |
 | `cache.close()` / `aclose()` | Close the sync / async clients; failures raise `CacheCloseError` after every backend was attempted |
 
 Details: `references/lifecycle.md`.

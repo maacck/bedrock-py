@@ -47,7 +47,9 @@ class FakeRedisLikeBackend(InMemoryBackend):
         type(self).log.append("aclose:done")
 
 
-register_backend("lifecycle-fake-redis", FakeRedisLikeBackend)
+@pytest.fixture(autouse=True, scope="module")
+def _register_fake_redis() -> None:
+    register_backend("lifecycle-fake-redis", FakeRedisLikeBackend)
 
 
 @pytest.fixture
@@ -224,6 +226,19 @@ class TestCacheModuleHooks:
         registry.shutdown()
 
         assert registry._app_configs["bedrock.contrib.cache"].lifecycle_state is ModuleLifecycleState.SHUTDOWN
+
+    def test_ready_configures_the_backend_named_by_cache_backend(
+        self, clean_cache: CacheService, fake_log: list[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("CACHE_BACKEND", "lifecycle-fake-redis")
+        registry = ModuleRegistry()
+        registry.install("bedrock.contrib.cache")
+
+        registry.mark_ready()
+
+        assert isinstance(clean_cache.get_backend(), FakeRedisLikeBackend)
+        asyncio.run(registry.ashutdown())
+        assert fake_log == ["close", "aclose:start", "aclose:done"]
 
     def test_async_close_failure_keeps_the_module_retryable(
         self, clean_cache: CacheService, fake_log: list[str]

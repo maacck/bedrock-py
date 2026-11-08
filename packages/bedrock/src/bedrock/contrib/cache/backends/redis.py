@@ -10,14 +10,6 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from ..base import CacheBackend
 from ..exc import CacheClearRequiresPrefixError
 
-try:
-    import redis
-    import redis.asyncio
-except ImportError as exc:
-    raise ImportError(
-        "The 'redis' package is required for RedisCacheBackend. Install with 'pip install redis'."
-    ) from exc
-
 _COMPARE_AND_DELETE_SCRIPT = """
 if redis.call('get', KEYS[1]) == ARGV[1] then
     return redis.call('del', KEYS[1])
@@ -60,6 +52,9 @@ class RedisBackend(CacheBackend):
     """
 
     def __init__(self, settings: RedisCacheSettings | None = None) -> None:
+        import redis
+        import redis.asyncio
+
         self._settings = settings or RedisCacheSettings()
 
         self._client = redis.from_url(

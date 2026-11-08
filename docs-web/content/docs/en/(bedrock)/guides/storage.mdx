@@ -92,7 +92,7 @@ ACL resolution is: explicit `acl=` parameter > `S3StorageSettings.default_acl` (
 
 ### Registering Custom Backends
 
-Custom backends must explicitly inherit `StorageBackend`, directly or through an existing backend, and implement its complete contract. Structural conformance alone is no longer sufficient. Register extensions from `bootstrap.py:on_load`:
+A custom backend implements the `StorageBackend` protocol, either by inheriting it (directly or through an existing backend) or structurally. Register extensions from `bootstrap.py:on_load`:
 
 ```python
 from bedrock.contrib.storage import LocalBackend, register_backend
@@ -107,7 +107,9 @@ def on_load() -> None:
     register_backend("custom", MyBackend)
 ```
 
-Select it with `storage.configure("custom")` after registration. Duplicate names, including built-ins, raise `DuplicateRegistrationError`; invalid classes raise `InvalidRegisteredClassError`. Both come from `bedrock.common.registry`. Configuration wraps lazy resolution failures in `StorageBackendNotConfiguredError`, preserving the original exception chain. For application-owned lazy catalogs, use [ClassRegistry](./class-registry).
+Select it with `storage.configure("custom")` after registration. `register_backend()` also accepts a factory that takes `settings=`. `configure()` checks that the created object has every `StorageBackend` member (names only, not signatures), so cover a custom backend with your own contract tests. `register_backend_lazy(name, "module:attribute", install_requirement=...)` registers a path instead; the module is imported only when `configure()` selects it. Importing `bedrock.contrib.storage` loads no backend module: `LocalBackend`, `S3Backend` and their settings are imported on first access.
+
+Registering the same object or path again under its name does nothing. A different backend under a taken name, including the built-ins `local` and `s3`, raises `DuplicateRegistrationError`; an empty name, malformed path, or non-callable raises `InvalidRegisteredClassError`. Both come from `bedrock.common.registry`. `configure()` raises `StorageBackendNotConfiguredError` when the name is unknown, the module or its SDK cannot be imported (the message names the install requirement, e.g. `bedrock-core[storage-s3]`), or the created object does not implement `StorageBackend`; the [provider](./provider) error is the cause and the previous backend stays configured. Other exceptions from the backend constructor, such as `StorageConnectionError`, propagate unchanged.
 
 ## StorageService API Reference
 
@@ -128,6 +130,7 @@ The `storage` singleton is a `StorageService` instance. All access goes through 
 | `storage.get_signed_url()` | `get_signed_url(storage_key, method="GET", expires_in=3600) → str` | **Deprecated** — use `generate_presigned_url()` |
 | `storage.get_access_url()` | `get_access_url(storage_key, acl=None, expires_in=3600) → str` | Direct download URL (CDN-rewritten when configured) |
 | `storage.get_preview_url()` | `get_preview_url(storage_key, acl=None, expires_in=3600) → str` | Inline preview URL (CDN-rewritten when configured) |
+| `storage.close()` | `close() → None` | Close the current backend and every backend that `configure()` replaced, then unconfigure. A backend whose `close()` fails stays tracked and is retried by the next call; failures raise `StorageCloseError` after every backend was attempted |
 
 ### Listing
 
@@ -282,6 +285,7 @@ All storage exceptions inherit from `StorageError`:
 StorageError
 ├── StorageBackendNotConfiguredError — No backend configured / unknown backend name
 ├── StorageConnectionError           — Backend unreachable or misconfigured
+├── StorageCloseError                — One or more backends failed to close
 ├── StorageObjectNotFoundError       — Object does not exist
 ├── StorageKeyError                  — Invalid storage key (empty, escaped, malformed)
 ├── StorageUploadError               — Upload or move failure
@@ -293,6 +297,7 @@ StorageError
 ```python
 from bedrock.contrib.storage import (
     StorageBackendNotConfiguredError,
+    StorageCloseError,
     StorageConnectionError,
     StorageDownloadError,
     StorageError,
@@ -308,7 +313,7 @@ from bedrock.contrib.storage import (
 
 **Don't rely on an implicit backend.** The service is strict: using any operation before `configure()` raises `StorageBackendNotConfiguredError`. There is no lazy default.
 
-**Don't call `configure()` at runtime.** Reconfiguration is unsynchronized — the backend is swapped in place without a lock. Call `configure()` once at startup.
+**Don't call `configure()` at runtime.** Reconfiguration is unsynchronized — the backend is swapped in place without a lock. Call `configure()` once at startup. A replaced backend keeps its connections until `storage.close()`.
 
 **Don't expect async methods.** The current storage API is sync-only; offload blocking operations appropriately in async applications.
 

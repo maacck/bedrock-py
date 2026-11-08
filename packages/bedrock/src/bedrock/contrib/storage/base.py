@@ -2,19 +2,20 @@
 
 from collections.abc import Iterable
 from pathlib import Path
-from typing import BinaryIO, Protocol
+from typing import BinaryIO, Protocol, runtime_checkable
 
 from pydantic_settings import BaseSettings
 
 from .entities import StorageListResult, StorageObject, StoragePresignedUrl, StorageUploadResult
 
 
+@runtime_checkable
 class StorageBackend(Protocol):
     """Contract every storage backend must implement.
 
-    Backends must explicitly subclass this class to be registered with
-    :func:`~bedrock.contrib.storage.register_backend`; structural conformance
-    alone is not accepted.
+    Backends registered with :func:`~bedrock.contrib.storage.register_backend` or
+    :func:`~bedrock.contrib.storage.register_backend_lazy` may subclass this class or implement it
+    structurally; :meth:`~bedrock.contrib.storage.StorageService.configure` checks that every member exists.
 
     Backends receive already-normalized ``storage_key`` values; the service
     performs validation and normalization before delegation.

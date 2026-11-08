@@ -8,7 +8,11 @@ from bedrock.module import AppConfig, ModuleRegistry
 
 
 def ready(*, registry: ModuleRegistry, app: AppConfig) -> None:
-    """Called when all modules are installed and ready."""
+    """Configure the backend named by ``CACHE_BACKEND`` (memory when unset) once all modules are loaded.
+
+    Custom backends registered in an ``on_load`` hook can be selected this way, since ``ready`` runs after
+    every module was installed.
+    """
     from .service import cache
 
     cache.configure()

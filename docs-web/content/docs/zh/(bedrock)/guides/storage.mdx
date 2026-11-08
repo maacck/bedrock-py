@@ -92,7 +92,7 @@ ACL 解析顺序为：显式 `acl=` 参数 > `S3StorageSettings.default_acl`（�
 
 ### 注册自定义后端
 
-自定义后端必须直接或间接显式继承 `StorageBackend`，并实现完整契约；仅满足结构要求并不足够。在 `bootstrap.py:on_load` 中注册扩展：
+自定义后端需要实现 `StorageBackend` 协议，可以继承它（直接继承，或继承已有后端），也可以只按结构实现。在 `bootstrap.py:on_load` 中注册扩展：
 
 ```python
 from bedrock.contrib.storage import LocalBackend, register_backend
@@ -107,7 +107,9 @@ def on_load() -> None:
     register_backend("custom", MyBackend)
 ```
 
-注册后使用 `storage.configure("custom")` 选择后端。重复名称（包括内置名称）会抛出 `DuplicateRegistrationError`；无效类会抛出 `InvalidRegisteredClassError`，两者均来自 `bedrock.common.registry`。配置时的惰性加载失败会包装为 `StorageBackendNotConfiguredError`，并保留原始异常链。应用自己的惰性类目录可使用 [ClassRegistry](./class-registry)。
+注册后使用 `storage.configure("custom")` 选择后端。`register_backend()` 也接受一个接收 `settings=` 的 factory。`configure()` 会检查创建出的对象是否具备 `StorageBackend` 的全部成员（只检查名称，不检查签名），因此请为自定义后端编写契约测试。`register_backend_lazy(name, "module:attribute", install_requirement=...)` 改为登记路径，只有 `configure()` 选中它时才导入模块。导入 `bedrock.contrib.storage` 不会加载任何后端模块：`LocalBackend`、`S3Backend` 及其设置类在首次访问时才导入。
+
+在同一名称下再次登记同一个对象或同一路径不会产生任何效果。已被占用的名称（包括内置的 `local` 和 `s3`）登记不同的后端会抛出 `DuplicateRegistrationError`；名称为空、路径格式错误或对象不可调用会抛出 `InvalidRegisteredClassError`，两者均来自 `bedrock.common.registry`。名称未知、模块或其 SDK 无法导入（信息会给出安装要求，例如 `bedrock-core[storage-s3]`），或创建出的对象没有实现 `StorageBackend` 时，`configure()` 会抛出 `StorageBackendNotConfiguredError`，原因是对应的 [provider](./provider) 错误，之前的后端保持不变。后端构造器抛出的其他异常（例如 `StorageConnectionError`）原样传播。
 
 ## StorageService API 参考
 
@@ -128,6 +130,7 @@ def on_load() -> None:
 | `storage.get_signed_url()` | `get_signed_url(storage_key, method="GET", expires_in=3600) → str` | **已弃用**——请改用 `generate_presigned_url()` |
 | `storage.get_access_url()` | `get_access_url(storage_key, acl=None, expires_in=3600) → str` | 直接下载 URL（配置 CDN 时会被重写） |
 | `storage.get_preview_url()` | `get_preview_url(storage_key, acl=None, expires_in=3600) → str` | 内联预览 URL（配置 CDN 时会被重写） |
+| `storage.close()` | `close() → None` | 关闭当前后端以及被 `configure()` 替换掉的所有后端，然后回到未配置状态。`close()` 失败的后端会继续保留，下次调用时重试；所有后端都尝试过之后，若有失败则抛出 `StorageCloseError` |
 
 ### 列出对象
 
@@ -282,6 +285,7 @@ normalize_storage_key("")                       # 抛出 StorageKeyError
 StorageError
 ├── StorageBackendNotConfiguredError — 未配置后端 / 后端名称未知
 ├── StorageConnectionError           — 后端不可达或配置错误
+├── StorageCloseError                — 一个或多个后端关闭失败
 ├── StorageObjectNotFoundError       — 对象不存在
 ├── StorageKeyError                  — 存储键无效（空、越界、格式错误）
 ├── StorageUploadError               — 上传或移动失败
@@ -293,6 +297,7 @@ StorageError
 ```python
 from bedrock.contrib.storage import (
     StorageBackendNotConfiguredError,
+    StorageCloseError,
     StorageConnectionError,
     StorageDownloadError,
     StorageError,
@@ -308,7 +313,7 @@ from bedrock.contrib.storage import (
 
 **不要依赖隐式后端。** 服务是严格模式：在 `configure()` 之前使用任何操作都会抛出 `StorageBackendNotConfiguredError`。不存在惰性默认后端。
 
-**不要在运行时调用 `configure()`。** 重新配置是不同步的——后端会不加锁地在原位置被替换。请在启动时调用一次 `configure()`。
+**不要在运行时调用 `configure()`。** 重新配置是不同步的——后端会不加锁地在原位置被替换。请在启动时调用一次 `configure()`。被替换的后端会一直持有连接，直到调用 `storage.close()`。
 
 **不要期待异步方法。** 当前存储 API 仅支持同步调用；在异步应用中应适当卸载阻塞操作。
 

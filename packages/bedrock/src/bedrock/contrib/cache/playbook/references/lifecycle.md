@@ -9,16 +9,23 @@ Two layers: the Bedrock **module** hooks, and the `CacheService` / entry lifetim
 | Hook | Implemented | Effect |
 |------|-------------|--------|
 | `on_load` | no | — |
-| `ready(*, registry, app)` | yes | `cache.configure()` → **memory** backend |
+| `ready(*, registry, app)` | yes | `cache.configure()` → backend named by `CACHE_BACKEND` (default **memory**) |
 | `on_shutdown(*, registry, app)` | yes | `cache.close()`; returns `cache.aclose()` if a backend still holds async clients, which the registry awaits |
 
 `ready` runs after every module is loaded. `on_shutdown` runs in reverse dependency order when the registry shuts down.
 
-Standalone scripts that only `import cache` never run these hooks. The service still works: the first operation calls `get_backend()` and lazy-configures memory.
+Standalone scripts that only `import cache` never run these hooks. The service still works: the first operation calls `get_backend()`, which configures the `CACHE_BACKEND` backend (memory when unset).
 
 ## Choosing Redis in a Bedrock app
 
-`ready` always configures memory. To use Redis, reconfigure **after** that hook, typically from your application's `ready`:
+Set the environment; no code is needed:
+
+```bash
+CACHE_BACKEND=redis
+CACHE_REDIS_KEY_PREFIX=yourapp:
+```
+
+`ready` then configures Redis directly. A backend your module registers in `on_load` can be named the same way. If the settings must be built in code, reconfigure **after** cache's `ready`, from your application's `ready`:
 
 ```python
 # yourapp/bootstrap.py
@@ -33,7 +40,7 @@ def ready(*, registry, app) -> None:
     )
 ```
 
-Call `close()` first so the memory backend from cache's `ready` is not leaked. Declare a dependency on `bedrock.contrib.cache` so your `ready` runs after it.
+Call `close()` first so the backend from cache's `ready` is not kept open until shutdown. Declare a dependency on `bedrock.contrib.cache` so your `ready` runs after it.
 
 Outside the registry:
 
@@ -58,8 +65,8 @@ unconfigured  --configure()/get_backend()-->  active  --close()/aclose()-->  unc
 
 | Method | Behavior |
 |--------|----------|
-| `configure(name="memory", settings=None)` | Instantiate the named backend and store it. Logs `Cache backend configured: {name}` at INFO. Unknown name → `BackendNotConfiguredError`. The previous backend is kept for shutdown rather than closed now. |
-| `get_backend()` | Return the active backend, or `configure("memory")` if none. |
+| `configure(name=None, settings=None)` | Instantiate the named backend and store it; `None` reads `CACHE_BACKEND` (default `"memory"`). Logs `Cache backend configured: {name}` at INFO. Unknown name → `BackendNotConfiguredError` (the message says `from CACHE_BACKEND` when the name came from the environment). The previous backend is kept for shutdown rather than closed now. |
+| `get_backend()` | Return the active backend, or `configure()` if none. |
 | `close()` | Close the sync side of the current and replaced backends, then `_backend = None`. Safe if already unconfigured. Raises `CacheCloseError` after attempting every backend. |
 | `aclose()` | Close the async side of the current and replaced backends (those with `holds_async_resources`), then `_backend = None`. |
 | `has_async_resources()` | `True` while `aclose()` still has a backend to release. |

@@ -19,7 +19,7 @@ Catch `CacheError` for any cache failure; catch a leaf when the recovery path di
 
 | Exception | When |
 |-----------|------|
-| `BackendNotConfiguredError` | `configure(name)` with an unknown backend, or the backend class cannot be imported (missing extra, e.g. Redis without `bedrock-core[cache-redis]`). |
+| `BackendNotConfiguredError` | `configure(name)` or `CACHE_BACKEND` names an unknown backend, or the backend class cannot be imported (missing extra, e.g. Redis without `bedrock-core[cache-redis]`). |
 | `CacheClearRequiresPrefixError` | Redis `clear()` / `aclear()` when both `CACHE_REDIS_KEY_PREFIX` / `key_prefix` and the `prefix=` argument are empty. Guards against wiping the whole DB. |
 | `CacheLockError` | `acquire()` / `aacquire()` on an instance that already holds the lock (not re-entrant). |
 | `CacheLockAcquisitionError` | `with lock:` / `async with lock:` when `acquire()` returned `False` (busy, or `blocking_timeout` elapsed). Manual `acquire()` returns `False` instead. |
@@ -69,4 +69,4 @@ Custom backends and application code may raise these. Catch `CacheError` if you 
 - `get` miss → `default` (`None` unless you pass another value).
 - `delete` on a missing key → `False`.
 - Manual `lock.acquire()` on contention → `False` (only the context manager raises).
-- First cache operation without `configure()` → lazy memory backend, not `BackendNotConfiguredError`.
+- First cache operation without `configure()` → lazy `configure()` of the `CACHE_BACKEND` backend (memory when unset), not `BackendNotConfiguredError`.

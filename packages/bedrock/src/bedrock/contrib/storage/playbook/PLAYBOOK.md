@@ -7,7 +7,7 @@ Unified file/object storage with pluggable backends: a local filesystem backend 
 | Concern | Import |
 |---------|--------|
 | Storage singleton | `from bedrock.contrib.storage import storage` |
-| Register a backend | `from bedrock.contrib.storage import register_backend` |
+| Register a backend | `from bedrock.contrib.storage import register_backend, register_backend_lazy` |
 | List backends | `from bedrock.contrib.storage import list_backends` |
 | Normalize a key | `from bedrock.contrib.storage import normalize_storage_key` |
 
@@ -50,13 +50,15 @@ Settings: `bucket_name` (required), `region_name`, `access_key_id`, `secret_acce
 
 ## Custom Backend Registration
 
-Register extensions in `bootstrap.py:on_load` with `register_backend(name, backend_cls)`. The class must explicitly inherit `StorageBackend` (directly or indirectly) and implement its complete contract. Structural-only implementations are no longer accepted. Names are process-local and cannot be replaced: duplicates, including `local` or `s3`, raise `DuplicateRegistrationError`. Invalid classes raise `InvalidRegisteredClassError`; both errors are exported from `bedrock.common.registry`.
+Register extensions in `bootstrap.py:on_load` with `register_backend(name, backend_cls)` (an imported class, or a factory taking `settings=`) or `register_backend_lazy(name, "module:attribute", install_requirement=...)` (imported only when `configure()` selects it). The backend implements `StorageBackend` by inheritance or structurally; `configure()` checks member names only, so cover custom backends with contract tests. Registering the same object or path again is a no-op; a different backend under a taken name, including `local` or `s3`, raises `DuplicateRegistrationError`. Malformed registrations raise `InvalidRegisteredClassError`; both errors are exported from `bedrock.common.registry`.
 
-The shared `ClassRegistry[StorageBackend]` resolves declared paths on demand. `configure()` translates registry loading/validation errors to `StorageBackendNotConfiguredError` with the cause retained. Instance construction, configuration and cleanup remain the storage service's responsibility.
+Backends live in a `bedrock.provider.ProviderCatalog[StorageBackend]` that imports built-in paths on demand; importing `bedrock.contrib.storage` loads no backend module (`LocalBackend`, `S3Backend` and their settings are imported on first access). `configure()` translates an unknown name, a failed import (the message names the install requirement, e.g. `bedrock-core[storage-s3]`), or an object that does not implement `StorageBackend` to `StorageBackendNotConfiguredError` with the provider error as the cause; the previous backend stays configured. Other constructor errors, such as `StorageConnectionError`, propagate unchanged.
+
+`close()` closes the current backend and every backend `configure()` replaced, then unconfigures. A backend whose `close()` fails stays tracked and is retried by the next `close()`; failures raise `StorageCloseError` after every backend was attempted.
 
 ## Exceptions
 
-All inherit from `StorageError` (a `BedrockExc`): `StorageBackendNotConfiguredError`, `StorageConnectionError`, `StorageObjectNotFoundError`, `StorageKeyError`, `StorageUploadError`, `StorageDownloadError`, `StoragePermissionError`, `StorageUrlUnsupportedError`.
+All inherit from `StorageError` (a `BedrockExc`): `StorageBackendNotConfiguredError`, `StorageConnectionError`, `StorageCloseError`, `StorageObjectNotFoundError`, `StorageKeyError`, `StorageUploadError`, `StorageDownloadError`, `StoragePermissionError`, `StorageUrlUnsupportedError`.
 
 ## Anti-Patterns
 

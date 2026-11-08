@@ -30,14 +30,24 @@ The cache service uses a dynamic backend registry. The in-memory backend is avai
 
 ### Backend Selection
 
+Set `CACHE_BACKEND` to a registered backend name; it defaults to `memory`. The cache module's `ready` hook calls `cache.configure()`, and the first operation in a script that never configured the cache does the same, so both pick up `CACHE_BACKEND`. Each backend reads its own settings from its prefix (`CACHE_MEMORY_`, `CACHE_REDIS_`):
+
+```bash
+CACHE_BACKEND=redis
+CACHE_REDIS_URL=redis://localhost:6379/0
+CACHE_REDIS_KEY_PREFIX=myapp:
+```
+
+An unknown name fails startup with `BackendNotConfiguredError`, whose message says the name came from `CACHE_BACKEND`. A custom backend registered in an `on_load` hook can be selected this way, because `ready` runs after every module was loaded.
+
+Pass a name to choose in code instead; an explicit name ignores `CACHE_BACKEND`:
+
 ```python
 from bedrock.contrib.cache import cache
 
-# In-memory backend (default, auto-configured on first use)
+cache.configure()         # backend named by CACHE_BACKEND (memory when unset)
 cache.configure("memory")
-
-# Redis backend (requires: uv add bedrock-core[cache-redis])
-cache.configure("redis")
+cache.configure("redis")  # requires: uv add bedrock-core[cache-redis]
 ```
 
 ### Custom Settings
@@ -57,7 +67,7 @@ cache.configure("redis", settings=settings)
 
 ### Registering Custom Backends
 
-Custom backends must explicitly inherit `CacheBackend`, directly or through an existing backend, and implement its complete contract. Register extensions from `bootstrap.py:on_load`:
+A custom backend implements the `CacheBackend` protocol, either by inheriting it (directly or through an existing backend) or structurally. Register extensions from `bootstrap.py:on_load`:
 
 ```python
 from bedrock.contrib.cache import register_backend
@@ -73,7 +83,20 @@ def on_load() -> None:
     register_backend("custom", MyCustomBackend)
 ```
 
-Select it with `cache.configure("custom")` after registration. Duplicate names, including built-ins, raise `DuplicateRegistrationError`; invalid classes raise `InvalidRegisteredClassError`. Both come from `bedrock.common.registry`. Configuration wraps lazy resolution failures in `BackendNotConfiguredError`, preserving the original exception chain. For application-owned lazy catalogs, use [ClassRegistry](./class-registry).
+Select it with `cache.configure("custom")` after registration. `register_backend()` also accepts a factory that takes `settings=`. `configure()` checks that the created object has every `CacheBackend` member (names only, not signatures), so cover a custom backend with your own contract tests.
+
+To keep a backend module and its SDK out of memory until it is selected, register a path instead:
+
+```python
+from bedrock.contrib.cache import register_backend_lazy
+
+
+def on_load() -> None:
+    """Register the backend by path; nothing is imported until cache.configure("acme") runs."""
+    register_backend_lazy("acme", "acme_cache.backend:AcmeBackend", install_requirement="acme-cache[redis]")
+```
+
+Registering the same object or path again under its name does nothing. A different backend under a taken name, including the built-ins `memory` and `redis`, raises `DuplicateRegistrationError`; an empty name, malformed path, or non-callable raises `InvalidRegisteredClassError`. Both come from `bedrock.common.registry`. `configure()` raises `BackendNotConfiguredError` when the name is unknown, the module or its SDK cannot be imported (the message names the install requirement, e.g. `bedrock-core[cache-redis]`), or the created object does not implement `CacheBackend`; the [provider](./provider) error is the cause. Other exceptions from the backend constructor propagate unchanged.
 
 ## CacheService API Reference
 

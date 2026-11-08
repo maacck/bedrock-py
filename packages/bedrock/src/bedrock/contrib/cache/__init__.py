@@ -28,7 +28,7 @@ from .exc import (
 )
 from .lock import CacheLock
 from .schema import CacheNamespace, CacheSlot
-from .service import CacheService, cache, register_backend
+from .service import CacheService, cache, register_backend, register_backend_lazy
 
 __all__ = [
     "BackendNotConfiguredError",
@@ -48,4 +48,5 @@ __all__ = [
     "CacheSlot",
     "cache",
     "register_backend",
+    "register_backend_lazy",
 ]
