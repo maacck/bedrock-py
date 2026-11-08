@@ -51,12 +51,12 @@ Database settings use environment variables with the `DATABASE_` prefix. `DbSett
 | `DATABASE_ASYNC_DRIVER` | `str \| None` | `None` | Async DBAPI driver (`aiosqlite`, `asyncpg`, `psycopg`, `asyncmy`, `aiomysql`) |
 | `DATABASE_MAX_CONNECTIONS` | `int` | `10` | Per-process connection ceiling, including overflow |
 | `DATABASE_POOL_TIMEOUT` | `int` | `30` | Seconds to wait for a connection |
-| `DATABASE_POOL_SIZE` | `int` | `10` | Steady-state pool size |
+| `DATABASE_POOL_SIZE` | `int` | `10` | Steady-state pool size. Must be at least 1. |
 | `DATABASE_POOL_RECYCLE` | `int` | `1800` | Seconds before recycling a connection |
 | `DATABASE_MIGRATION_LOCK_TIMEOUT` | `float` | `30` | Seconds to wait for the migration lock. `0` does not wait. |
 | `DATABASE_SCHEMA` | `str` | `"bedrock.db"` | Database name or file path |
 
-`MAX_CONNECTIONS` is the total number of connections one process may check out. PostgreSQL and MySQL engines receive `pool_size`, `pool_timeout`, `pool_recycle`, and `max_overflow = MAX_CONNECTIONS - POOL_SIZE`. `MAX_CONNECTIONS` must be greater than or equal to `POOL_SIZE`. A smaller value raises `DatabaseConfigurationError` and the message names both settings. SQLite engines ignore the pool settings.
+`MAX_CONNECTIONS` is the total number of connections one process may check out. PostgreSQL and MySQL engines receive `pool_size`, `pool_timeout`, `pool_recycle`, and `max_overflow = MAX_CONNECTIONS - POOL_SIZE`. `MAX_CONNECTIONS` must be greater than or equal to `POOL_SIZE`. A smaller value raises `DatabaseConfigurationError` and the message names both settings. `POOL_SIZE` below 1 also raises `DatabaseConfigurationError`, because SQLAlchemy treats a pool size of 0 as unlimited and would ignore the ceiling. SQLite engines ignore the pool settings.
 
 The defaults (`POOL_SIZE=10`, `MAX_CONNECTIONS=10`) cap a process at 10 connections. Those defaults previously left SQLAlchemy's implicit overflow of 10 in place, so the engine allowed 20. Raise `DATABASE_MAX_CONNECTIONS` above `DATABASE_POOL_SIZE` when a deployment needs that extra capacity.
 
@@ -240,8 +240,9 @@ Async services use the same scoping rules with an `a` prefix. Set `DATABASE_ASYN
 | Driver | Install |
 |--------|---------|
 | `aiosqlite` | `pip install 'bedrock-core[async-sqlite]'` |
-| `asyncpg`, `psycopg` | `pip install 'bedrock-core[async-postgresql]'` |
-| `asyncmy`, `aiomysql` | `pip install 'bedrock-core[async-mysql]'` |
+| `asyncpg` | `pip install 'bedrock-core[async-postgresql]'` |
+| `asyncmy` | `pip install 'bedrock-core[async-mysql]'` |
+| `psycopg`, `aiomysql` | Install the driver package itself (`pip install psycopg` / `pip install aiomysql`) |
 
 `db.asession_scope()` commits on a clean exit, rolls back on any exception, and refuses to nest when an async session is already bound. `db.aindependent_session()` does not bind `db.asession`. The async session uses its own context variable, so a sync session in the same task stays in place. A missing driver package raises `DatabaseConfigurationError` and names the extra to install.
 

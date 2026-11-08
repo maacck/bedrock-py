@@ -70,7 +70,7 @@ notifiers = ProviderCatalog[Notifier](
 from .service import notifiers
 
 
-def on_load() -> None:
+def on_load(*, app) -> None:
     """Declare providers without importing them."""
     notifiers.register_lazy("email", "myapp.notify.providers.email:create_email_notifier")
 ```

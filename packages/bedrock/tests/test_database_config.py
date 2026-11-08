@@ -113,6 +113,13 @@ class TestPoolSettings:
         assert "DATABASE_POOL_SIZE" in message
         assert "super-secret-password" not in message
 
+    @pytest.mark.parametrize("pool_size", [0, -1])
+    def test_non_positive_pool_size_is_rejected(self, pool_size: int) -> None:
+        """SQLAlchemy treats a pool size of 0 as unlimited, which would bypass MAX_CONNECTIONS."""
+
+        with pytest.raises(DatabaseConfigurationError, match="DATABASE_POOL_SIZE"):
+            _postgres(POOL_SIZE=pool_size, MAX_CONNECTIONS=3)
+
     @pytest.mark.parametrize(
         ("pool_size", "max_connections"),
         [(1, 1), (1, 2)],

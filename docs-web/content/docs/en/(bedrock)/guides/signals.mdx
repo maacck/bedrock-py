@@ -324,7 +324,7 @@ During `registry.shutdown()`:
 If `on_load` fails, no `module_loaded` is sent and installation rolls back; already loaded modules are unwound, with `module_shutdown` sent only after a successful shutdown hook. A failing `module_ready` receiver propagates after the module is marked ready, so retry skips that module and does not resend its signal. A failing `module_shutdown` receiver is reported after the module is marked shut down; retry does not resend it. A failed shutdown hook is retried, and `registry_shutdown` is not sent on a call with failures.
 
 If a `registry_ready` or `registry_shutdown` receiver raises, the next `mark_ready()` or `shutdown()` retries that registry-level notification without rerunning completed module hooks. A failed ready notification resets `registry.ready` to `False`, allowing `bedrock.setup()` to retry too; ready receivers can still query the registry during delivery. Retrying resends the whole signal, so receivers that already succeeded may run again and must be retry-safe.
-Lifecycle signals use synchronous `send()`. If startup or shutdown runs in an event-loop thread, async lifecycle receivers can therefore raise `RuntimeError`; use synchronous receivers there.
+Async entrypoints (`asetup()`, `apopulate()`, `amark_ready()`, `ashutdown()`) send lifecycle signals with `asend()`: async receivers are awaited on the running loop and sync receivers run in a worker thread. Sync entrypoints outside an event loop run async receivers on the registry's private loop. Inside a running event loop, a sync entrypoint that reaches an async receiver raises `ModuleAsyncRequiredError` and names the async entrypoint to use. In an event loop, start and stop with `asetup()` and `ashutdown()`.
 
 ## Sync/Async Interop
 

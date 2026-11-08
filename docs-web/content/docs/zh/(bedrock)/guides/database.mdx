@@ -51,12 +51,12 @@ with db.session_scope() as session:
 | `DATABASE_ASYNC_DRIVER` | `str \| None` | `None` | 异步 DBAPI 驱动（`aiosqlite`、`asyncpg`、`psycopg`、`asyncmy`、`aiomysql`） |
 | `DATABASE_MAX_CONNECTIONS` | `int` | `10` | 单个进程的连接上限，包含溢出连接 |
 | `DATABASE_POOL_TIMEOUT` | `int` | `30` | 等待连接的秒数 |
-| `DATABASE_POOL_SIZE` | `int` | `10` | 连接池常态大小 |
+| `DATABASE_POOL_SIZE` | `int` | `10` | 连接池常态大小，至少为 1。 |
 | `DATABASE_POOL_RECYCLE` | `int` | `1800` | 回收连接前的秒数 |
 | `DATABASE_MIGRATION_LOCK_TIMEOUT` | `float` | `30` | 等待迁移锁的秒数。`0` 表示不等待。 |
 | `DATABASE_SCHEMA` | `str` | `"bedrock.db"` | 数据库名称或文件路径 |
 
-`MAX_CONNECTIONS` 是单个进程可以同时取出的连接总数。PostgreSQL 和 MySQL 的 engine 会收到 `pool_size`、`pool_timeout`、`pool_recycle`，以及 `max_overflow = MAX_CONNECTIONS - POOL_SIZE`。`MAX_CONNECTIONS` 必须大于或等于 `POOL_SIZE`，更小的值会抛出 `DatabaseConfigurationError`，错误信息会同时写明这两个设置。SQLite engine 继续忽略连接池设置。
+`MAX_CONNECTIONS` 是单个进程可以同时取出的连接总数。PostgreSQL 和 MySQL 的 engine 会收到 `pool_size`、`pool_timeout`、`pool_recycle`，以及 `max_overflow = MAX_CONNECTIONS - POOL_SIZE`。`MAX_CONNECTIONS` 必须大于或等于 `POOL_SIZE`，更小的值会抛出 `DatabaseConfigurationError`，错误信息会同时写明这两个设置。`POOL_SIZE` 小于 1 同样会抛出 `DatabaseConfigurationError`，因为 SQLAlchemy 把 0 视为不限制连接池大小，上限会失效。SQLite engine 继续忽略连接池设置。
 
 默认值（`POOL_SIZE=10`、`MAX_CONNECTIONS=10`）把单个进程限制在 10 个连接。此前 SQLAlchemy 还会附加默认的 10 个溢出连接，因此同样的默认值实际允许 20 个连接。部署如果依赖那部分溢出容量，需要把 `DATABASE_MAX_CONNECTIONS` 提高到 `DATABASE_POOL_SIZE` 之上。
 
@@ -240,8 +240,9 @@ with db.session_scope() as session:
 | 驱动 | 安装 |
 |--------|---------|
 | `aiosqlite` | `pip install 'bedrock-core[async-sqlite]'` |
-| `asyncpg`、`psycopg` | `pip install 'bedrock-core[async-postgresql]'` |
-| `asyncmy`、`aiomysql` | `pip install 'bedrock-core[async-mysql]'` |
+| `asyncpg` | `pip install 'bedrock-core[async-postgresql]'` |
+| `asyncmy` | `pip install 'bedrock-core[async-mysql]'` |
+| `psycopg`、`aiomysql` | 直接安装驱动包（`pip install psycopg` / `pip install aiomysql`） |
 
 `db.asession_scope()` 在正常退出时提交，在任何异常时回滚，并且在当前上下文已经绑定异步 session 时拒绝嵌套。`db.aindependent_session()` 不会绑定 `db.asession`。异步 session 使用单独的上下文变量，同一任务里的同步 session 保持不变。缺少驱动包时会抛出 `DatabaseConfigurationError`，并在错误信息中写明需要安装的 extra。
 

@@ -26,7 +26,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The defaults (`POOL_SIZE=10`, `MAX_CONNECTIONS=10`) now allow 10 connections.
   They previously allowed SQLAlchemy's implicit overflow and capped at 20.
   Raise `DATABASE_MAX_CONNECTIONS` when a deployment needs that extra capacity.
-  `MAX_CONNECTIONS < POOL_SIZE` raises `DatabaseConfigurationError` and names both settings.
+  `MAX_CONNECTIONS < POOL_SIZE` raises `DatabaseConfigurationError` and names both settings, and so does
+  `POOL_SIZE < 1`, which SQLAlchemy would treat as an unlimited pool.
   SQLite engines still ignore pool settings.
 - **Database passwords are secrets.** `DbSettings.PASSWORD` is a Pydantic `SecretStr`.
   Settings `repr` and validation errors do not include the password. Call
@@ -77,7 +78,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `bedrock-core[async-sqlite]`, `bedrock-core[async-postgresql]`, or
   `bedrock-core[async-mysql]`. `db.aengine`, `db.asession`, `db.asession_scope()`,
   and `db.aindependent_session()` follow the sync session rules and use a separate
-  context variable. A missing driver raises `DatabaseConfigurationError` naming the extra.
+  context variable. A missing driver raises `DatabaseConfigurationError` naming the extra (`psycopg` and
+  `aiomysql` are not in an extra, so the message names the package to install). The session is unbound
+  even when leaving `asession_scope()` or `aclear_session()` is cancelled while closing it.
   The SQLAlchemy asyncio extra (`greenlet`) is now a core dependency. `AsyncSessionFactory` is exported
   from `bedrock.database` next to `SessionFactory`.
 - **`db.close()` and `db.aclose()`** dispose one side each. `close()` disposes the
@@ -138,8 +141,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Async engines use the URL already resolved by `db.init()`, including an explicit
-  `url=` argument. Only the DBAPI driver is swapped for `DATABASE_ASYNC_DRIVER`.
-  An explicit SQLite path no longer falls back to the default `bedrock.db`.
+  `url=` argument. Only the DBAPI driver is swapped for `DATABASE_ASYNC_DRIVER`; the query string is kept,
+  including for SQLite `:memory:`. An explicit SQLite path no longer falls back to the default `bedrock.db`.
 - `db.close()` no longer disposes the async engine, and `db.aclose()` no longer
   disposes the sync engine. `init()` no longer sync-disposes an async engine that
   has already opened a connection, which failed with `MissingGreenlet`.
@@ -157,6 +160,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Contributing: public signature/behavior changes must update `CHANGELOG.md`, Web Doc (en + zh), and agent
   skills in the same change (`AGENTS.md`, `CONTRIBUTING.md`, PR template); `CONTRIBUTING.md` gains a
   Releasing section with a pre-release alignment check and bump steps.
+- Guides and skills: `on_load` examples in the cache, storage, Class Registry, and Provider guides declare an
+  injected parameter (`def on_load(*, app)`); the zero-argument form they showed is rejected by the registry.
+  The Signals guide describes lifecycle signal dispatch for both entrypoint families instead of sync-only
+  `send()`.
 
 ## [0.3.0] - 2026-11-07
 

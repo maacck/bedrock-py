@@ -37,7 +37,7 @@ class DbSettings(BaseSettings):
         PASSWORD: Database password, stored as a secret.
         MAX_CONNECTIONS: Per-process connection ceiling, including overflow.
         POOL_TIMEOUT: Seconds to wait for a pooled connection.
-        POOL_SIZE: Steady-state pool size.
+        POOL_SIZE: Steady-state pool size; must be at least 1.
         POOL_RECYCLE: Seconds before a pooled connection is recycled.
         MIGRATION_LOCK_TIMEOUT: Seconds to wait for the migration lock.
         SCHEMA: Database name, or a SQLite file path.
@@ -63,6 +63,11 @@ class DbSettings(BaseSettings):
     def _validate_limits(self) -> Self:
         """Reject pool and lock settings that cannot be applied."""
 
+        if self.POOL_SIZE < 1:
+            raise DatabaseConfigurationError(
+                "DATABASE_POOL_SIZE must be at least 1; SQLAlchemy treats 0 as an unlimited pool, which would "
+                f"ignore DATABASE_MAX_CONNECTIONS (DATABASE_POOL_SIZE={self.POOL_SIZE})."
+            )
         if self.MAX_CONNECTIONS < self.POOL_SIZE:
             raise DatabaseConfigurationError(
                 "DATABASE_MAX_CONNECTIONS must be greater than or equal to DATABASE_POOL_SIZE "

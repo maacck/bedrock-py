@@ -160,7 +160,8 @@ class AsyncSessionFactory:
                 await session.close()
             except Exception:
                 pass
-            _current_async_db_session.reset(token)
+            finally:
+                _current_async_db_session.reset(token)
 
     @asynccontextmanager
     async def aindependent_session(self) -> AsyncIterator[AsyncSession]:
@@ -205,9 +206,10 @@ class AsyncSessionFactory:
         """Close and unbind the current context-local async session."""
 
         session = _current_async_db_session.get()
-        if session is not None:
-            try:
+        try:
+            if session is not None:
                 await session.close()
-            except Exception:
-                pass
-        _current_async_db_session.set(None)
+        except Exception:
+            pass
+        finally:
+            _current_async_db_session.set(None)

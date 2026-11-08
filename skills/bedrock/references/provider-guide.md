@@ -28,13 +28,15 @@ Lazy providers record a path and import it only when selected. Declare built-ins
 
 ```python
 # service.py
+from bedrock.provider import ProviderCatalog, ProviderSpec
+
 notifiers = ProviderCatalog[Notifier](
     protocol=Notifier,
     specs=(ProviderSpec("sms", "myapp.notify.providers.sms:SmsNotifier", install_requirement="myapp[sms]"),),
 )
 
 # bootstrap.py
-def on_load(**kwargs: object) -> None:
+def on_load(*, app) -> None:
     notifiers.register_lazy("email", "myapp.notify.providers.email:create_email_notifier")
 ```
 

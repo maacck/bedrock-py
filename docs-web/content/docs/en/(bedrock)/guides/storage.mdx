@@ -102,7 +102,7 @@ class MyBackend(LocalBackend):
     """Project-specific implementation inheriting the complete local backend."""
 
 
-def on_load() -> None:
+def on_load(*, app) -> None:
     """Register the project backend once during module loading."""
     register_backend("custom", MyBackend)
 ```

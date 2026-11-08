@@ -78,7 +78,7 @@ class MyCustomBackend(InMemoryBackend):
     """Project-specific implementation inheriting the complete memory backend."""
 
 
-def on_load() -> None:
+def on_load(*, app) -> None:
     """Register the project backend once during module loading."""
     register_backend("custom", MyCustomBackend)
 ```
@@ -91,7 +91,7 @@ def on_load() -> None:
 from bedrock.contrib.cache import register_backend_lazy
 
 
-def on_load() -> None:
+def on_load(*, app) -> None:
     """Register the backend by path; nothing is imported until cache.configure("acme") runs."""
     register_backend_lazy("acme", "acme_cache.backend:AcmeBackend", install_requirement="acme-cache[redis]")
 ```

@@ -588,7 +588,7 @@ Database settings use environment variables with the `DATABASE_` prefix. `DbSett
 | `DATABASE_ASYNC_DRIVER` | `str \| None` | `None` | Async DBAPI (`aiosqlite`, `asyncpg`, `psycopg`, `asyncmy`, `aiomysql`). Required for async sessions. |
 | `DATABASE_MAX_CONNECTIONS` | `int` | `10` | Per-process ceiling. Non-SQLite engines set `max_overflow = MAX_CONNECTIONS - POOL_SIZE`. Must be `>= POOL_SIZE`. |
 | `DATABASE_POOL_TIMEOUT` | `int` | `30` | Seconds to wait for a connection |
-| `DATABASE_POOL_SIZE` | `int` | `10` | Steady-state pool size |
+| `DATABASE_POOL_SIZE` | `int` | `10` | Steady-state pool size. Must be `>= 1` (SQLAlchemy treats 0 as unlimited). |
 | `DATABASE_POOL_RECYCLE` | `int` | `1800` | Seconds before recycling a connection |
 | `DATABASE_MIGRATION_LOCK_TIMEOUT` | `float` | `30` | Seconds to wait for the migration lock. `0` does not wait. MySQL rounds a positive value up to whole seconds. |
 | `DATABASE_SCHEMA` | `str` | `"bedrock.db"` | Database name or file path |
@@ -746,7 +746,7 @@ The `db` singleton is a `DatabaseManager` instance. It owns the engine, session 
 | `db.close()` | Dispose the sync engine. A built async engine stays usable. Idempotent. `init()` works again afterwards. |
 | `db.aclose()` | Dispose the async engine. The sync engine stays usable. Idempotent. Does not shut down the module registry. If both engines were built, call `close()` and `await aclose()`. `bedrock.shutdown()` / `await bedrock.ashutdown()` call whichever apply after all module hooks. |
 
-Async drivers install as extras: `aiosqlite` → `bedrock-core[async-sqlite]`; `asyncpg` and `psycopg` → `bedrock-core[async-postgresql]`; `asyncmy` and `aiomysql` → `bedrock-core[async-mysql]`. A missing package raises `DatabaseConfigurationError` and names the extra.
+Async drivers install as extras: `aiosqlite` → `bedrock-core[async-sqlite]`; `asyncpg` → `bedrock-core[async-postgresql]`; `asyncmy` → `bedrock-core[async-mysql]`. `psycopg` and `aiomysql` are not in an extra; install the package itself. A missing package raises `DatabaseConfigurationError` naming the extra or package.
 
 ### Error Handling
 

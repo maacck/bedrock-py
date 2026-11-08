@@ -198,7 +198,10 @@ class MetricsManager:
         """Flush and release the asynchronous side of every provider that has one.
 
         For each provider that defines ``aflush()`` or ``aclose()``, ``aflush()`` is awaited before
-        ``aclose()``. Failures are swallowed with a warning, like :meth:`close`. The call is safe to repeat.
+        ``aclose()``. Failures are swallowed with a warning, like :meth:`close`. Call :meth:`close` first, as the
+        module's ``on_shutdown`` hook does; repeating ``aclose()`` after that is a no-op. Calling ``aclose()``
+        before ``close()`` leaves providers registered, so a later ``close()`` and ``aclose()`` release their
+        async side a second time.
         """
         targets = [provider for provider in self._providers if _is_async_capable(provider)]
         targets.extend(provider for provider in self._async_pending if not any(provider is t for t in targets))

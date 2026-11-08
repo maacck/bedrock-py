@@ -55,7 +55,7 @@ codecs = ClassRegistry[Codec](base_class=Codec)
 from .service import codecs
 
 
-def on_load() -> None:
+def on_load(*, app) -> None:
     """Declare implementations without importing them."""
     codecs.register_lazy("utf8", "myapp.encoding.providers.utf8:Utf8Codec")
 ```

@@ -10,11 +10,11 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from .config import DatabaseConfigurationError, DbSettings
 
-# Maps an async DBAPI driver to the importable module and the bedrock-core extra.
+# Maps an async DBAPI driver to the importable module and the bedrock-core extra that installs it.
 _ASYNC_DRIVER_EXTRAS: dict[str, tuple[str, str]] = {
     "aiosqlite": ("aiosqlite", "async-sqlite"),
     "asyncpg": ("asyncpg", "async-postgresql"),
-    "psycopg": ("psycopg", "async-postgresql"),
+
     "asyncmy": ("asyncmy", "async-mysql"),
 }
 
@@ -113,7 +113,7 @@ def async_url_for_driver(database_url: str, async_driver: str) -> str:
     backend = parsed.get_backend_name()
     drivername = f"{backend}+{async_driver}"
     if backend == "sqlite" and parsed.database == ":memory:":
-        return f"{drivername}:///:memory:"
+        return make_url(f"{drivername}:///:memory:").set(query=parsed.query).render_as_string(hide_password=False)
     return parsed.set(drivername=drivername).render_as_string(hide_password=False)
 
 

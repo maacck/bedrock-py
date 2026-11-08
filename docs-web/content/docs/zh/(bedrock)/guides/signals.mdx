@@ -324,7 +324,7 @@ def on_all_ready(sender, **kwargs):
 `on_load` 失败时不会发送 `module_loaded`，安装会回滚；已加载模块会被回滚，只有关闭钩子成功后才发送 `module_shutdown`。`module_ready` 接收器失败时模块已标记为就绪，异常会向外传播；重试会跳过该模块，不会重发其信号。`module_shutdown` 接收器失败时模块已标记为关闭，重试也不会重发该信号。失败的关闭钩子会重试，存在失败的那次调用不会发送 `registry_shutdown`。
 
 如果 `registry_ready` 或 `registry_shutdown` 接收器抛出异常，下次调用 `mark_ready()` 或 `shutdown()` 会重试该注册表级通知，不会重新执行已完成的模块钩子。就绪通知失败会将 `registry.ready` 重置为 `False`，因此也可以重试 `bedrock.setup()`；就绪接收器在通知期间仍可查询注册表。重试会重新发送整个信号，之前成功的接收器可能再次执行，必须能够安全重试。
-生命周期信号使用同步 `send()`。如果在事件 loop 线程中启动或关闭，异步生命周期接收器可能导致 `RuntimeError`；此时请使用同步接收器。
+异步入口（`asetup()`、`apopulate()`、`amark_ready()`、`ashutdown()`）通过 `asend()` 发送生命周期信号：异步接收器在运行中的事件 loop 上被 await，同步接收器在工作线程中运行。没有运行中的事件 loop 时，同步入口会在 registry 的私有 loop 上运行异步接收器。在运行中的事件 loop 里，同步入口遇到异步接收器会抛出 `ModuleAsyncRequiredError`，并指明应使用的异步入口。在事件 loop 中请用 `asetup()` 和 `ashutdown()` 启动和停止。
 
 ## 同步/异步互操作
 

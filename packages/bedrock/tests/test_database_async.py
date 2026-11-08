@@ -101,6 +101,27 @@ class TestAsyncSessions:
             manager.close()
 
     @pytest.mark.asyncio
+    async def test_asession_scope_unbinds_when_close_is_cancelled(self, tmp_path: Path) -> None:
+        """A cancellation while closing still unbinds the session, so the next scope can start."""
+
+        manager = _manager(tmp_path)
+
+        async def cancelled_close() -> None:
+            raise asyncio.CancelledError
+
+        try:
+            with pytest.raises(asyncio.CancelledError):
+                async with manager.asession_scope() as session:
+                    session.close = cancelled_close  # type: ignore[method-assign]
+
+            assert _current_async_db_session.get() is None
+            async with manager.asession_scope():
+                pass
+        finally:
+            await manager.aclose()
+            manager.close()
+
+    @pytest.mark.asyncio
     async def test_async_contexts_are_isolated_across_tasks(self, tmp_path: Path) -> None:
         """Concurrent tasks do not share the async session context variable."""
 
@@ -176,6 +197,15 @@ class TestExplicitInitUrl:
         assert parsed.database == "app"
         assert parsed.query["sslmode"] == "require"
 
+    def test_memory_url_keeps_its_query(self) -> None:
+        """SQLite :memory: keeps connection options such as timeout when the driver is swapped."""
+
+        parsed = make_url(async_url_for_driver("sqlite:///:memory:?timeout=60", "aiosqlite"))
+
+        assert parsed.drivername == "sqlite+aiosqlite"
+        assert parsed.database == ":memory:"
+        assert parsed.query["timeout"] == "60"
+
 
 class TestAsyncDriverErrors:
     """Missing or unset async drivers raise a Bedrock configuration error."""
@@ -200,6 +230,23 @@ class TestAsyncDriverErrors:
 
         assert "super-secret-password" not in str(exc_info.value)
         assert "bedrock-core[async-postgresql]" in str(exc_info.value)
+
+    @pytest.mark.parametrize("driver", ["psycopg", "aiomysql"])
+    def test_driver_outside_every_extra_names_its_package(self, driver: str, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A driver no extra installs points at the package itself, not at an extra that lacks it."""
+
+        import bedrock.database.connection as connection
+
+        def fake_import(name: str, package: str | None = None) -> object:
+            raise ImportError(f"no {name}")
+
+        monkeypatch.setattr(connection.importlib, "import_module", fake_import)
+
+        with pytest.raises(DatabaseConfigurationError) as exc_info:
+            connection.ensure_async_driver_installed(driver)
+
+        assert f"Install the '{driver}' package" in str(exc_info.value)
+        assert "bedrock-core[" not in str(exc_info.value)
 
     def test_manager_reports_missing_driver(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """DatabaseManager.aengine surfaces the same missing-driver error."""
