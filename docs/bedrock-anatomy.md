@@ -311,8 +311,15 @@ adapters/
 - `routes.py` translates transport input to entities and calls `inventory.service`.
 - `schemas.py` contains transport-specific request/response DTOs.
 - `errors.py` maps `inventory.exc` exceptions to transport errors.
+- With database session middleware, each HTTP request runs inside `session_scope()` / `asession_scope()`.
+  Services keep owning their transactions: they work in `db.session` / `db.asession` and commit, but must not
+  open `session_scope()` themselves (it raises `RuntimeError` while the request's session is bound). Anything
+  left uncommitted when the request ends is rolled back.
 
-Web integrations may be published as separate Bedrock ecosystem packages. HTTP dependencies and types do not enter `bedrock-core` or business modules.
+First-party framework integrations live in `integrations/<framework>/` and publish as `bedrock-<framework>`.
+They are adapter libraries, not Bedrock modules: they have no manifest or lifecycle hooks, and the host owns
+the app. FastAPI's integration is `bedrock-fastapi`. HTTP dependencies and types do not enter `bedrock-core`
+or business modules.
 
 ## 8. Contrib anatomy
 

@@ -268,6 +268,8 @@ db.close()
 
 当你使用会自行管理 session 的框架（例如 FastAPI 的依赖注入）时，可以绑定一个现有 session：
 
+FastAPI 用户请优先使用 [FastAPI 集成](/docs/integrations/fastapi#数据库-session)中的数据库 session 中间件。
+
 ```python
 from bedrock.database import db
 

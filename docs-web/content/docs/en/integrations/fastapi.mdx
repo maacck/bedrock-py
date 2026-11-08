@@ -1,0 +1,241 @@
+---
+title: FastAPI
+description: Install bedrock-fastapi and serve Bedrock modules over HTTP with FastAPI
+---
+
+`bedrock-fastapi` connects a FastAPI application to the Bedrock runtime. Your project still creates and owns the FastAPI app; the package adds three building blocks you can use independently:
+
+| Component | What it does |
+| --- | --- |
+| `RequestScopeMiddleware` | Gives each request its own scope in the Bedrock DI container, so `SCOPED` services live for one request |
+| `DbSessionMiddleware` / `AsyncDbSessionMiddleware` | Binds one `db.session` / `db.asession` to each request and rolls back whatever is left uncommitted when it ends |
+| `bedrock_exception_handler` | Turns your modules' `BedrockExc` subclasses into HTTP error responses |
+
+## Installation
+
+<Tabs items={['uv', 'pip']}>
+  <Tab value="uv"><CodeBlock code={'uv add bedrock-fastapi fastapi uvicorn'} lang={'bash'} /></Tab>
+  <Tab value="pip"><CodeBlock code={'pip install bedrock-fastapi fastapi uvicorn'} lang={'bash'} /></Tab>
+</Tabs>
+
+<Callout type="info">
+  `bedrock-fastapi` is not on PyPI yet. Until its first release, install it from GitHub:
+  `uv add "bedrock-fastapi @ git+https://github.com/maacck/bedrock-py#subdirectory=integrations/fastapi"`.
+</Callout>
+
+`bedrock-fastapi` requires Python 3.12+ and installs `bedrock-core` and Starlette. FastAPI itself and an ASGI server such as Uvicorn are your application's dependencies. To use async database sessions, also install the driver for your database, for example `bedrock-core[async-sqlite]` or `bedrock-core[async-postgresql]`.
+
+## Project layout
+
+HTTP code stays outside your Bedrock modules, in the adapter layer described in [Module Anatomy](/docs/guides/module-anatomy). A module does not import FastAPI.
+
+```text
+src/shop/
+├── inventory/                 # Bedrock module: no HTTP code
+│   ├── manifest.yaml
+│   ├── models.py
+│   ├── entities.py
+│   ├── exc.py
+│   └── service.py
+└── adapters/
+    └── http/
+        ├── app.py             # creates the FastAPI app
+        └── inventory/
+            ├── routes.py      # APIRouter: request -> entity -> service -> response
+            ├── schemas.py     # request/response models for HTTP
+            └── errors.py      # inventory exceptions -> HTTP status codes
+```
+
+## Create the app
+
+`app.py` initializes the database, starts the Bedrock runtime in the FastAPI lifespan, and adds the components:
+
+```python
+# shop/adapters/http/app.py
+from contextlib import asynccontextmanager
+
+import bedrock
+from bedrock.database import db
+from bedrock.exc import BedrockExc
+from bedrock_fastapi import AsyncDbSessionMiddleware, RequestScopeMiddleware, bedrock_exception_handler
+from fastapi import FastAPI
+
+from .inventory import errors as inventory_errors
+from .inventory.routes import router as inventory_router
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    db.init()
+    await bedrock.asetup("shop.inventory")
+    try:
+        yield
+    finally:
+        await bedrock.ashutdown()  # stops modules, then closes the database engines
+
+
+app = FastAPI(lifespan=lifespan)
+app.add_middleware(AsyncDbSessionMiddleware)
+app.add_middleware(RequestScopeMiddleware)
+app.add_exception_handler(BedrockExc, bedrock_exception_handler({**inventory_errors.STATUS_CODES}))
+app.include_router(inventory_router)
+```
+
+- Use `bedrock.asetup()` / `bedrock.ashutdown()` in the lifespan: it runs inside FastAPI's event loop.
+- `db.init()` reads the `DATABASE_*` environment variables (see [Database](/docs/guides/database)). Call it before any request touches the database.
+- The order of the `add_middleware` calls does not matter for these components.
+
+## Write the module and routes
+
+The module's service works with entities and the bound session; it knows nothing about HTTP.
+
+```python
+# shop/inventory/service.py
+from bedrock.database import db
+from sqlalchemy import select
+
+from .entities import Item, ItemCreate
+from .exc import ItemConflict, ItemNotFound
+from .models import ItemModel
+
+
+def _to_entity(model: ItemModel) -> Item:
+    return Item(id=model.id, sku=model.sku, name=model.name)
+
+
+class InventoryService:
+    async def acreate_item(self, data: ItemCreate) -> Item:
+        if await db.asession.scalar(select(ItemModel).where(ItemModel.sku == data.sku)) is not None:
+            raise ItemConflict()
+        model = ItemModel(sku=data.sku, name=data.name)
+        db.asession.add(model)
+        await db.asession.flush()  # assigns model.id
+        item = _to_entity(model)  # read before commit: commit expires loaded attributes
+        await db.asession.commit()
+        return item
+
+    async def aget_item(self, item_id: int) -> Item:
+        model = await db.asession.get(ItemModel, item_id)
+        if model is None:
+            raise ItemNotFound()
+        return _to_entity(model)
+
+
+inventory_service = InventoryService()
+```
+
+The adapter translates between HTTP and the service:
+
+```python
+# shop/adapters/http/inventory/routes.py
+from fastapi import APIRouter
+
+from shop.inventory.entities import ItemCreate
+from shop.inventory.service import inventory_service
+
+from .schemas import ItemIn, ItemOut
+
+router = APIRouter(prefix="/items", tags=["inventory"])
+
+
+@router.post("", status_code=201)
+async def create_item(body: ItemIn) -> ItemOut:
+    item = await inventory_service.acreate_item(ItemCreate(sku=body.sku, name=body.name))
+    return ItemOut(**item.model_dump())
+
+
+@router.get("/{item_id}")
+async def get_item(item_id: int) -> ItemOut:
+    item = await inventory_service.aget_item(item_id)
+    return ItemOut(**item.model_dump())
+```
+
+```python
+# shop/adapters/http/inventory/errors.py
+from shop.inventory.exc import InventoryError, ItemConflict, ItemNotFound
+
+STATUS_CODES = {InventoryError: 400, ItemNotFound: 404, ItemConflict: 409}
+```
+
+`schemas.py` holds plain Pydantic models (`ItemIn`, `ItemOut`) for the HTTP request and response bodies. Entities stay in the module.
+
+## Run it
+
+```bash
+export DATABASE_SCHEMA=shop.db DATABASE_ASYNC_DRIVER=aiosqlite
+uvicorn shop.adapters.http.app:app
+```
+
+Apply your migrations before serving, for example `bedrock db upgrade shop.inventory` (see [CLI Reference](/docs/guides/cli)). Then `POST /items` with an existing SKU returns `409 {"detail": "An item with this SKU already exists."}` and `GET /items/999` returns `404 {"detail": "Item not found."}`.
+
+## Request scope
+
+`RequestScopeMiddleware` wraps each HTTP request and WebSocket connection in `container.scope("request")` on the global `bedrock.di.container`. A service registered with `Lifetime.SCOPED` resolves to one instance per request, and its `close()` method, if it has one, runs when the request ends.
+
+```python
+# shop/inventory/bootstrap.py
+from bedrock.di import Container, Lifetime
+
+from .audit import RequestAudit
+
+
+def on_load(*, container: Container, **kwargs: object) -> None:
+    container.register(RequestAudit, factory=RequestAudit, lifetime=Lifetime.SCOPED)
+```
+
+```python
+# shop/adapters/http/inventory/routes.py
+from bedrock.di import container
+from fastapi import Depends
+
+
+def get_audit() -> RequestAudit:
+    return container.resolve(RequestAudit)
+
+
+@router.post("", status_code=201)
+async def create_item(body: ItemIn, audit: RequestAudit = Depends(get_audit)) -> ItemOut:
+    ...
+```
+
+Resolving a scoped service in any dependency or endpoint, sync or async, returns the request's instance. Use the middleware rather than entering `container.scope()` in a FastAPI dependency: FastAPI runs sync (`def`) dependencies in worker threads, and a scope entered there fails at teardown with `ValueError: <Token ...> was created in a different Context`.
+
+## Database sessions
+
+`DbSessionMiddleware` (sync `db.session`) and `AsyncDbSessionMiddleware` (async `db.asession`) run each HTTP request inside `db.session_scope()` / `db.asession_scope()`. WebSocket connections and lifespan events pass through untouched. No database connection is opened until the request first uses the session.
+
+**Services own their transactions, as everywhere in Bedrock.** A service works in the bound session and commits. The middleware never commits; whatever is still uncommitted when the request ends, for example because a service raised before committing, is rolled back.
+
+- **Do not open `db.session_scope()` or `db.asession_scope()` in a service.** Inside a request a session is already bound, so they raise `RuntimeError`. Workers, CLI commands, and scripts, which have no middleware, open the scope themselves and call the same service.
+- **Each commit is final.** If one request calls several services and each commits, an error in a later one does not undo the earlier ones. When several writes must succeed or fail together, put them in one service method that commits once.
+- **A write nobody commits is lost silently.** The response can still be a success.
+- **Read what you need before an async commit.** Commit expires loaded attributes, and reading an expired attribute of an `AsyncSession` object raises `MissingGreenlet`. Flush, build the entity, then commit, as in the service above.
+- **Side transactions** that must not share the request's transaction, such as audit logs, use `db.independent_session()` / `db.aindependent_session()`.
+- **Do not share the request session between concurrent tasks or threads** (`asyncio.gather`, `create_task`, thread pools). SQLAlchemy sessions are not safe for concurrent use; give each concurrent branch its own `db.aindependent_session()` / `db.independent_session()`.
+- **Match the session to the endpoint.** Sync `def` endpoints run in a thread pool and can use `db.session`. In `async def` endpoints, use `AsyncDbSessionMiddleware` and `db.asession`; a sync session would block the event loop.
+- **Both middlewares can be installed.** They bind separate sessions with separate transactions, so writes through `db.session` and `db.asession` are not atomic together.
+- If `db.init()` was not called, every request fails with `DatabaseNotConfiguredError`. The first async request builds the async engine and requires `DATABASE_ASYNC_DRIVER`.
+
+The session must be bound by middleware: a sync dependency or endpoint that creates `db.session` on its own does so in a worker thread's copied context, so the next dependency gets a different session and nothing closes it at the end of the request.
+
+## Error responses
+
+`bedrock_exception_handler(status_codes)` builds a handler for `app.add_exception_handler(BedrockExc, ...)`:
+
+- The lookup walks the raised exception's class hierarchy, so mapping a module's base exception (`InventoryError`) covers all its subclasses, and the most specific mapping wins.
+- A mapped exception returns `{"detail": exc.detail}` with the mapped status code, the same body shape as FastAPI's `HTTPException`.
+- An unmapped `BedrockExc` is re-raised: Starlette logs it and returns a generic 500 without exposing `detail`. This matters because runtime errors such as `ImproperlyConfigured` also derive from `BedrockExc`.
+- Only HTTP requests are answered. On a WebSocket route every exception is re-raised, because an accepted socket cannot receive an HTTP error response; close the socket in the route if you need a specific close code.
+
+Keep each module's mapping in `adapters/http/<module>/errors.py` and merge them in `app.py`.
+
+## API reference
+
+| Name | Signature | Notes |
+| --- | --- | --- |
+| `RequestScopeMiddleware` | `RequestScopeMiddleware(app)` | ASGI middleware; HTTP and WebSocket |
+| `DbSessionMiddleware` | `DbSessionMiddleware(app)` | ASGI middleware; HTTP only; sync `db.session` |
+| `AsyncDbSessionMiddleware` | `AsyncDbSessionMiddleware(app)` | ASGI middleware; HTTP only; `db.asession` |
+| `bedrock_exception_handler` | `bedrock_exception_handler(status_codes: Mapping[type[BedrockExc], int])` | Returns an async handler for `add_exception_handler` |
+
+Register middleware with `app.add_middleware(Middleware)`. The package does not provide a lifespan helper, router discovery, or schema generation: those stay in your application.
