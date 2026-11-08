@@ -1,0 +1,45 @@
+[project]
+name = "bedrock-celery"
+version = "0.1.0"
+description = "Celery integration for Bedrock: per-process worker lifecycle, per-task DI scopes and database sessions, and async tasks."
+readme = "README.md"
+license = "MIT"
+authors = [
+    { name = "maacck", email = "c.mai@madainchina.com" }
+]
+keywords = ["bedrock", "celery", "worker", "tasks"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Framework :: Celery",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Typing :: Typed",
+]
+requires-python = ">=3.12"
+dependencies = [
+    "bedrock-core>=0.3.1",
+    "celery>=5.3",
+]
+
+[project.urls]
+Homepage = "https://bedrock-py.com"
+Repository = "https://github.com/maacck/bedrock-py"
+Documentation = "https://bedrock-py.com"
+"Bug Tracker" = "https://github.com/maacck/bedrock-py/issues"
+
+[build-system]
+requires = ["uv_build>=0.8.15,<0.9.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-root = "src"
+module-name = "bedrock_celery"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4.2",
+    "aiosqlite>=0.20.0",
+]
