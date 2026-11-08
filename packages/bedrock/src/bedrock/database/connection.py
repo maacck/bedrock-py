@@ -15,7 +15,6 @@ _ASYNC_DRIVER_EXTRAS: dict[str, tuple[str, str]] = {
     "aiosqlite": ("aiosqlite", "async-sqlite"),
     "asyncpg": ("asyncpg", "async-postgresql"),
     "psycopg": ("psycopg", "async-postgresql"),
-    "aiomysql": ("aiomysql", "async-mysql"),
     "asyncmy": ("asyncmy", "async-mysql"),
 }
 
