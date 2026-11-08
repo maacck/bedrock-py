@@ -103,3 +103,82 @@ def test_plugin_isolates_consecutive_tests(pytester: pytest.Pytester) -> None:
 
     result.assert_outcomes(passed=4, failed=1)
     result.stdout.fnmatch_lines(["*test_fails_without_shutdown*deliberate failure*"])
+
+
+SHUTDOWN_IMPORT_TESTS = """
+from pathlib import Path
+
+import bedrock
+import pytest
+
+MARKERS = Path(__file__).parent / "markers"
+MARKERS.mkdir(exist_ok=True)
+BOOTSTRAP = '''
+def on_shutdown(*, app):
+    from .service import release
+    release(app.name)
+'''
+SERVICE = f'''
+from pathlib import Path
+
+def release(name):
+    Path({str(MARKERS)!r}, name).write_text("released")
+'''
+
+
+def test_runtime_first(bedrock_runtime, module_factory):
+    module_factory("runtime_first", bootstrap=BOOTSTRAP, files={"service.py": SERVICE})
+    bedrock.setup("runtime_first")
+
+
+def test_factory_first(module_factory, bedrock_runtime):
+    module_factory("factory_first", bootstrap=BOOTSTRAP, files={"service.py": SERVICE})
+    bedrock.setup("factory_first")
+
+
+@pytest.mark.parametrize("name", ["runtime_first", "factory_first"])
+def test_shutdown_imported_the_module_service(name):
+    assert (MARKERS / name).read_text() == "released"
+"""
+
+
+def test_teardown_shutdown_can_import_temporary_modules(pytester: pytest.Pytester) -> None:
+    """Automatic shutdown runs while temporary modules are still importable, whatever the fixture order."""
+
+    pytester.makeconftest('pytest_plugins = ["bedrock.testing"]\n')
+    pytester.makepyfile(test_app=SHUTDOWN_IMPORT_TESTS)
+
+    result = pytester.runpytest_subprocess("-p", "no:cacheprovider")
+
+    result.assert_outcomes(passed=4)
+
+
+WIDE_RUNTIME_TESTS = """
+import importlib
+
+import pytest
+from bedrock.testing import isolated_runtime
+
+
+@pytest.fixture(scope="module")
+def wide_runtime():
+    with isolated_runtime() as runtime:
+        yield runtime
+
+
+@pytest.mark.parametrize("value", ["first", "second"])
+def test_same_name_under_one_runtime(wide_runtime, module_factory, value):
+    module_factory("wide_module", bootstrap=f"VALUE = {value!r}\\n")
+    assert importlib.import_module("wide_module.bootstrap").VALUE == value
+"""
+
+
+def test_module_factory_cleans_up_per_test_under_a_longer_lived_runtime(pytester: pytest.Pytester) -> None:
+    """A runtime that outlives the test does not keep the test's modules alive when it never installed them."""
+
+    pytester.makeconftest('pytest_plugins = ["bedrock.testing"]\n')
+    pytester.makepyfile(test_app=WIDE_RUNTIME_TESTS)
+
+    result = pytester.runpytest_subprocess("-p", "no:cacheprovider")
+
+    result.assert_outcomes(passed=2)

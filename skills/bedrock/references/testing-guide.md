@@ -65,8 +65,11 @@ def test_orders_start_after_billing(bedrock_runtime, module_factory):
   else (`installation.py`, `commands.py`, `domains/x/service.py`). Sources are dedented.
 - `name`: plain identifier (no dots), unique within the test; otherwise `ValueError`.
 - `module_factory.root`: directory holding the packages (on `sys.path`).
-- Teardown removes the packages from `sys.modules` and their models from `BedrockModel.metadata` and the mapper
-  registry, so the next test can reuse the same module name and model classes without SQLAlchemy warnings.
+- Teardown removes the packages from `sys.modules` and every table they attached to `BedrockModel.metadata` (mapped
+  models and plain `Table` objects such as association tables), and disposes their model classes, so the next test
+  can reuse the same module name and models without SQLAlchemy warnings. With `bedrock_runtime` in the same test,
+  this cleanup runs after the runtime shut the modules down, so `on_shutdown` may import from its package in either
+  fixture order.
 
 ## Database rollback
 
