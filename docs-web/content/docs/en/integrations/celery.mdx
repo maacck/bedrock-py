@@ -1,0 +1,197 @@
+---
+title: Celery
+description: Install bedrock-celery and run Bedrock modules in Celery workers
+---
+
+`bedrock-celery` connects Celery workers to the Bedrock runtime. Your project still creates and owns the Celery app; the package adds building blocks you can use independently:
+
+| Component | What it does |
+| --- | --- |
+| `connect_worker(app)` | Sets Bedrock up in each worker process (after the fork, with the prefork pool) and shuts it down when the process exits |
+| `BedrockTask` | Gives each task its own DI scope and database session, and rolls back whatever is left uncommitted when it ends |
+| `async def` tasks | Run on the worker process's event loop with `db.asession`, sharing the async clients your lifecycle hooks opened |
+| `setup_worker_process(app)` / `shutdown_worker_process()` | The same lifecycle without a worker, for tests and eager execution |
+
+## Installation
+
+<Tabs items={['uv', 'pip']}>
+  <Tab value="uv"><CodeBlock code={'uv add bedrock-celery'} lang={'bash'} /></Tab>
+  <Tab value="pip"><CodeBlock code={'pip install bedrock-celery'} lang={'bash'} /></Tab>
+</Tabs>
+
+<Callout type="info">
+  `bedrock-celery` is not on PyPI yet. Until its first release, install it from GitHub:
+  `uv add "bedrock-celery @ git+https://github.com/maacck/bedrock-py#subdirectory=integrations/celery"`.
+</Callout>
+
+`bedrock-celery` requires Python 3.12+ and installs `bedrock-core` and Celery 5.3+. Install your broker's extra yourself, for example `celery[redis]`. To use async tasks with a database, also install an async driver, for example `bedrock-core[async-postgresql]`.
+
+## Project layout
+
+Celery code stays outside your Bedrock modules, in the worker adapter described in [Module Anatomy](/docs/guides/module-anatomy). A module does not import Celery, and tasks only translate arguments and call services.
+
+```text
+src/shop/
+├── inventory/                 # Bedrock module: no Celery code
+│   ├── manifest.yaml
+│   ├── models.py
+│   ├── exc.py
+│   └── service.py
+└── adapters/
+    └── worker/
+        ├── app.py             # creates the Celery app
+        └── inventory/
+            └── tasks.py       # tasks: arguments -> service call -> result
+```
+
+## Create the app
+
+```python
+# shop/adapters/worker/app.py
+from bedrock.database import db
+from bedrock_celery import BedrockTask, connect_worker
+from celery import Celery
+
+app = Celery(
+    "shop",
+    broker="redis://localhost:6379/0",
+    task_cls=BedrockTask,
+    include=["shop.adapters.worker.inventory.tasks"],
+)
+db.init()  # builds the engine only; no connection is opened before the fork
+connect_worker("shop.inventory")
+```
+
+- `task_cls=BedrockTask` makes every task of this app a `BedrockTask`. To opt in task by task instead, pass `base=BedrockTask` to `@app.task`.
+- `connect_worker("shop.inventory")` names the root module, like `bedrock.setup()`. Without an argument it reads `BEDROCK_APP`.
+- `db.init()` reads the `DATABASE_*` environment variables (see [Database](/docs/guides/database)). It is safe at import time because it does not connect. Do not run queries, or call `bedrock.setup()`, when the module is imported: with the prefork pool that happens in the parent process, and the children would share its connections.
+
+## Write tasks
+
+```python
+# shop/adapters/worker/inventory/tasks.py
+from shop.inventory.service import inventory_service
+
+from ..app import app
+
+
+@app.task
+def restock(sku: str, quantity: int) -> int:
+    return inventory_service.restock(sku, quantity)
+
+
+@app.task(bind=True, max_retries=3)
+async def arestock(self, sku: str, quantity: int) -> int:
+    return await inventory_service.arestock(sku, quantity)
+```
+
+The service owns the transaction and commits, exactly as it does behind HTTP or in a CLI command:
+
+```python
+# shop/inventory/service.py
+from bedrock.database import db
+from sqlalchemy import select
+
+from .exc import ItemNotFound
+from .models import ItemModel
+
+
+class InventoryService:
+    def restock(self, sku: str, quantity: int) -> int:
+        item = db.session.scalar(select(ItemModel).where(ItemModel.sku == sku))
+        if item is None:
+            raise ItemNotFound()
+        item.stock += quantity
+        stock = item.stock
+        db.session.commit()
+        return stock
+
+    async def arestock(self, sku: str, quantity: int) -> int:
+        item = await db.asession.scalar(select(ItemModel).where(ItemModel.sku == sku))
+        if item is None:
+            raise ItemNotFound()
+        item.stock += quantity
+        stock = item.stock  # read before commit: commit expires loaded attributes
+        await db.asession.commit()
+        return stock
+
+
+inventory_service = InventoryService()
+```
+
+## Run it
+
+```bash
+export DATABASE_TYPE=postgresql DATABASE_HOST=localhost DATABASE_PORT=5432  # see the Database guide
+celery -A shop.adapters.worker.app worker --pool prefork
+```
+
+A task that raises, such as `ItemNotFound`, fails like any Celery task: the exception is stored as the result and logged by the worker, and whatever the task did not commit is rolled back.
+
+## Worker lifecycle
+
+`connect_worker()` connects four Celery signals:
+
+| Pool | Bedrock is set up | Bedrock is shut down |
+| --- | --- | --- |
+| `prefork` (default) | In every child process, after it starts (`worker_process_init`); never in the parent | When that child exits (`worker_process_shutdown`) |
+| `solo`, `threads`, `gevent`, `eventlet` | Once in the worker process (`worker_init`) | When the worker stops (`worker_shutdown`) |
+
+Each set-up process gets its own event loop. Bedrock is set up with `bedrock.asetup()` on that loop and shut down with `bedrock.ashutdown()` on it, so async `on_load` hooks and async tasks use the same loop: an async client opened by a hook is usable from tasks. Shutdown also closes the database engines. A child replaced because of `worker_max_tasks_per_child` sets Bedrock up again.
+
+Call `connect_worker()` once, in the module that creates the Celery app. It does not configure logging; call `bedrock.logging.configure_logging()` there if you want Bedrock's sink.
+
+## Tasks, scopes, and database sessions
+
+`BedrockTask` runs each task inside `container.scope("task")`. A service registered with `Lifetime.SCOPED` resolves to one instance per task, and its `close()` method, if it has one, runs when the task ends.
+
+A `def` task runs inside `db.session_scope()`; an `async def` task runs inside `db.asession_scope()`. Services own their transactions: they work in `db.session` / `db.asession` and commit. The task never commits for them; whatever is still uncommitted when it ends, for example because a service raised before committing, is rolled back.
+
+- **Do not open `db.session_scope()` or `db.asession_scope()` in a service.** A session is already bound inside a task, so they raise `RuntimeError`. For the same reason, do not call another task directly (`other_task(...)`) from inside a task; send it with `.delay()` / `.apply_async()`, or call its service.
+- **Each commit is final.** If a task retries after a service committed, the committed work stays. Keep writes that must succeed or fail together in one service method that commits once, and make tasks safe to run again.
+- **A write nobody commits is lost.** The task still finishes successfully.
+- **Side transactions** that must not share the task's transaction use `db.independent_session()` / `db.aindependent_session()`.
+- If `db.init()` was not called in the worker, every `BedrockTask` fails with `DatabaseNotConfiguredError`. The first async task builds the async engine and requires `DATABASE_ASYNC_DRIVER`.
+
+## Async tasks
+
+Declare a task with `async def` to call async services. Celery runs tasks synchronously, so `BedrockTask` runs the coroutine to completion on the worker process's event loop within the call: `self.request`, `self.retry()`, and the other task options work as in a `def` task.
+
+- **Use the prefork or solo pool for workers that run async tasks.** Async tasks run one at a time on the thread that set the process up. Pools that run several tasks at once in one process (`threads`, `gevent`, `eventlet`) are not supported for async tasks: an async task called from another thread, or while another async task is running, raises `ImproperlyConfigured`. `def` tasks have no such restriction.
+- An async task binds only `db.asession`. Use async services in it, not services that use `db.session`.
+- Do not create your own event loop in a task (`asyncio.run()`): async engines and clients belong to the loop they were created on.
+
+## Testing
+
+Tasks can run eagerly with `task.apply()`. `def` tasks only need `db.init()`. Async tasks need the worker loop, so set the process up in a fixture:
+
+```python
+import pytest
+from bedrock_celery import setup_worker_process, shutdown_worker_process
+
+from shop.adapters.worker.inventory.tasks import arestock
+
+
+@pytest.fixture
+def worker_process():
+    setup_worker_process("shop.inventory")
+    yield
+    shutdown_worker_process()  # also closes the database engines
+
+
+def test_arestock(worker_process):
+    assert arestock.apply(args=("A1", 3)).get() == 3
+```
+
+Without it, an async task raises `ImproperlyConfigured`.
+
+## API reference
+
+| Name | Signature | Notes |
+| --- | --- | --- |
+| `connect_worker` | `connect_worker(app: str \| None = None) -> None` | Connects the worker signals; call once where the Celery app is created |
+| `BedrockTask` | `Celery(..., task_cls=BedrockTask)` or `@app.task(base=BedrockTask)` | DI scope and database session per task; runs `async def` tasks on the worker loop |
+| `setup_worker_process` | `setup_worker_process(app: str \| None = None) -> None` | Sets Bedrock up on a new event loop in this process; does nothing if already set up |
+| `shutdown_worker_process` | `shutdown_worker_process() -> None` | Shuts Bedrock down and closes the loop; does nothing if not set up |
+
+The package does not provide task discovery, beat schedules, retry policies, or exception mapping: those stay in your application.

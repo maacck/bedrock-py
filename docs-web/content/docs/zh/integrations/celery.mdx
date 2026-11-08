@@ -1,0 +1,197 @@
+---
+title: Celery
+description: 安装 bedrock-celery，在 Celery worker 中运行 Bedrock 模块
+---
+
+`bedrock-celery` 把 Celery worker 接入 Bedrock 运行时。Celery 应用仍由你的项目创建和持有；这个包提供几个可以单独使用的构建块：
+
+| 组件 | 作用 |
+| --- | --- |
+| `connect_worker(app)` | 在每个 worker 进程中启动 Bedrock（使用 prefork 进程池时在 fork 之后），进程退出时关闭 |
+| `BedrockTask` | 为每个任务提供独立的 DI 作用域和数据库 session，任务结束时回滚仍未提交的内容 |
+| `async def` 任务 | 在 worker 进程的事件循环上运行，使用 `db.asession`，与生命周期钩子打开的异步客户端共用同一个循环 |
+| `setup_worker_process(app)` / `shutdown_worker_process()` | 不经过 worker 的同一套生命周期，用于测试和 eager 执行 |
+
+## 安装
+
+<Tabs items={['uv', 'pip']}>
+  <Tab value="uv"><CodeBlock code={'uv add bedrock-celery'} lang={'bash'} /></Tab>
+  <Tab value="pip"><CodeBlock code={'pip install bedrock-celery'} lang={'bash'} /></Tab>
+</Tabs>
+
+<Callout type="info">
+  `bedrock-celery` 尚未发布到 PyPI。首次发布之前，请从 GitHub 安装：
+  `uv add "bedrock-celery @ git+https://github.com/maacck/bedrock-py#subdirectory=integrations/celery"`。
+</Callout>
+
+`bedrock-celery` 需要 Python 3.12+，会安装 `bedrock-core` 和 Celery 5.3+。broker 对应的 extra 需自行安装，例如 `celery[redis]`。要在异步任务中使用数据库，还需安装异步驱动，例如 `bedrock-core[async-postgresql]`。
+
+## 项目结构
+
+Celery 代码放在 Bedrock 模块之外，即 [模块解剖](/docs/guides/module-anatomy) 中所说的 worker 适配器。模块不导入 Celery，任务只负责转换参数并调用 service。
+
+```text
+src/shop/
+├── inventory/                 # Bedrock 模块：不含 Celery 代码
+│   ├── manifest.yaml
+│   ├── models.py
+│   ├── exc.py
+│   └── service.py
+└── adapters/
+    └── worker/
+        ├── app.py             # 创建 Celery 应用
+        └── inventory/
+            └── tasks.py       # 任务：参数 -> 调用 service -> 结果
+```
+
+## 创建应用
+
+```python
+# shop/adapters/worker/app.py
+from bedrock.database import db
+from bedrock_celery import BedrockTask, connect_worker
+from celery import Celery
+
+app = Celery(
+    "shop",
+    broker="redis://localhost:6379/0",
+    task_cls=BedrockTask,
+    include=["shop.adapters.worker.inventory.tasks"],
+)
+db.init()  # 只创建 engine；fork 之前不会打开连接
+connect_worker("shop.inventory")
+```
+
+- `task_cls=BedrockTask` 让这个应用的所有任务都成为 `BedrockTask`。如果想逐个任务启用，在 `@app.task` 中传 `base=BedrockTask`。
+- `connect_worker("shop.inventory")` 指定根模块，与 `bedrock.setup()` 相同。不传参数时读取 `BEDROCK_APP`。
+- `db.init()` 读取 `DATABASE_*` 环境变量（见 [数据库](/docs/guides/database)）。它不会建立连接，因此在导入时调用是安全的。不要在模块导入时执行查询或调用 `bedrock.setup()`：使用 prefork 进程池时导入发生在父进程中，子进程会共用它的连接。
+
+## 编写任务
+
+```python
+# shop/adapters/worker/inventory/tasks.py
+from shop.inventory.service import inventory_service
+
+from ..app import app
+
+
+@app.task
+def restock(sku: str, quantity: int) -> int:
+    return inventory_service.restock(sku, quantity)
+
+
+@app.task(bind=True, max_retries=3)
+async def arestock(self, sku: str, quantity: int) -> int:
+    return await inventory_service.arestock(sku, quantity)
+```
+
+事务由 service 负责并提交，与在 HTTP 或 CLI 命令中完全一样：
+
+```python
+# shop/inventory/service.py
+from bedrock.database import db
+from sqlalchemy import select
+
+from .exc import ItemNotFound
+from .models import ItemModel
+
+
+class InventoryService:
+    def restock(self, sku: str, quantity: int) -> int:
+        item = db.session.scalar(select(ItemModel).where(ItemModel.sku == sku))
+        if item is None:
+            raise ItemNotFound()
+        item.stock += quantity
+        stock = item.stock
+        db.session.commit()
+        return stock
+
+    async def arestock(self, sku: str, quantity: int) -> int:
+        item = await db.asession.scalar(select(ItemModel).where(ItemModel.sku == sku))
+        if item is None:
+            raise ItemNotFound()
+        item.stock += quantity
+        stock = item.stock  # 在提交前读取：提交会让已加载的属性过期
+        await db.asession.commit()
+        return stock
+
+
+inventory_service = InventoryService()
+```
+
+## 运行
+
+```bash
+export DATABASE_TYPE=postgresql DATABASE_HOST=localhost DATABASE_PORT=5432  # 见数据库指南
+celery -A shop.adapters.worker.app worker --pool prefork
+```
+
+抛出异常的任务（例如 `ItemNotFound`）与普通 Celery 任务一样失败：异常作为结果保存并由 worker 记录日志，任务中未提交的内容会被回滚。
+
+## Worker 生命周期
+
+`connect_worker()` 连接四个 Celery 信号：
+
+| 进程池 | 何时启动 Bedrock | 何时关闭 Bedrock |
+| --- | --- | --- |
+| `prefork`（默认） | 每个子进程启动后（`worker_process_init`）；父进程从不启动 | 该子进程退出时（`worker_process_shutdown`） |
+| `solo`、`threads`、`gevent`、`eventlet` | 在 worker 进程中启动一次（`worker_init`） | worker 停止时（`worker_shutdown`） |
+
+每个启动了 Bedrock 的进程都有自己的事件循环。Bedrock 在这个循环上用 `bedrock.asetup()` 启动、用 `bedrock.ashutdown()` 关闭，因此异步 `on_load` 钩子和异步任务使用同一个循环：钩子打开的异步客户端可以在任务中使用。关闭时也会关闭数据库 engine。因 `worker_max_tasks_per_child` 被替换的子进程会重新启动 Bedrock。
+
+在创建 Celery 应用的模块中调用一次 `connect_worker()`。它不配置日志；如果需要 Bedrock 的日志输出，请在那里调用 `bedrock.logging.configure_logging()`。
+
+## 任务、作用域和数据库 Session
+
+`BedrockTask` 把每个任务放在 `container.scope("task")` 中运行。以 `Lifetime.SCOPED` 注册的服务在每个任务中解析为同一个实例；任务结束时，如果实例有 `close()` 方法就会被调用。
+
+`def` 任务在 `db.session_scope()` 中运行；`async def` 任务在 `db.asession_scope()` 中运行。事务由 service 负责：service 使用 `db.session` / `db.asession` 并提交。任务不会替它们提交；任务结束时仍未提交的内容（例如 service 在提交前抛出异常）会被回滚。
+
+- **不要在 service 中开启 `db.session_scope()` 或 `db.asession_scope()`。**任务内已经绑定了 session，它们会抛出 `RuntimeError`。同理，不要在任务中直接调用另一个任务（`other_task(...)`）；用 `.delay()` / `.apply_async()` 发送，或直接调用它的 service。
+- **每次提交都是最终的。**如果任务在 service 提交后重试，已提交的内容会保留。必须一起成功或失败的写入放在同一个只提交一次的 service 方法中，并让任务可以安全地重复执行。
+- **没人提交的写入会丢失。**任务仍然会成功结束。
+- **不应与任务共享事务的旁路事务**使用 `db.independent_session()` / `db.aindependent_session()`。
+- 如果 worker 中没有调用 `db.init()`，每个 `BedrockTask` 都会因 `DatabaseNotConfiguredError` 失败。首个异步任务会创建异步 engine，需要设置 `DATABASE_ASYNC_DRIVER`。
+
+## 异步任务
+
+用 `async def` 声明任务即可调用异步 service。Celery 以同步方式运行任务，因此 `BedrockTask` 在这次调用中把协程放到 worker 进程的事件循环上运行完毕：`self.request`、`self.retry()` 和其他任务选项与 `def` 任务中的行为一致。
+
+- **运行异步任务的 worker 请使用 prefork 或 solo 进程池。**异步任务在启动进程的那个线程上逐个运行。在一个进程内同时运行多个任务的进程池（`threads`、`gevent`、`eventlet`）不支持异步任务：从其他线程调用异步任务，或在另一个异步任务运行期间调用，会抛出 `ImproperlyConfigured`。`def` 任务没有这个限制。
+- 异步任务只绑定 `db.asession`。请在其中使用异步 service，而不是使用 `db.session` 的 service。
+- 不要在任务中创建自己的事件循环（`asyncio.run()`）：异步 engine 和客户端属于创建它们的那个循环。
+
+## 测试
+
+任务可以用 `task.apply()` eager 执行。`def` 任务只需要 `db.init()`。异步任务需要 worker 循环，因此在 fixture 中启动进程：
+
+```python
+import pytest
+from bedrock_celery import setup_worker_process, shutdown_worker_process
+
+from shop.adapters.worker.inventory.tasks import arestock
+
+
+@pytest.fixture
+def worker_process():
+    setup_worker_process("shop.inventory")
+    yield
+    shutdown_worker_process()  # 同时关闭数据库 engine
+
+
+def test_arestock(worker_process):
+    assert arestock.apply(args=("A1", 3)).get() == 3
+```
+
+没有这个 fixture 时，异步任务会抛出 `ImproperlyConfigured`。
+
+## API 参考
+
+| 名称 | 签名 | 说明 |
+| --- | --- | --- |
+| `connect_worker` | `connect_worker(app: str \| None = None) -> None` | 连接 worker 信号；在创建 Celery 应用的地方调用一次 |
+| `BedrockTask` | `Celery(..., task_cls=BedrockTask)` 或 `@app.task(base=BedrockTask)` | 每个任务一个 DI 作用域和数据库 session；在 worker 循环上运行 `async def` 任务 |
+| `setup_worker_process` | `setup_worker_process(app: str \| None = None) -> None` | 在当前进程的新事件循环上启动 Bedrock；已启动时什么都不做 |
+| `shutdown_worker_process` | `shutdown_worker_process() -> None` | 关闭 Bedrock 并关闭循环；未启动时什么都不做 |
+
+这个包不提供任务发现、beat 调度、重试策略或异常映射：这些留给你的应用。
