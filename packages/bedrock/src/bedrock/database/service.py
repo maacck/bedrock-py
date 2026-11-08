@@ -13,6 +13,7 @@ from sqlalchemy import (
 from sqlalchemy import (
     select as sa_select,
 )
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.session import Session
 from sqlalchemy.sql.elements import ColumnElement
 
@@ -189,6 +190,45 @@ def build_query(
     return query, count_query, filters
 
 
+def _search_statements(
+    model: type[BedrockModel], additional_select: list[Any] | None, **build_kwargs: Any
+) -> tuple[Select, Select]:
+    """Build the data and count statements shared by the sync and async search helpers."""
+    select_fields = [model]
+    if additional_select is not None:
+        select_fields.extend(additional_select)
+    query, count_query, _ = build_query(select=sa_select(*select_fields), model=model, **build_kwargs)
+    return query, count_query
+
+
+def _search_result(
+    items: Any,
+    total_count: int,
+    *,
+    limit: int,
+    page: int,
+    q: str | None,
+    filter_specs: FilterSpecs | None,
+    show_all: bool,
+) -> dict[str, Any]:
+    """Shape executed search results into the ``items``/``total``/``page_info`` dictionary."""
+    offset = (page - 1) * limit if page > 1 else 0
+    return {
+        "items": items,
+        "total": total_count,
+        "page_info": {
+            "total": total_count,
+            "limit": limit,
+            "offset": offset,
+            "page": page,
+            "query": q or "",
+            "filters": filter_specs or [],
+            "paginated": not show_all,
+            "has_more": total_count > offset + limit,
+        },
+    }
+
+
 def search_filter_sort_paginate(
     *,
     db_session: Session,
@@ -241,13 +281,9 @@ def search_filter_sort_paginate(
         metadata.
     """
     limit = _validate_query_limit(limit)
-    select_fields = [model]
-    if additional_select is not None:
-        select_fields.extend(additional_select)
-    offset = (page - 1) * limit if page > 1 else 0
-    query, count_query, filters = build_query(
-        select=sa_select(*select_fields),
-        model=model,
+    query, count_query = _search_statements(
+        model,
+        additional_select,
         limit=limit,
         page=page,
         sort_dir=sort_dir,
@@ -262,25 +298,84 @@ def search_filter_sort_paginate(
         auto_join_=auto_join_,
         show_all=show_all,
     )
-
     total_count: int = db_session.execute(count_query).scalar()
-    items = db_session.execute(query)
-    if return_raw:
-        items = items.all()
-    else:
-        items = items.scalars().all()
+    rows = db_session.execute(query)
+    items = rows.all() if return_raw else rows.scalars().all()
+    return _search_result(items, total_count, limit=limit, page=page, q=q, filter_specs=filter_specs, show_all=show_all)
 
-    return {
-        "items": items,
-        "total": total_count,
-        "page_info": {
-            "total": total_count,
-            "limit": limit,
-            "offset": offset,
-            "page": page,
-            "query": q or "",
-            "filters": filter_specs or [],
-            "paginated": not show_all,
-            "has_more": total_count > offset + limit,
-        },
-    }
+
+async def asearch_filter_sort_paginate(
+    *,
+    db_session: AsyncSession,
+    model: type[BedrockModel],
+    limit: int = 10,
+    page: int = 1,
+    sort_dir: str | None = None,
+    q: str | None = None,
+    sort_key: str | None = None,
+    sqla_filters: list[ColumnElement[bool]] | None = None,
+    filter_specs: FilterSpecs | None = None,
+    join_models: list[tuple[Any, ...]] | None = None,
+    options: list[Any] | None = None,
+    additional_select: list[Any] | None = None,
+    show_all: bool = False,
+    count_pk: str | None = None,
+    return_raw: bool = False,
+    group_by: str | None = None,
+    auto_join_: bool = True,
+) -> dict[str, Any]:
+    """Asynchronous variant of :func:`search_filter_sort_paginate` for an ``AsyncSession``.
+
+    Takes the same arguments and returns the same dictionary; only ``db_session`` is an
+    :class:`~sqlalchemy.ext.asyncio.AsyncSession`, such as ``db.asession``. Relationships that the
+    caller reads on the returned items must be loaded eagerly through ``options`` (for example
+    ``selectinload``), because lazy loading is not available on async sessions.
+
+    Args:
+        db_session: Active SQLAlchemy async session.
+        model: The SQLAlchemy model class (or selectable) to query.
+        limit: Maximum number of results per page.
+        page: 1-based page number.
+        sort_dir: Sort direction — ``"asc"`` or ``"desc"``.
+        q: Optional free-text search string.
+        sort_key: Column name or list of ``(column, direction)`` tuples.
+        sqla_filters: Additional raw SQLAlchemy filter expressions.
+        filter_specs: Declarative filter specifications.
+        join_models: Explicit join specifications.
+        options: SQLAlchemy loader options.
+        additional_select: Extra selectables to include alongside the
+            model (e.g. computed columns).
+        show_all: When ``True``, ignore *limit* and *page*.
+        count_pk: Primary-key column name for the count query.
+        return_raw: When ``True``, return full row objects instead of
+            scalar results.
+        group_by: Column name or expression to group results by.
+        auto_join_: When ``True``, automatically join related models.
+
+    Returns:
+        A dictionary with keys ``"items"``, ``"total"``, and
+        ``"page_info"`` containing the query results and pagination
+        metadata.
+    """
+    limit = _validate_query_limit(limit)
+    query, count_query = _search_statements(
+        model,
+        additional_select,
+        limit=limit,
+        page=page,
+        sort_dir=sort_dir,
+        q=q,
+        sort_key=sort_key,
+        sqla_filters=sqla_filters,
+        filter_specs=filter_specs,
+        join_models=join_models,
+        options=options,
+        count_pk=count_pk,
+        group_by=group_by,
+        auto_join_=auto_join_,
+        show_all=show_all,
+    )
+    total_count: int = (await db_session.execute(count_query)).scalar()
+    rows = await db_session.execute(query)
+    items = rows.all() if return_raw else rows.scalars().all()
+    return _search_result(items, total_count, limit=limit, page=page, q=q, filter_specs=filter_specs, show_all=show_all)

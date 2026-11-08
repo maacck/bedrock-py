@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import pytest
+import pytest_asyncio
 from bedrock.database.base import BedrockModel
 from bedrock.database.filters import MAX_FILTER_DEPTH, init_filters
-from bedrock.database.service import MAX_QUERY_LIMIT, search_filter_sort_paginate
+from bedrock.database.service import MAX_QUERY_LIMIT, asearch_filter_sort_paginate, search_filter_sort_paginate
 from bedrock.exc import BadFilterFormatError, FilterDepthExceededError, InvalidQueryLimitError
 from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, create_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, relationship, sessionmaker
 
 
@@ -372,3 +374,73 @@ class TestFilterInputValidation:
         )
 
         assert result["page_info"]["limit"] == MAX_QUERY_LIMIT
+
+
+@pytest_asyncio.fixture
+async def async_session(tmp_path):
+    """Seed an aiosqlite session with the same rows as ``db_session``."""
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'paginate.db'}")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    session = async_sessionmaker(engine)()
+    session.add_all(
+        [
+            InventoryItem(name="alpha", category="fruit", quantity=5, is_active=True),
+            InventoryItem(name="bravo", category="vegetable", quantity=3, is_active=True),
+            InventoryItem(name="charlie", category="fruit", quantity=2, is_active=False),
+            InventoryItem(name="delta", category="grain", quantity=9, is_active=True),
+            InventoryItem(name="echo", category="fruit", quantity=7, is_active=False),
+        ]
+    )
+    await session.commit()
+    try:
+        yield session
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+class TestAsyncSearchFilterSortPaginate:
+    """Verify the AsyncSession variant returns the same shape as the sync helper."""
+
+    @pytest.mark.asyncio
+    async def test_filters_sorts_and_paginates(self, async_session: AsyncSession):
+        filter_specs = [{"field": "category", "op": "eq", "value": "fruit"}]
+
+        result = await asearch_filter_sort_paginate(
+            db_session=async_session,
+            model=InventoryItem,
+            filter_specs=filter_specs,
+            sort_key="name",
+            sort_dir="asc",
+            limit=2,
+            page=1,
+            count_pk="id",
+        )
+
+        assert [item.name for item in result["items"]] == ["alpha", "charlie"]
+        assert result["total"] == 3
+        assert result["page_info"] == {
+            "total": 3,
+            "limit": 2,
+            "offset": 0,
+            "page": 1,
+            "query": "",
+            "filters": filter_specs,
+            "paginated": True,
+            "has_more": True,
+        }
+
+    @pytest.mark.asyncio
+    async def test_return_raw_includes_additional_select(self, async_session: AsyncSession):
+        result = await asearch_filter_sort_paginate(
+            db_session=async_session,
+            model=InventoryItem,
+            additional_select=[InventoryItem.quantity * 10],
+            filter_specs={"field": "name", "op": "eq", "value": "delta"},
+            return_raw=True,
+            count_pk="id",
+        )
+
+        [(item, scaled)] = result["items"]
+        assert (item.name, scaled) == ("delta", 90)

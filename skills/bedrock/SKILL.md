@@ -283,6 +283,8 @@ result = search_filter_sort_paginate(
 # Returns: {"items": [...], "total": N, "page_info": {"page": 1, "limit": 10, "has_more": True}}
 ```
 
+In `async def` services, use `await asearch_filter_sort_paginate(db_session=db.asession, ...)` from the same module: same arguments, same return value.
+
 **Filter operators**: `is_null`, `is_not_null`, `==`/`eq`, `!=`/`neq`, `>`/`gt`, `<`/`lt`, `>=`/`ge`, `<=`/`le`, `like`, `ilike`, `not_ilike`, `in`, `not_in`, `between`, `has`, `any`, `not_any`, `text_search`, `fuzzy_search`. `limit` must be an integer from 1 to 1000 inclusive, even with `show_all=True`.
 
 **Boolean combinators**: `or`, `and`

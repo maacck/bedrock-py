@@ -384,6 +384,24 @@ result["total"]     # Total count matching filters
 result["page_info"] # Pagination metadata
 ```
 
+### 异步 Session
+
+在 `async def` 的 service 中，配合 `db.asession` 调用 `asearch_filter_sort_paginate`。它的参数和返回的字典与同步版本相同：
+
+```python
+from bedrock.database.service import asearch_filter_sort_paginate
+
+result = await asearch_filter_sort_paginate(
+    db_session=db.asession,
+    model=Product,
+    filter_specs=[{"field": "name", "op": "ilike", "value": "%widget%"}],
+    page=1,
+    limit=20,
+)
+```
+
+异步 session 不能延迟加载关系。需要读取 `result["items"]` 上的关系时，通过 `options` 预先加载，例如 `options=[selectinload(Product.tags)]`。
+
 ### 过滤操作符
 
 | 操作符 | 符号 | 说明 |

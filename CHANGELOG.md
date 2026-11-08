@@ -25,6 +25,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     savepoint. `rollback_session()` and `arollback_session()` provide the same isolation as context
     managers, the async one for use in an async fixture. SQLite is supported.
 
+- **Database**: `asearch_filter_sort_paginate()` in `bedrock.database.service`, the `AsyncSession`
+  variant of `search_filter_sort_paginate()`. It takes the same arguments and returns the same
+  `items`/`total`/`page_info` dictionary, so `async def` services can list with `db.asession`.
+
 ## [0.3.1] - 2026-11-08
 
 ### Breaking changes

@@ -297,6 +297,23 @@ result = search_filter_sort_paginate(
 }
 ```
 
+### asearch_filter_sort_paginate
+
+Async services use `asearch_filter_sort_paginate` with `db.asession`. Arguments and return value are identical. Load relationships you read on the items through `options` (for example `selectinload`), because async sessions cannot lazy-load.
+
+```python
+from bedrock.database import db
+from bedrock.database.service import asearch_filter_sort_paginate
+
+result = await asearch_filter_sort_paginate(
+    db_session=db.asession,
+    model=UserModel,
+    filter_specs=[{"field": "is_active", "op": "==", "value": True}],
+    page=1,
+    limit=10,
+)
+```
+
 ### Full Parameter Reference
 
 | Parameter | Type | Default | Description |
