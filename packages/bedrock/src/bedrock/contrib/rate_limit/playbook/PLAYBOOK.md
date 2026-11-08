@@ -51,7 +51,7 @@ decision = await rate_limit.ahit(LOGIN, key, cost=2)             # async; areset
 |---------|------|-------|------------|
 | Redis | `"redis"` (default) | `rate-limit-redis` | `RATE_LIMIT_REDIS_` |
 
-Redis settings: `url` (`redis://localhost:6379/0`), `db`, `password`, `key_prefix` (`rate_limit:`), `max_connections` (`50`). They are independent of `CACHE_REDIS_*`; use the same URL to share a server. One Lua script evaluates each hit atomically with the Redis server clock, so every application instance agrees.
+Redis settings: `url` (`redis://localhost:6379`; a database in the URL takes precedence over `db`), `db` (`0`), `password`, `key_prefix` (`rate_limit:`), `max_connections` (`50`). They are independent of `CACHE_REDIS_*`; use the same URL to share a server. One Lua script evaluates each hit atomically with the Redis server clock, so every application instance agrees. The refill interval is `period / limit` rounded up to a whole microsecond.
 
 ## Custom Backend Registration
 

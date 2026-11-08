@@ -49,8 +49,11 @@ class RateLimitPolicy(BedrockEntity):
 
     @property
     def interval_us(self) -> int:
-        """Return the microseconds it takes one unit to return to the bucket."""
-        return (self.period // _MICROSECOND) // self.limit
+        """Return the microseconds it takes one unit to return to the bucket.
+
+        Rounded up to a whole microsecond, so a policy never refills faster than ``period / limit``.
+        """
+        return -(-(self.period // _MICROSECOND) // self.limit)
 
     @property
     def capacity_us(self) -> int:

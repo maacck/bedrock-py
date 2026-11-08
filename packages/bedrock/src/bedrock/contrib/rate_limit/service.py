@@ -191,11 +191,13 @@ class RateLimitService:
             RateLimitPolicyConflictError: If a different policy was already used under ``policy.name``.
             RateLimitBackendError: If the backend cannot evaluate the hit.
         """
-        return self.get_backend().hit(self._storage_key(policy, key, cost), policy, cost)
+        storage_key = self._storage_key(policy, key, cost)
+        return self.get_backend().hit(storage_key, policy, cost)
 
     async def ahit(self, policy: RateLimitPolicy, key: str, cost: int = 1) -> RateLimitDecision:
         """Asynchronous variant of :meth:`hit`."""
-        return await self.get_backend().ahit(self._storage_key(policy, key, cost), policy, cost)
+        storage_key = self._storage_key(policy, key, cost)
+        return await self.get_backend().ahit(storage_key, policy, cost)
 
     def reset(self, policy: RateLimitPolicy, key: str) -> None:
         """Refill the bucket of ``policy`` for ``key``, e.g. after a successful login.
@@ -205,11 +207,13 @@ class RateLimitService:
             RateLimitPolicyConflictError: If a different policy was already used under ``policy.name``.
             RateLimitBackendError: If the backend cannot reset the bucket.
         """
-        self.get_backend().reset(self._storage_key(policy, key, 1))
+        storage_key = self._storage_key(policy, key, 1)
+        self.get_backend().reset(storage_key)
 
     async def areset(self, policy: RateLimitPolicy, key: str) -> None:
         """Asynchronous variant of :meth:`reset`."""
-        await self.get_backend().areset(self._storage_key(policy, key, 1))
+        storage_key = self._storage_key(policy, key, 1)
+        await self.get_backend().areset(storage_key)
 
     def _storage_key(self, policy: RateLimitPolicy, key: str, cost: int) -> str:
         """Validate a call and return the namespaced, hashed key the backend stores."""

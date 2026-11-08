@@ -45,8 +45,8 @@ RATE_LIMIT_REDIS_KEY_PREFIX=rate_limit:  # default
 
 | 配置项 | 默认值 | 说明 |
 |---------|---------|-------------|
-| `RATE_LIMIT_REDIS_URL` | `redis://localhost:6379/0` | 连接 URL |
-| `RATE_LIMIT_REDIS_DB` | `0` | 数据库编号 |
+| `RATE_LIMIT_REDIS_URL` | `redis://localhost:6379` | 连接 URL；URL 中带有数据库编号（`/2`）时优先于 `RATE_LIMIT_REDIS_DB` |
+| `RATE_LIMIT_REDIS_DB` | `0` | 数据库编号，仅在 URL 未指定时生效 |
 | `RATE_LIMIT_REDIS_PASSWORD` | 未设置 | 密码 |
 | `RATE_LIMIT_REDIS_KEY_PREFIX` | `rate_limit:` | 所有 key 的前缀 |
 | `RATE_LIMIT_REDIS_MAX_CONNECTIONS` | `50` | 每个客户端的连接池大小 |
@@ -76,7 +76,7 @@ def on_load(**kwargs) -> None:
 
 策略是一个按 GCRA 计算的令牌桶：
 
-- 可以一次性用掉 `limit` 个单位；之后每隔 `period / limit` 恢复一个单位。
+- 可以一次性用掉 `limit` 个单位；之后每隔 `period / limit` 恢复一个单位。该间隔向上取整到整微秒，因此桶的恢复速度不会快于配置值。
 - `hit(policy, key, cost=1)` 在额度足够时消耗 `cost` 个单位（1 到 `limit` 之间的整数）。被拒绝的调用不消耗额度。
 - `RateLimitDecision` 包含 `allowed`、`limit`、`remaining`（当前可用的单位数）、`retry_after`（再过多少秒这次的 cost 才能被放行；放行时为 `0.0`）和 `reset_after`（再过多少秒桶会回满）。
 - Redis 在一条 Lua 脚本中使用服务端时钟完成每次判定，因此无论多少并发调用方或应用实例，都不会超出限额。

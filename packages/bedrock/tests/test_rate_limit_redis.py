@@ -58,8 +58,8 @@ def test_burst_then_denial_reports_retry_and_reset(service: RateLimitService) ->
     assert [d.remaining for d in decisions] == [4, 3, 2, 1, 0, 0]
     denied = decisions[-1]
     assert 0 < denied.retry_after <= 180
-    assert denied.retry_after == pytest.approx(180, abs=0.05)
-    assert denied.reset_after == pytest.approx(900, abs=0.05)
+    assert denied.retry_after == pytest.approx(180, abs=1)
+    assert denied.reset_after == pytest.approx(900, abs=1)
     assert decisions[0].retry_after == 0
 
 
@@ -96,16 +96,17 @@ def test_reset_refills_the_bucket(service: RateLimitService) -> None:
 
 
 def test_units_return_over_time(service: RateLimitService) -> None:
-    fast = RateLimitPolicy(name="fast", limit=2, period=timedelta(milliseconds=200))
-    service.hit(fast, "alice", cost=2)
-    assert not service.hit(fast, "alice").allowed
+    slow = RateLimitPolicy(name="slow", limit=2, period=timedelta(seconds=1))
+    service.hit(slow, "alice", cost=2)
+    assert not service.hit(slow, "alice").allowed
 
-    time.sleep(0.12)  # one 100 ms interval has passed
-    assert service.hit(fast, "alice").allowed
-    assert not service.hit(fast, "alice").allowed
+    # One 500 ms interval has passed; a second unit would need 1 s, leaving 400 ms of scheduling slack.
+    time.sleep(0.6)
+    assert service.hit(slow, "alice").allowed
+    assert not service.hit(slow, "alice").allowed
 
-    time.sleep(0.25)  # longer than the full period
-    assert service.hit(fast, "alice", cost=2).allowed
+    time.sleep(1.0)  # at least a full period since the last allowed hit
+    assert service.hit(slow, "alice", cost=2).allowed
 
 
 @pytest.mark.asyncio

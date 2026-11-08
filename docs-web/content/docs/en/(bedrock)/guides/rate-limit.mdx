@@ -45,8 +45,8 @@ Add `bedrock.contrib.rate_limit` to the `depends_on` of every module that uses i
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `RATE_LIMIT_REDIS_URL` | `redis://localhost:6379/0` | Connection URL |
-| `RATE_LIMIT_REDIS_DB` | `0` | Database number |
+| `RATE_LIMIT_REDIS_URL` | `redis://localhost:6379` | Connection URL; a database in the URL (`/2`) takes precedence over `RATE_LIMIT_REDIS_DB` |
+| `RATE_LIMIT_REDIS_DB` | `0` | Database number, used when the URL names none |
 | `RATE_LIMIT_REDIS_PASSWORD` | unset | Password |
 | `RATE_LIMIT_REDIS_KEY_PREFIX` | `rate_limit:` | Prefix for every key |
 | `RATE_LIMIT_REDIS_MAX_CONNECTIONS` | `50` | Pool size of each client |
@@ -76,7 +76,7 @@ def on_load(**kwargs) -> None:
 
 A policy is a token bucket evaluated with GCRA:
 
-- `limit` units are available at once; one unit returns every `period / limit`.
+- `limit` units are available at once; one unit returns every `period / limit`, rounded up to a whole microsecond so a bucket never refills faster than configured.
 - `hit(policy, key, cost=1)` consumes `cost` units (an integer from 1 to `limit`) when they are available. A denied hit consumes nothing.
 - `RateLimitDecision` reports `allowed`, `limit`, `remaining` (units available now), `retry_after` (seconds until this cost would be allowed; `0.0` when allowed), and `reset_after` (seconds until the bucket is full).
 - Redis evaluates each hit in one Lua script using the server clock, so concurrent callers and application instances never exceed the limit.

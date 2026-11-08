@@ -144,12 +144,39 @@ def test_unknown_backend_from_env_names_the_variable(monkeypatch: pytest.MonkeyP
         RateLimitService().get_backend()
 
 
+def test_invalid_arguments_are_rejected_before_configuring_a_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RATE_LIMIT_BACKEND", "nope")
+    svc = RateLimitService()
+
+    with pytest.raises(InvalidRateLimitArgumentError):
+        svc.hit(POLICY, "user", cost=0)
+    with pytest.raises(InvalidRateLimitArgumentError):
+        svc.reset(POLICY, "")
+    assert svc._backend is None
+
+
 def test_redis_is_the_default_backend(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("RATE_LIMIT_BACKEND", raising=False)
     svc = RateLimitService()
 
     assert isinstance(svc.get_backend(), RedisRateLimitBackend)
     svc.close()
+
+
+@pytest.mark.parametrize(
+    ("env", "expected_db"),
+    [({"RATE_LIMIT_REDIS_DB": "15"}, 15), ({"RATE_LIMIT_REDIS_URL": "redis://localhost:6379/3"}, 3)],
+)
+def test_redis_database_comes_from_db_setting_unless_the_url_names_one(
+    monkeypatch: pytest.MonkeyPatch, env: dict[str, str], expected_db: int
+) -> None:
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    backend = RedisRateLimitBackend()
+
+    assert backend._client.connection_pool.connection_kwargs["db"] == expected_db
+    assert backend._async_client.connection_pool.connection_kwargs["db"] == expected_db
+    backend.close()
 
 
 def test_registered_backend_is_selected_by_name_or_env(monkeypatch: pytest.MonkeyPatch) -> None:

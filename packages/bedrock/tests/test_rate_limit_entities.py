@@ -42,6 +42,14 @@ def test_smallest_valid_period_is_one_microsecond_per_unit() -> None:
     assert RateLimitPolicy(name="p", limit=3, period=timedelta(microseconds=3)).interval_us == 1
 
 
+@pytest.mark.parametrize(("limit", "period_us"), [(3, 1_000_000), (600_000, 1_000_000), (7, 10)])
+def test_non_divisible_interval_never_refills_faster_than_the_period(limit: int, period_us: int) -> None:
+    policy = RateLimitPolicy(name="p", limit=limit, period=timedelta(microseconds=period_us))
+
+    assert policy.capacity_us >= period_us
+    assert policy.capacity_us - period_us < limit
+
+
 def test_decision_from_micros_converts_to_seconds_and_clamps_remaining() -> None:
     policy = RateLimitPolicy(name="p", limit=5, period=10)
 

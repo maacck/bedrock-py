@@ -36,8 +36,9 @@ class RedisRateLimitSettings(BaseSettings):
     ``CACHE_REDIS_*`` settings; point both at the same URL to share a server.
 
     Attributes:
-        url: Redis connection URL (e.g. ``redis://localhost:6379/0``).
-        db: Redis database number.
+        url: Redis connection URL without a database, e.g. ``redis://localhost:6379``. A database in the URL
+            (``redis://host:6379/2``) takes precedence over ``db``.
+        db: Redis database number, used when the URL names none.
         password: Redis authentication password.
         key_prefix: Prefix prepended to every rate-limit key.
         max_connections: Maximum number of connections in each pool.
@@ -45,7 +46,7 @@ class RedisRateLimitSettings(BaseSettings):
 
     model_config = SettingsConfigDict(env_prefix="RATE_LIMIT_REDIS_", extra="ignore")
 
-    url: str = "redis://localhost:6379/0"
+    url: str = "redis://localhost:6379"
     db: int = 0
     password: str | None = None
     key_prefix: str = "rate_limit:"
