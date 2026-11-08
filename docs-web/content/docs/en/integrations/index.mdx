@@ -1,0 +1,22 @@
+---
+title: Integrations
+description: First-party adapters that connect Bedrock to web frameworks and workers
+---
+
+Bedrock's core runtime does not depend on any web framework or task queue. Integrations are the first-party adapters that connect a Bedrock application to one of them. Each one is a separately installed package: projects that do not use the framework never install it, and `bedrock-core` never imports it.
+
+## How integrations work
+
+- **The host owns the framework.** Your project creates the FastAPI app (or worker, or CLI) and its startup and shutdown. An integration does not create or configure it for you.
+- **Pick the pieces you need.** An integration is a small library of building blocks, such as middleware and exception handlers. Add only the ones your application uses.
+- **Not a Bedrock module.** An integration has no `manifest.yaml` and no lifecycle hooks. It sits in the adapter layer described in [Module Anatomy](/docs/guides/module-anatomy) and calls into your modules' services; your services never import it.
+- **Released on their own.** Each integration has its own version number, changelog, and release. Its `bedrock-core` requirement states which core versions it supports.
+
+## Available integrations
+
+| Integration | Package | Provides |
+| --- | --- | --- |
+| [FastAPI](/docs/integrations/fastapi) | `bedrock-fastapi` | Per-request DI scope, per-request database session, `BedrockExc` to HTTP error responses |
+| [Celery](/docs/integrations/celery) | `bedrock-celery` | Per-process worker lifecycle, per-task DI scope and database session, async tasks |
+
+In the repository, each integration lives in `integrations/<framework>/` and is published as `bedrock-<framework>`.

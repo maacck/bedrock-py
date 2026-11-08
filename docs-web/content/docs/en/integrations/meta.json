@@ -1,0 +1,7 @@
+{
+  "root": true,
+  "title": "Integrations",
+  "description": "Framework adapters for Bedrock",
+  "icon": "Plug",
+  "pages": ["index", "fastapi", "celery"]
+}

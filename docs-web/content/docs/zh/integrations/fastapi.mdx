@@ -1,0 +1,234 @@
+---
+title: FastAPI
+description: 安装 bedrock-fastapi，用 FastAPI 通过 HTTP 提供 Bedrock 模块
+---
+
+`bedrock-fastapi` 把 FastAPI 应用接入 Bedrock 运行时。FastAPI 应用仍由你的项目创建和持有；这个包提供三个可以单独使用的构建块：
+
+| 组件 | 作用 |
+| --- | --- |
+| `RequestScopeMiddleware` | 为每个请求在 Bedrock DI 容器中开启独立作用域，`SCOPED` 服务的生命周期就是一次请求 |
+| `DbSessionMiddleware` / `AsyncDbSessionMiddleware` | 为每个请求绑定一个 `db.session` / `db.asession`，请求结束时回滚仍未提交的内容 |
+| `bedrock_exception_handler` | 把模块的 `BedrockExc` 子类转成 HTTP 错误响应 |
+
+## 安装
+
+<Tabs items={['uv', 'pip']}>
+  <Tab value="uv"><CodeBlock code={'uv add bedrock-fastapi fastapi uvicorn'} lang={'bash'} /></Tab>
+  <Tab value="pip"><CodeBlock code={'pip install bedrock-fastapi fastapi uvicorn'} lang={'bash'} /></Tab>
+</Tabs>
+
+`bedrock-fastapi` 需要 Python 3.12+，会安装 `bedrock-core` 和 Starlette。FastAPI 本身以及 Uvicorn 等 ASGI 服务器属于应用自己的依赖。要使用异步数据库 session，还需安装对应数据库的驱动，例如 `bedrock-core[async-sqlite]` 或 `bedrock-core[async-postgresql]`。
+
+## 项目结构
+
+HTTP 代码放在 Bedrock 模块之外，即 [模块解剖](/docs/guides/module-anatomy) 中所说的适配器层。模块不导入 FastAPI。
+
+```text
+src/shop/
+├── inventory/                 # Bedrock 模块：不含 HTTP 代码
+│   ├── manifest.yaml
+│   ├── models.py
+│   ├── entities.py
+│   ├── exc.py
+│   └── service.py
+└── adapters/
+    └── http/
+        ├── app.py             # 创建 FastAPI 应用
+        └── inventory/
+            ├── routes.py      # APIRouter：请求 -> entity -> service -> 响应
+            ├── schemas.py     # HTTP 请求/响应模型
+            └── errors.py      # inventory 异常 -> HTTP 状态码
+```
+
+## 创建应用
+
+`app.py` 初始化数据库，在 FastAPI 的 lifespan 中启动 Bedrock 运行时，并添加各组件：
+
+```python
+# shop/adapters/http/app.py
+from contextlib import asynccontextmanager
+
+import bedrock
+from bedrock.database import db
+from bedrock.exc import BedrockExc
+from bedrock_fastapi import AsyncDbSessionMiddleware, RequestScopeMiddleware, bedrock_exception_handler
+from fastapi import FastAPI
+
+from .inventory import errors as inventory_errors
+from .inventory.routes import router as inventory_router
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    db.init()
+    await bedrock.asetup("shop.inventory")
+    try:
+        yield
+    finally:
+        await bedrock.ashutdown()  # 先停止模块，再关闭数据库 engine
+
+
+app = FastAPI(lifespan=lifespan)
+app.add_middleware(AsyncDbSessionMiddleware)
+app.add_middleware(RequestScopeMiddleware)
+app.add_exception_handler(BedrockExc, bedrock_exception_handler({**inventory_errors.STATUS_CODES}))
+app.include_router(inventory_router)
+```
+
+- lifespan 运行在 FastAPI 的事件循环中，因此使用 `bedrock.asetup()` / `bedrock.ashutdown()`。
+- `db.init()` 读取 `DATABASE_*` 环境变量（见 [数据库](/docs/guides/database)）。在任何请求访问数据库之前调用它。
+- 对这些组件来说，`add_middleware` 的调用顺序无关紧要。
+
+## 编写模块和路由
+
+模块的 service 使用 entity 和已绑定的 session，不了解 HTTP。
+
+```python
+# shop/inventory/service.py
+from bedrock.database import db
+from sqlalchemy import select
+
+from .entities import Item, ItemCreate
+from .exc import ItemConflict, ItemNotFound
+from .models import ItemModel
+
+
+class InventoryService:
+    async def acreate_item(self, data: ItemCreate) -> Item:
+        if await db.asession.scalar(select(ItemModel).where(ItemModel.sku == data.sku)) is not None:
+            raise ItemConflict()
+        model = ItemModel(**data.model_dump())
+        db.asession.add(model)
+        await db.asession.flush()  # 分配 model.id
+        item = Item.model_validate(model, from_attributes=True)  # 在提交前读取：提交会让已加载的属性过期
+        await db.asession.commit()
+        return item
+
+    async def aget_item(self, item_id: int) -> Item:
+        model = await db.asession.get(ItemModel, item_id)
+        if model is None:
+            raise ItemNotFound()
+        return Item.model_validate(model, from_attributes=True)
+
+
+inventory_service = InventoryService()
+```
+
+`Item.model_validate(model, from_attributes=True)` 按属性名从 ORM 对象复制 `Item` 的每个字段，新增列时不用再维护手写的映射函数。它会读取每个字段，因此异步代码中要在 `commit()` 之前调用；也不要在 entity 上声明尚未加载的关系字段：过期或延迟加载的属性在这里无法加载，校验会以 `ValidationError` 失败。
+
+适配器负责在 HTTP 和 service 之间转换：
+
+```python
+# shop/adapters/http/inventory/routes.py
+from fastapi import APIRouter
+
+from shop.inventory.entities import ItemCreate
+from shop.inventory.service import inventory_service
+
+from .schemas import ItemIn, ItemOut
+
+router = APIRouter(prefix="/items", tags=["inventory"])
+
+
+@router.post("", status_code=201)
+async def create_item(body: ItemIn) -> ItemOut:
+    item = await inventory_service.acreate_item(ItemCreate(sku=body.sku, name=body.name))
+    return ItemOut(**item.model_dump())
+
+
+@router.get("/{item_id}")
+async def get_item(item_id: int) -> ItemOut:
+    item = await inventory_service.aget_item(item_id)
+    return ItemOut(**item.model_dump())
+```
+
+```python
+# shop/adapters/http/inventory/errors.py
+from shop.inventory.exc import InventoryError, ItemConflict, ItemNotFound
+
+STATUS_CODES = {InventoryError: 400, ItemNotFound: 404, ItemConflict: 409}
+```
+
+`schemas.py` 中是 HTTP 请求体和响应体使用的普通 Pydantic 模型（`ItemIn`、`ItemOut`）。entity 留在模块内。
+
+## 运行
+
+```bash
+export DATABASE_SCHEMA=shop.db DATABASE_ASYNC_DRIVER=aiosqlite
+uvicorn shop.adapters.http.app:app
+```
+
+对外提供服务前先应用迁移，例如 `bedrock db upgrade shop.inventory`（见 [CLI 参考](/docs/guides/cli)）。之后用已存在的 SKU 调用 `POST /items` 会返回 `409 {"detail": "An item with this SKU already exists."}`，`GET /items/999` 会返回 `404 {"detail": "Item not found."}`。
+
+## 请求作用域
+
+`RequestScopeMiddleware` 把每个 HTTP 请求和 WebSocket 连接放在全局 `bedrock.di.container` 的 `container.scope("request")` 中。以 `Lifetime.SCOPED` 注册的服务在每个请求中解析为同一个实例；请求结束时，如果实例有 `close()` 方法就会被调用。
+
+```python
+# shop/inventory/bootstrap.py
+from bedrock.di import Container, Lifetime
+
+from .audit import RequestAudit
+
+
+def on_load(*, container: Container, **kwargs: object) -> None:
+    container.register(RequestAudit, factory=RequestAudit, lifetime=Lifetime.SCOPED)
+```
+
+```python
+# shop/adapters/http/inventory/routes.py
+from bedrock.di import container
+from fastapi import Depends
+
+
+def get_audit() -> RequestAudit:
+    return container.resolve(RequestAudit)
+
+
+@router.post("", status_code=201)
+async def create_item(body: ItemIn, audit: RequestAudit = Depends(get_audit)) -> ItemOut:
+    ...
+```
+
+在任何依赖或端点中（同步或异步）解析 scoped 服务，得到的都是本次请求的实例。请使用中间件，而不是在 FastAPI 依赖中进入 `container.scope()`：FastAPI 在工作线程中运行同步（`def`）依赖，在那里进入的作用域会在清理时失败，报 `ValueError: <Token ...> was created in a different Context`。
+
+## 数据库 Session
+
+`DbSessionMiddleware`（同步 `db.session`）和 `AsyncDbSessionMiddleware`（异步 `db.asession`）把每个 HTTP 请求放在 `db.session_scope()` / `db.asession_scope()` 中运行。WebSocket 连接和 lifespan 事件直接透传。请求第一次使用 session 之前不会打开数据库连接。
+
+**与 Bedrock 其他地方一样，由 service 负责事务。**service 使用已绑定的 session 并自己提交。中间件不会提交；请求结束时仍未提交的内容（例如 service 在提交前抛出异常）会被回滚。
+
+- **不要在 service 中开启 `db.session_scope()` 或 `db.asession_scope()`。**请求内已经绑定了 session，它们会抛出 `RuntimeError`。没有中间件的 worker、CLI 命令和脚本自己开启作用域，再调用同一个 service。
+- **每次提交都是最终的。**一个请求调用多个各自提交的 service 时，后面的出错不会撤销前面已提交的内容。多个写入必须一起成功或失败时，把它们放在同一个只提交一次的 service 方法中。
+- **没人提交的写入会被静默丢弃。**响应仍可能是成功。
+- **异步提交前先读取需要的数据。**提交会让已加载的属性过期，读取 `AsyncSession` 对象上已过期的属性会抛出 `MissingGreenlet`。像上面的 service 那样：先 flush，构造 entity，再提交。
+- **不应与请求共享事务的旁路事务**（例如审计日志）使用 `db.independent_session()` / `db.aindependent_session()`。
+- **不要在并发的 task 或线程之间共享请求 session**（`asyncio.gather`、`create_task`、线程池）。SQLAlchemy session 不支持并发使用；每个并发分支使用自己的 `db.aindependent_session()` / `db.independent_session()`。
+- **session 要与端点类型匹配。**同步 `def` 端点在线程池中运行，可以使用 `db.session`。`async def` 端点请使用 `AsyncDbSessionMiddleware` 和 `db.asession`；同步 session 会阻塞事件循环。
+- **两个中间件可以同时安装。**它们绑定各自独立的 session 和事务，因此通过 `db.session` 和 `db.asession` 的写入不构成一个原子操作。
+- 如果没有调用 `db.init()`，每个请求都会因 `DatabaseNotConfiguredError` 失败。首个异步请求会创建异步 engine，需要设置 `DATABASE_ASYNC_DRIVER`。
+
+session 必须由中间件绑定：同步依赖或端点自行创建 `db.session` 时，是在工作线程的复制上下文中创建的，下一个依赖会拿到不同的 session，请求结束时也没有代码关闭它。
+
+## 错误响应
+
+`bedrock_exception_handler(status_codes)` 构建一个用于 `app.add_exception_handler(BedrockExc, ...)` 的处理器：
+
+- 查找沿抛出异常的类层次进行，因此映射模块的基础异常（`InventoryError`）就覆盖了它的所有子类，最具体的映射优先。
+- 已映射的异常返回 `{"detail": exc.detail}` 和对应状态码，响应体形状与 FastAPI 的 `HTTPException` 相同。
+- 未映射的 `BedrockExc` 会被重新抛出：Starlette 记录它并返回不暴露 `detail` 的通用 500。这一点很重要，因为 `ImproperlyConfigured` 等运行时错误也继承自 `BedrockExc`。
+- 只应答 HTTP 请求。在 WebSocket 路由上，所有异常都会被重新抛出，因为已 accept 的连接无法再接收 HTTP 错误响应；需要特定关闭码时，请在路由中自行关闭连接。
+
+每个模块的映射放在 `adapters/http/<module>/errors.py`，在 `app.py` 中合并。
+
+## API 参考
+
+| 名称 | 签名 | 说明 |
+| --- | --- | --- |
+| `RequestScopeMiddleware` | `RequestScopeMiddleware(app)` | ASGI 中间件；HTTP 和 WebSocket |
+| `DbSessionMiddleware` | `DbSessionMiddleware(app)` | ASGI 中间件；仅 HTTP；同步 `db.session` |
+| `AsyncDbSessionMiddleware` | `AsyncDbSessionMiddleware(app)` | ASGI 中间件；仅 HTTP；`db.asession` |
+| `bedrock_exception_handler` | `bedrock_exception_handler(status_codes: Mapping[type[BedrockExc], int])` | 返回用于 `add_exception_handler` 的异步处理器 |
+
+使用 `app.add_middleware(Middleware)` 注册中间件。这个包不提供 lifespan 辅助函数、路由发现或 schema 生成：这些留给你的应用。

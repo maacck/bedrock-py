@@ -148,11 +148,14 @@ uv run pytest packages/bedrock/tests/ -v
 
 # Run specific test file
 uv run pytest packages/bedrock/tests/test_signal.py
+
+# Run the integration tests
+uv run pytest integrations/fastapi/tests/ integrations/celery/tests/
 ```
 
 ### Writing Tests
 
-- Place tests in `packages/bedrock/tests/`
+- Place tests in `packages/bedrock/tests/`, or in `integrations/<framework>/tests/` for an integration
 - Name test files `test_*.py`
 - Use `pytest.mark.asyncio` for async tests
 - Use fixtures for shared setup
@@ -209,13 +212,15 @@ class TestFeature:
 
 Pushing a `vX.Y.Z` tag runs `.github/workflows/release.yml`: it checks the tag against the `bedrock-core`
 version, publishes to PyPI, and uses the matching `CHANGELOG.md` section as the GitHub release notes.
+Integrations under `integrations/` are versioned and released on their own; see
+[Releasing an integration](#releasing-an-integration).
 
 ### 1. Alignment Check
 
 List what changed since the last release:
 
 ```bash
-PREV=$(git tag --sort=-v:refname | head -n 1)
+PREV=$(git tag -l 'v*' --sort=-v:refname | head -n 1)
 git log --oneline "$PREV"..HEAD
 git diff --stat "$PREV"..HEAD -- packages/*/src
 ```
@@ -241,11 +246,33 @@ cd docs-web && npm run build
 
 1. Rename `## [Unreleased]` to `## [X.Y.Z] - YYYY-MM-DD` in `CHANGELOG.md`.
 2. Set `version` in `pyproject.toml`, `packages/bedrock/pyproject.toml`, and
-   `packages/bedrock-cli/pyproject.toml`, then run `uv lock`.
+   `packages/bedrock-cli/pyproject.toml`, then run `uv lock`. Set the same version in `metadata.bedrock-core` of
+   `skills/bedrock/SKILL.md` and `metadata.bedrock-cli` of `skills/bedrock-cli/SKILL.md`; the `Skill versions`
+   CI job fails until they match. The docs site header reads the version from `packages/bedrock/pyproject.toml`.
 3. Raise `bedrock-core>=` in `packages/bedrock-cli/src/bedrock_cli/templates/workspace/pyproject.toml.j2`
    when generated projects need this release.
 4. Add a new minor line to the supported versions in `SECURITY.md`.
 5. Commit as `chore(release): prepare vX.Y.Z`, merge to `main`, then tag that commit on `main` and push the tag.
+
+### Releasing an integration
+
+Each package in `integrations/<framework>/` (published as `bedrock-<framework>`) has its own version and
+`CHANGELOG.md`. `.github/workflows/integrations-ci.yml` tests and builds every integration on pull requests
+that touch `integrations/` or `packages/bedrock/`, so a core change that breaks an integration fails there.
+
+1. Check that the integration's `CHANGELOG.md` `[Unreleased]` section, its Web Doc page under
+   `docs-web/content/docs/{en,zh}/integrations/`, and its `README.md` match the code.
+2. Rename `## [Unreleased]` to `## [X.Y.Z] - YYYY-MM-DD` in `integrations/<framework>/CHANGELOG.md`.
+3. Set `version` in `integrations/<framework>/pyproject.toml`. If the release needs newer core behavior, raise
+   its `bedrock-core>=` requirement to a published core version. Run `uv lock`.
+4. Commit as `chore(release): prepare bedrock-<framework> vX.Y.Z` and merge to `main`.
+5. Tag that commit `bedrock-<framework>-vX.Y.Z` (for example `bedrock-fastapi-v0.1.0`) and push the tag.
+   `.github/workflows/integrations-release.yml` checks the tag against the package version, publishes that
+   package to PyPI, and creates a GitHub release from the matching `CHANGELOG.md` section without marking it
+   as the latest release.
+
+The first release of a new integration needs a pending trusted publisher on PyPI for the package, with
+workflow `integrations-release.yml` and environment `pypi`.
 
 ## Reporting Issues
 

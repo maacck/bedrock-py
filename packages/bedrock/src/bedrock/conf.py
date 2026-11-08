@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import threading
+import weakref
 from collections.abc import Callable
 from typing import Any, TypeVar
 
 from pydantic_settings import BaseSettings
 
 T = TypeVar("T", bound=BaseSettings)
+
+# Every live proxy, keyed by id. ``bedrock.testing`` drops their cached settings between tests.
+# A WeakSet would hash the proxy, and ``SettingsProxy.__hash__`` instantiates the wrapped settings.
+_PROXIES: weakref.WeakValueDictionary[int, SettingsProxy] = weakref.WeakValueDictionary()
 
 
 class SettingsProxy:
@@ -35,6 +40,7 @@ class SettingsProxy:
         object.__setattr__(self, "_factory", factory)
         object.__setattr__(self, "_wrapped", None)
         object.__setattr__(self, "_lock", threading.Lock())
+        _PROXIES[id(self)] = self
 
     def _setup(self) -> None:
         """Instantiate the wrapped settings object if not already done (double-checked locking)."""

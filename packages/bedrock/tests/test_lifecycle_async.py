@@ -7,9 +7,9 @@ import builtins
 import gc
 import threading
 from collections.abc import Callable, Iterator
-from pathlib import Path
 from typing import Any
 
+import bedrock
 import pytest
 from bedrock.module import (
     ModuleAsyncRequiredError,
@@ -19,8 +19,7 @@ from bedrock.module import (
     ModuleStartupRollbackError,
 )
 from bedrock.module.signals import module_loaded
-
-from tests.helpers import make_fake_module
+from bedrock.testing.modules import ModuleFactory
 
 pytestmark = pytest.mark.filterwarnings(
     "error::RuntimeWarning",
@@ -134,14 +133,14 @@ def gates() -> dict[tuple[str, str], Callable[[], Any]]:
     return builtins._hook_gates  # type: ignore[attr-defined, no-any-return]
 
 
-def _chain(root: Path, *names: str) -> None:
+def _chain(factory: ModuleFactory, *names: str) -> None:
     """Create modules where each name depends on the one before it."""
     previous: str | None = None
     for name in names:
         manifest: dict[str, Any] = {"title": name, "version": "1"}
         if previous is not None:
             manifest["depends_on"] = [previous]
-        make_fake_module(root, name, manifest=manifest, bootstrap=_BOOTSTRAP)
+        factory(name, manifest=manifest, bootstrap=_BOOTSTRAP)
         previous = name
 
 
@@ -164,9 +163,9 @@ class TestStartupAndShutdownOrder:
     @pytest.mark.parametrize("mode", MODES)
     @pytest.mark.parametrize("kind", KINDS)
     def test_uniform_graph(
-        self, fake_package: Path, kinds: dict[str, str], hook_state: list[str], mode: str, kind: str
+        self, module_factory: ModuleFactory, kinds: dict[str, str], hook_state: list[str], mode: str, kind: str
     ) -> None:
-        _chain(fake_package, "life_a", "life_b", "life_c")
+        _chain(module_factory, "life_a", "life_b", "life_c")
         kinds.update({"life_a": kind, "life_b": kind, "life_c": kind})
         registry = ModuleRegistry()
 
@@ -185,11 +184,12 @@ class TestStartupAndShutdownOrder:
             "on_shutdown:life_a",
         ]
         assert set(_states(registry).values()) == {ModuleLifecycleState.SHUTDOWN}
-        assert not registry._adapter.is_open
 
     @pytest.mark.parametrize("mode", MODES)
-    def test_mixed_graph(self, fake_package: Path, kinds: dict[str, str], hook_state: list[str], mode: str) -> None:
-        _chain(fake_package, "mix_a", "mix_b", "mix_c", "mix_d")
+    def test_mixed_graph(
+        self, module_factory: ModuleFactory, kinds: dict[str, str], hook_state: list[str], mode: str
+    ) -> None:
+        _chain(module_factory, "mix_a", "mix_b", "mix_c", "mix_d")
         kinds.update({"mix_a": "sync", "mix_b": "async", "mix_c": "awaitable", "mix_d": "sync"})
         registry = ModuleRegistry()
 
@@ -211,9 +211,9 @@ class TestStartupAndShutdownOrder:
 
     @pytest.mark.asyncio
     async def test_async_entrypoints_in_one_running_loop(
-        self, fake_package: Path, kinds: dict[str, str], hook_state: list[str]
+        self, module_factory: ModuleFactory, kinds: dict[str, str], hook_state: list[str]
     ) -> None:
-        _chain(fake_package, "arun_a", "arun_b", "arun_c")
+        _chain(module_factory, "arun_a", "arun_b", "arun_c")
         kinds.update({"arun_a": "async", "arun_b": "sync", "arun_c": "awaitable"})
         registry = ModuleRegistry()
         loop = asyncio.get_running_loop()
@@ -231,8 +231,8 @@ class TestStartupAndShutdownOrder:
         assert threads[("on_load", "arun_b")] != main_thread
         assert hook_state[-3:] == ["on_shutdown:arun_c", "on_shutdown:arun_b", "on_shutdown:arun_a"]
 
-    def test_signals_run_in_both_modes(self, fake_package: Path) -> None:
-        _chain(fake_package, "sig_a")
+    def test_signals_run_in_both_modes(self, module_factory: ModuleFactory) -> None:
+        _chain(module_factory, "sig_a")
         seen: list[str] = []
 
         def sync_receiver(sender: Any, **kwargs: Any) -> None:
@@ -254,9 +254,11 @@ class TestStartupAndShutdownOrder:
         assert sorted(seen) == ["async", "async", "sync", "sync"]
 
 
-class TestAdapterLoopLifetime:
-    def test_one_loop_serves_startup_and_shutdown_then_closes(self, fake_package: Path, kinds: dict[str, str]) -> None:
-        _chain(fake_package, "loop_a", "loop_b")
+class TestRuntimeLoop:
+    def test_one_loop_serves_startup_shutdown_and_run_async(
+        self, module_factory: ModuleFactory, kinds: dict[str, str]
+    ) -> None:
+        _chain(module_factory, "loop_a", "loop_b")
         kinds.update({"loop_a": "async", "loop_b": "async"})
         registry = ModuleRegistry()
 
@@ -264,50 +266,23 @@ class TestAdapterLoopLifetime:
         loops = builtins._hook_loops  # type: ignore[attr-defined]
         startup_loop = loops[("on_load", "loop_a")]
         assert startup_loop is loops[("ready", "loop_b")]
-        assert not startup_loop.is_closed()
+        assert bedrock.run_async(_running_loop()) is startup_loop
 
         registry.shutdown()
 
         assert loops[("on_shutdown", "loop_a")] is startup_loop
-        assert startup_loop.is_closed()
-        assert not registry._adapter.is_open
+        # The loop is process-wide: another registry or run_async() may still hold clients on it.
+        assert not startup_loop.is_closed()
 
-    def test_loop_stays_open_while_a_module_is_not_shut_down(
-        self, fake_package: Path, kinds: dict[str, str], failures: set[tuple[str, str]]
-    ) -> None:
-        _chain(fake_package, "keep_a", "keep_b")
-        kinds.update({"keep_a": "async", "keep_b": "async"})
-        failures.add(("on_shutdown", "keep_b"))
-        registry = ModuleRegistry()
-        registry.populate(["keep_b"])
 
-        with pytest.raises(ModuleLifecycleError):
-            registry.shutdown()
-        assert registry._adapter.is_open
-
-        failures.clear()
-        registry.shutdown()
-        assert not registry._adapter.is_open
-
-    def test_failed_first_install_does_not_keep_a_loop(
-        self, fake_package: Path, kinds: dict[str, str], failures: set[tuple[str, str]]
-    ) -> None:
-        _chain(fake_package, "fail_a")
-        kinds["fail_a"] = "async"
-        failures.add(("on_load", "fail_a"))
-        registry = ModuleRegistry()
-
-        with pytest.raises(ModuleLifecycleError):
-            registry.install("fail_a")
-
-        assert registry.list_installed() == []
-        assert not registry._adapter.is_open
+async def _running_loop() -> asyncio.AbstractEventLoop:
+    return asyncio.get_running_loop()
 
 
 class TestSyncEntrypointsInsideARunningLoop:
     @pytest.mark.asyncio
-    async def test_all_sync_graph_still_works(self, fake_package: Path, hook_state: list[str]) -> None:
-        _chain(fake_package, "inloop_a", "inloop_b")
+    async def test_all_sync_graph_still_works(self, module_factory: ModuleFactory, hook_state: list[str]) -> None:
+        _chain(module_factory, "inloop_a", "inloop_b")
         registry = ModuleRegistry()
 
         registry.populate(["inloop_b"])
@@ -318,9 +293,9 @@ class TestSyncEntrypointsInsideARunningLoop:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("kind", ["async", "awaitable"])
     async def test_install_names_the_async_entrypoint_and_rolls_back(
-        self, fake_package: Path, kinds: dict[str, str], hook_state: list[str], kind: str
+        self, module_factory: ModuleFactory, kinds: dict[str, str], hook_state: list[str], kind: str
     ) -> None:
-        _chain(fake_package, "loopinst_a", "loopinst_b")
+        _chain(module_factory, "loopinst_a", "loopinst_b")
         kinds["loopinst_b"] = kind
         registry = ModuleRegistry()
 
@@ -336,8 +311,10 @@ class TestSyncEntrypointsInsideARunningLoop:
         await registry.ashutdown()
 
     @pytest.mark.asyncio
-    async def test_populate_names_the_async_entrypoint(self, fake_package: Path, kinds: dict[str, str]) -> None:
-        _chain(fake_package, "looppop_a")
+    async def test_populate_names_the_async_entrypoint(
+        self, module_factory: ModuleFactory, kinds: dict[str, str]
+    ) -> None:
+        _chain(module_factory, "looppop_a")
         kinds["looppop_a"] = "async"
 
         with pytest.raises(ModuleAsyncRequiredError, match=r"apopulate"):
@@ -345,9 +322,9 @@ class TestSyncEntrypointsInsideARunningLoop:
 
     @pytest.mark.asyncio
     async def test_mark_ready_and_shutdown_fail_before_any_hook_runs(
-        self, fake_package: Path, kinds: dict[str, str], hook_state: list[str]
+        self, module_factory: ModuleFactory, kinds: dict[str, str], hook_state: list[str]
     ) -> None:
-        _chain(fake_package, "lm_a", "lm_b")
+        _chain(module_factory, "lm_a", "lm_b")
         kinds["lm_b"] = "async"
         registry = ModuleRegistry()
         await registry.ainstall("lm_b")
@@ -370,9 +347,9 @@ class TestSyncEntrypointsInsideARunningLoop:
 
     @pytest.mark.asyncio
     async def test_hook_returning_an_awaitable_is_discarded_without_a_leak(
-        self, fake_package: Path, kinds: dict[str, str]
+        self, module_factory: ModuleFactory, kinds: dict[str, str]
     ) -> None:
-        _chain(fake_package, "ret_a")
+        _chain(module_factory, "ret_a")
         kinds["ret_a"] = "awaitable"
         registry = ModuleRegistry()
         await registry.ainstall("ret_a")
@@ -390,8 +367,8 @@ class TestSyncEntrypointsInsideARunningLoop:
         assert _states(registry) == {"ret_a": ModuleLifecycleState.SHUTDOWN}
 
     @pytest.mark.asyncio
-    async def test_async_receiver_is_not_called_from_sync_send(self, fake_package: Path) -> None:
-        _chain(fake_package, "rcv_a")
+    async def test_async_receiver_is_not_called_from_sync_send(self, module_factory: ModuleFactory) -> None:
+        _chain(module_factory, "rcv_a")
         called: list[str] = []
 
         async def receiver(sender: Any, **kwargs: Any) -> None:
@@ -414,14 +391,14 @@ class TestSharedStateMachine:
     @pytest.mark.parametrize("kind", KINDS)
     def test_install_failure_rolls_back_introduced_modules_only(
         self,
-        fake_package: Path,
+        module_factory: ModuleFactory,
         kinds: dict[str, str],
         failures: set[tuple[str, str]],
         hook_state: list[str],
         mode: str,
         kind: str,
     ) -> None:
-        _chain(fake_package, "atom_a", "atom_b", "atom_c")
+        _chain(module_factory, "atom_a", "atom_b", "atom_c")
         kinds.update({"atom_a": kind, "atom_b": kind, "atom_c": kind})
         registry = ModuleRegistry()
         _call(registry, mode, "install", "atom_a")
@@ -436,9 +413,9 @@ class TestSharedStateMachine:
 
     @pytest.mark.parametrize("mode", MODES)
     def test_rollback_failure_aggregates_every_failure(
-        self, fake_package: Path, kinds: dict[str, str], failures: set[tuple[str, str]], mode: str
+        self, module_factory: ModuleFactory, kinds: dict[str, str], failures: set[tuple[str, str]], mode: str
     ) -> None:
-        _chain(fake_package, "agg_a", "agg_b", "agg_c")
+        _chain(module_factory, "agg_a", "agg_b", "agg_c")
         kinds.update({"agg_a": "async", "agg_b": "awaitable", "agg_c": "sync"})
         failures.update({("on_load", "agg_c"), ("on_shutdown", "agg_b"), ("on_shutdown", "agg_a")})
         registry = ModuleRegistry()
@@ -456,13 +433,13 @@ class TestSharedStateMachine:
     @pytest.mark.parametrize("mode", MODES)
     def test_shutdown_attempts_everything_and_is_idempotent(
         self,
-        fake_package: Path,
+        module_factory: ModuleFactory,
         kinds: dict[str, str],
         failures: set[tuple[str, str]],
         hook_state: list[str],
         mode: str,
     ) -> None:
-        _chain(fake_package, "down_a", "down_b", "down_c")
+        _chain(module_factory, "down_a", "down_b", "down_c")
         kinds.update({"down_a": "async", "down_b": "async", "down_c": "awaitable"})
         registry = ModuleRegistry()
         _call(registry, mode, "populate", ["down_c"])
@@ -490,13 +467,13 @@ class TestSharedStateMachine:
     @pytest.mark.parametrize("mode", MODES)
     def test_ready_failure_is_resumable(
         self,
-        fake_package: Path,
+        module_factory: ModuleFactory,
         kinds: dict[str, str],
         failures: set[tuple[str, str]],
         hook_state: list[str],
         mode: str,
     ) -> None:
-        _chain(fake_package, "rdy_a", "rdy_b")
+        _chain(module_factory, "rdy_a", "rdy_b")
         kinds.update({"rdy_a": "async", "rdy_b": "async"})
         failures.add(("ready", "rdy_b"))
         registry = ModuleRegistry()
@@ -513,8 +490,8 @@ class TestSharedStateMachine:
         assert registry.ready is True
 
     @pytest.mark.parametrize("mode", MODES)
-    def test_install_after_ready_leaves_new_module_loaded(self, fake_package: Path, mode: str) -> None:
-        _chain(fake_package, "late_a", "late_b")
+    def test_install_after_ready_leaves_new_module_loaded(self, module_factory: ModuleFactory, mode: str) -> None:
+        _chain(module_factory, "late_a", "late_b")
         registry = ModuleRegistry()
         _call(registry, mode, "populate", ["late_a"])
 
@@ -526,8 +503,8 @@ class TestSharedStateMachine:
         assert registry._app_configs["late_b"].lifecycle_state is ModuleLifecycleState.READY
 
     @pytest.mark.parametrize("mode", MODES)
-    def test_populate_reaches_ready(self, fake_package: Path, mode: str) -> None:
-        _chain(fake_package, "same_a")
+    def test_populate_reaches_ready(self, module_factory: ModuleFactory, mode: str) -> None:
+        _chain(module_factory, "same_a")
         registry = ModuleRegistry()
         _call(registry, mode, "populate", ["same_a"])
         assert registry.get("same_a").lifecycle_state is ModuleLifecycleState.READY
@@ -536,9 +513,9 @@ class TestSharedStateMachine:
 class TestOperationGuards:
     @pytest.mark.asyncio
     async def test_async_hook_cannot_start_ready_or_shutdown_during_install(
-        self, fake_package: Path, kinds: dict[str, str], actions: dict[tuple[str, str], Callable[..., Any]]
+        self, module_factory: ModuleFactory, kinds: dict[str, str], actions: dict[tuple[str, str], Callable[..., Any]]
     ) -> None:
-        _chain(fake_package, "grd_a")
+        _chain(module_factory, "grd_a")
         kinds["grd_a"] = "async"
         actions[("on_load", "grd_a")] = lambda registry: registry.mark_ready()
         registry = ModuleRegistry()
@@ -549,9 +526,9 @@ class TestOperationGuards:
 
     @pytest.mark.asyncio
     async def test_async_hook_awaiting_async_entrypoint_is_rejected(
-        self, fake_package: Path, kinds: dict[str, str]
+        self, module_factory: ModuleFactory, kinds: dict[str, str]
     ) -> None:
-        _chain(fake_package, "grd2_a")
+        _chain(module_factory, "grd2_a")
         kinds["grd2_a"] = "async"
         registry = ModuleRegistry()
         builtins._hook_gates[("on_load", "grd2_a")] = registry.ashutdown  # type: ignore[attr-defined]
@@ -562,9 +539,9 @@ class TestOperationGuards:
 
     @pytest.mark.asyncio
     async def test_worker_thread_started_by_a_hook_is_recognized_as_reentrant(
-        self, fake_package: Path, kinds: dict[str, str], actions: dict[tuple[str, str], Callable[..., Any]]
+        self, module_factory: ModuleFactory, kinds: dict[str, str], actions: dict[tuple[str, str], Callable[..., Any]]
     ) -> None:
-        _chain(fake_package, "thr_a")
+        _chain(module_factory, "thr_a")
         actions[("on_load", "thr_a")] = lambda registry: registry.mark_ready()
         registry = ModuleRegistry()
 
@@ -573,10 +550,14 @@ class TestOperationGuards:
 
     @pytest.mark.asyncio
     async def test_nested_ainstall_of_a_new_module_from_an_async_hook_is_atomic(
-        self, fake_package: Path, kinds: dict[str, str], hook_state: list[str], failures: set[tuple[str, str]]
+        self,
+        module_factory: ModuleFactory,
+        kinds: dict[str, str],
+        hook_state: list[str],
+        failures: set[tuple[str, str]],
     ) -> None:
-        make_fake_module(fake_package, "nest_inner", manifest={"title": "i", "version": "1"}, bootstrap=_BOOTSTRAP)
-        make_fake_module(fake_package, "nest_outer", manifest={"title": "o", "version": "1"}, bootstrap=_BOOTSTRAP)
+        module_factory("nest_inner", manifest={"title": "i", "version": "1"}, bootstrap=_BOOTSTRAP)
+        module_factory("nest_outer", manifest={"title": "o", "version": "1"}, bootstrap=_BOOTSTRAP)
         kinds.update({"nest_inner": "async", "nest_outer": "async"})
         registry = ModuleRegistry()
 
@@ -598,10 +579,10 @@ class TestOperationGuards:
 
     @pytest.mark.asyncio
     async def test_concurrent_sibling_ainstall_is_rejected_before_it_changes_membership(
-        self, fake_package: Path, kinds: dict[str, str], hook_state: list[str]
+        self, module_factory: ModuleFactory, kinds: dict[str, str], hook_state: list[str]
     ) -> None:
         for name in ("sib_parent", "sib_bad", "sib_ok"):
-            make_fake_module(fake_package, name, manifest={"title": name, "version": "1"}, bootstrap=_BOOTSTRAP)
+            module_factory(name, manifest={"title": name, "version": "1"}, bootstrap=_BOOTSTRAP)
             kinds[name] = "async"
         registry = ModuleRegistry()
         release = asyncio.Event()
@@ -631,10 +612,10 @@ class TestOperationGuards:
 
     @pytest.mark.asyncio
     async def test_concurrent_tasks_are_serialized(
-        self, fake_package: Path, kinds: dict[str, str], hook_state: list[str]
+        self, module_factory: ModuleFactory, kinds: dict[str, str], hook_state: list[str]
     ) -> None:
-        make_fake_module(fake_package, "ser_a", manifest={"title": "a", "version": "1"}, bootstrap=_BOOTSTRAP)
-        make_fake_module(fake_package, "ser_b", manifest={"title": "b", "version": "1"}, bootstrap=_BOOTSTRAP)
+        module_factory("ser_a", manifest={"title": "a", "version": "1"}, bootstrap=_BOOTSTRAP)
+        module_factory("ser_b", manifest={"title": "b", "version": "1"}, bootstrap=_BOOTSTRAP)
         kinds.update({"ser_a": "async", "ser_b": "async"})
         registry = ModuleRegistry()
         release = asyncio.Event()
@@ -662,9 +643,9 @@ class TestOperationGuards:
 
     @pytest.mark.asyncio
     async def test_concurrent_ashutdown_runs_each_hook_once(
-        self, fake_package: Path, kinds: dict[str, str], hook_state: list[str]
+        self, module_factory: ModuleFactory, kinds: dict[str, str], hook_state: list[str]
     ) -> None:
-        _chain(fake_package, "cs_a", "cs_b")
+        _chain(module_factory, "cs_a", "cs_b")
         kinds.update({"cs_a": "async", "cs_b": "async"})
         registry = ModuleRegistry()
         await registry.apopulate(["cs_b"])
@@ -676,9 +657,9 @@ class TestOperationGuards:
 
     @pytest.mark.asyncio
     async def test_sync_call_from_another_task_on_the_owner_thread_does_not_deadlock(
-        self, fake_package: Path, kinds: dict[str, str]
+        self, module_factory: ModuleFactory, kinds: dict[str, str]
     ) -> None:
-        make_fake_module(fake_package, "dl_a", manifest={"title": "a", "version": "1"}, bootstrap=_BOOTSTRAP)
+        module_factory("dl_a", manifest={"title": "a", "version": "1"}, bootstrap=_BOOTSTRAP)
         kinds["dl_a"] = "async"
         registry = ModuleRegistry()
         entered = asyncio.Event()
@@ -702,10 +683,10 @@ class TestOperationGuards:
         await running
 
     def test_other_thread_waits_for_a_running_async_operation(
-        self, fake_package: Path, kinds: dict[str, str], hook_state: list[str]
+        self, module_factory: ModuleFactory, kinds: dict[str, str], hook_state: list[str]
     ) -> None:
-        make_fake_module(fake_package, "thw_a", manifest={"title": "a", "version": "1"}, bootstrap=_BOOTSTRAP)
-        make_fake_module(fake_package, "thw_b", manifest={"title": "b", "version": "1"}, bootstrap=_BOOTSTRAP)
+        module_factory("thw_a", manifest={"title": "a", "version": "1"}, bootstrap=_BOOTSTRAP)
+        module_factory("thw_b", manifest={"title": "b", "version": "1"}, bootstrap=_BOOTSTRAP)
         kinds.update({"thw_a": "async", "thw_b": "sync"})
         registry = ModuleRegistry()
         entered = threading.Event()
@@ -743,9 +724,9 @@ class TestOperationGuards:
 class TestCancellation:
     @pytest.mark.asyncio
     async def test_cancelled_install_rolls_back_and_releases_the_gate(
-        self, fake_package: Path, kinds: dict[str, str], hook_state: list[str]
+        self, module_factory: ModuleFactory, kinds: dict[str, str], hook_state: list[str]
     ) -> None:
-        _chain(fake_package, "can_a", "can_b")
+        _chain(module_factory, "can_a", "can_b")
         kinds.update({"can_a": "async", "can_b": "async"})
         registry = ModuleRegistry()
         entered = asyncio.Event()
@@ -771,9 +752,9 @@ class TestCancellation:
 
     @pytest.mark.asyncio
     async def test_cancelled_shutdown_can_be_resumed(
-        self, fake_package: Path, kinds: dict[str, str], hook_state: list[str]
+        self, module_factory: ModuleFactory, kinds: dict[str, str], hook_state: list[str]
     ) -> None:
-        _chain(fake_package, "cs2_a", "cs2_b")
+        _chain(module_factory, "cs2_a", "cs2_b")
         kinds.update({"cs2_a": "async", "cs2_b": "async"})
         registry = ModuleRegistry()
         await registry.apopulate(["cs2_b"])
@@ -797,9 +778,11 @@ class TestCancellation:
         assert set(_states(registry).values()) == {ModuleLifecycleState.SHUTDOWN}
 
     @pytest.mark.asyncio
-    async def test_cancelled_waiter_does_not_block_the_gate(self, fake_package: Path, kinds: dict[str, str]) -> None:
-        make_fake_module(fake_package, "cw_a", manifest={"title": "a", "version": "1"}, bootstrap=_BOOTSTRAP)
-        make_fake_module(fake_package, "cw_b", manifest={"title": "b", "version": "1"}, bootstrap=_BOOTSTRAP)
+    async def test_cancelled_waiter_does_not_block_the_gate(
+        self, module_factory: ModuleFactory, kinds: dict[str, str]
+    ) -> None:
+        module_factory("cw_a", manifest={"title": "a", "version": "1"}, bootstrap=_BOOTSTRAP)
+        module_factory("cw_b", manifest={"title": "b", "version": "1"}, bootstrap=_BOOTSTRAP)
         kinds.update({"cw_a": "async", "cw_b": "async"})
         registry = ModuleRegistry()
         entered = asyncio.Event()
@@ -871,9 +854,9 @@ def _pending_tasks() -> list[asyncio.Task[Any]]:
 class TestCancellationDrainsWorkerHooks:
     @pytest.mark.asyncio
     async def test_cancelled_install_waits_for_the_sync_on_load_worker_before_rollback(
-        self, fake_package: Path, hook_state: list[str], actions: dict[tuple[str, str], Callable[..., Any]]
+        self, module_factory: ModuleFactory, hook_state: list[str], actions: dict[tuple[str, str], Callable[..., Any]]
     ) -> None:
-        _chain(fake_package, "drn_a", "drn_b")
+        _chain(module_factory, "drn_a", "drn_b")
         blocker = _BlockingHook()
         actions[("on_load", "drn_b")] = blocker
         registry = ModuleRegistry()
@@ -904,9 +887,9 @@ class TestCancellationDrainsWorkerHooks:
 
     @pytest.mark.asyncio
     async def test_retry_waits_for_the_original_worker_and_never_overlaps_it(
-        self, fake_package: Path, hook_state: list[str], actions: dict[tuple[str, str], Callable[..., Any]]
+        self, module_factory: ModuleFactory, hook_state: list[str], actions: dict[tuple[str, str], Callable[..., Any]]
     ) -> None:
-        _chain(fake_package, "ovl_a", "ovl_b")
+        _chain(module_factory, "ovl_a", "ovl_b")
         blocker = _BlockingHook()
         actions[("on_load", "ovl_b")] = blocker
         registry = ModuleRegistry()
@@ -939,9 +922,9 @@ class TestCancellationDrainsWorkerHooks:
 
     @pytest.mark.asyncio
     async def test_no_hook_effect_lands_after_the_rollback_completed(
-        self, fake_package: Path, hook_state: list[str], actions: dict[tuple[str, str], Callable[..., Any]]
+        self, module_factory: ModuleFactory, hook_state: list[str], actions: dict[tuple[str, str], Callable[..., Any]]
     ) -> None:
-        _chain(fake_package, "late_a", "late_b")
+        _chain(module_factory, "late_a", "late_b")
         late: list[str] = []
 
         def slow_hook(registry: ModuleRegistry) -> None:
@@ -964,9 +947,9 @@ class TestCancellationDrainsWorkerHooks:
 
     @pytest.mark.asyncio
     async def test_cancelled_shutdown_waits_for_the_sync_on_shutdown_worker(
-        self, fake_package: Path, hook_state: list[str], actions: dict[tuple[str, str], Callable[..., Any]]
+        self, module_factory: ModuleFactory, hook_state: list[str], actions: dict[tuple[str, str], Callable[..., Any]]
     ) -> None:
-        _chain(fake_package, "sdn_a", "sdn_b")
+        _chain(module_factory, "sdn_a", "sdn_b")
         registry = ModuleRegistry()
         await registry.apopulate(["sdn_b"])
         blocker = _BlockingHook()
@@ -997,9 +980,9 @@ class TestCancellationDrainsWorkerHooks:
 
     @pytest.mark.asyncio
     async def test_cancelled_shutdown_leaves_the_interrupted_module_retryable(
-        self, fake_package: Path, hook_state: list[str], actions: dict[tuple[str, str], Callable[..., Any]]
+        self, module_factory: ModuleFactory, hook_state: list[str], actions: dict[tuple[str, str], Callable[..., Any]]
     ) -> None:
-        _chain(fake_package, "rty_a", "rty_b")
+        _chain(module_factory, "rty_a", "rty_b")
         registry = ModuleRegistry()
         await registry.apopulate(["rty_b"])
         blocker = _BlockingHook()
@@ -1025,12 +1008,12 @@ class TestCancellationDrainsWorkerHooks:
     @pytest.mark.parametrize("operation", ["install", "shutdown"])
     async def test_awaitable_returned_by_a_sync_hook_is_discarded_after_cancellation(
         self,
-        fake_package: Path,
+        module_factory: ModuleFactory,
         kinds: dict[str, str],
         actions: dict[tuple[str, str], Callable[..., Any]],
         operation: str,
     ) -> None:
-        _chain(fake_package, "aw_a", "aw_b")
+        _chain(module_factory, "aw_a", "aw_b")
         kinds["aw_b"] = "syncawaitable"
         registry = ModuleRegistry()
         blocker = _BlockingHook()
@@ -1054,44 +1037,13 @@ class TestCancellationDrainsWorkerHooks:
         assert _pending_tasks() == []
 
     @pytest.mark.asyncio
-    async def test_cancelled_shutdown_waits_for_the_adapter_loop_to_close(
-        self, fake_package: Path, kinds: dict[str, str], monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        _chain(fake_package, "adp_a")
-        kinds["adp_a"] = "async"
-        registry = ModuleRegistry()
-        await asyncio.to_thread(registry.populate, ["adp_a"])
-        assert registry._adapter.is_open
-        blocker = _BlockingHook()
-        real_close = registry._adapter.close
-
-        def slow_close() -> None:
-            blocker(registry)
-            real_close()
-
-        monkeypatch.setattr(registry._adapter, "close", slow_close)
-        task = asyncio.create_task(registry.ashutdown())
-        await _wait_until(blocker.started.is_set)
-        task.cancel()
-        task.cancel()
-        competitor = asyncio.create_task(registry.ainstall("adp_a"))
-        await _settle()
-
-        assert not task.done()
-        assert not competitor.done()
-
-        blocker.release.set()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-        await asyncio.wait_for(competitor, timeout=5)
-        assert not registry._adapter.is_open
-        assert _pending_tasks() == []
-
-    @pytest.mark.asyncio
     async def test_worker_failure_while_cancelled_does_not_replace_the_cancellation(
-        self, fake_package: Path, actions: dict[tuple[str, str], Callable[..., Any]], failures: set[tuple[str, str]]
+        self,
+        module_factory: ModuleFactory,
+        actions: dict[tuple[str, str], Callable[..., Any]],
+        failures: set[tuple[str, str]],
     ) -> None:
-        _chain(fake_package, "wf_a", "wf_b")
+        _chain(module_factory, "wf_a", "wf_b")
         blocker = _BlockingHook()
         actions[("on_load", "wf_b")] = blocker
         failures.add(("on_load", "wf_b"))
@@ -1108,9 +1060,12 @@ class TestCancellationDrainsWorkerHooks:
 
     @pytest.mark.asyncio
     async def test_rollback_failure_after_cancellation_still_removes_modules(
-        self, fake_package: Path, actions: dict[tuple[str, str], Callable[..., Any]], failures: set[tuple[str, str]]
+        self,
+        module_factory: ModuleFactory,
+        actions: dict[tuple[str, str], Callable[..., Any]],
+        failures: set[tuple[str, str]],
     ) -> None:
-        _chain(fake_package, "rbf_a", "rbf_b")
+        _chain(module_factory, "rbf_a", "rbf_b")
         blocker = _BlockingHook()
         actions[("on_load", "rbf_b")] = blocker
         failures.add(("on_shutdown", "rbf_a"))
@@ -1130,12 +1085,12 @@ class TestCancellationDrainsWorkerHooks:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("signal_name", ["module_loaded", "module_shutdown"])
     async def test_cancelled_operation_waits_for_a_running_sync_receiver(
-        self, fake_package: Path, hook_state: list[str], signal_name: str
+        self, module_factory: ModuleFactory, hook_state: list[str], signal_name: str
     ) -> None:
         from bedrock.module import signals
 
         signal = getattr(signals, signal_name)
-        _chain(fake_package, "rcv_a", "rcv_b")
+        _chain(module_factory, "rcv_a", "rcv_b")
         registry = ModuleRegistry()
         blocker = _BlockingHook()
         later: list[str] = []
@@ -1277,12 +1232,12 @@ class TestRollbackCancellation:
     @pytest.mark.asyncio
     async def test_repeated_cancel_during_coroutine_rollback_still_cleans_every_module(
         self,
-        fake_package: Path,
+        module_factory: ModuleFactory,
         kinds: dict[str, str],
         gates: dict[tuple[str, str], Callable[[], Any]],
         hook_state: list[str],
     ) -> None:
-        _chain(fake_package, "rbc_a", "rbc_b", "rbc_c")
+        _chain(module_factory, "rbc_a", "rbc_b", "rbc_c")
         kinds.update({"rbc_a": "async", "rbc_b": "async", "rbc_c": "async"})
         cleaning = _AsyncBlock()
         gates[("on_load", "rbc_c")] = _hold_forever
@@ -1324,13 +1279,13 @@ class TestRollbackCancellation:
     @pytest.mark.asyncio
     async def test_cancel_during_rollback_after_an_ordinary_install_error_cleans_every_module(
         self,
-        fake_package: Path,
+        module_factory: ModuleFactory,
         kinds: dict[str, str],
         gates: dict[tuple[str, str], Callable[[], Any]],
         failures: set[tuple[str, str]],
         hook_state: list[str],
     ) -> None:
-        _chain(fake_package, "rbe_a", "rbe_b", "rbe_c")
+        _chain(module_factory, "rbe_a", "rbe_b", "rbe_c")
         kinds.update({"rbe_a": "async", "rbe_b": "async", "rbe_c": "async"})
         cleaning = _AsyncBlock()
         gates[("on_shutdown", "rbe_b")] = cleaning
@@ -1363,11 +1318,11 @@ class TestRollbackCancellation:
     @pytest.mark.asyncio
     async def test_repeated_cancel_during_thread_rollback_cleans_every_module(
         self,
-        fake_package: Path,
+        module_factory: ModuleFactory,
         actions: dict[tuple[str, str], Callable[..., Any]],
         hook_state: list[str],
     ) -> None:
-        _chain(fake_package, "rbt_a", "rbt_b", "rbt_c")
+        _chain(module_factory, "rbt_a", "rbt_b", "rbt_c")
         loading, cleaning = _BlockingHook(), _BlockingHook()
         actions[("on_load", "rbt_c")] = loading
         actions[("on_shutdown", "rbt_b")] = cleaning
@@ -1401,12 +1356,12 @@ class TestRollbackCancellation:
     @pytest.mark.asyncio
     async def test_cancel_during_thread_rollback_after_an_ordinary_install_error(
         self,
-        fake_package: Path,
+        module_factory: ModuleFactory,
         actions: dict[tuple[str, str], Callable[..., Any]],
         failures: set[tuple[str, str]],
         hook_state: list[str],
     ) -> None:
-        _chain(fake_package, "rbx_a", "rbx_b", "rbx_c")
+        _chain(module_factory, "rbx_a", "rbx_b", "rbx_c")
         cleaning = _BlockingHook()
         actions[("on_shutdown", "rbx_b")] = cleaning
         failures.add(("on_load", "rbx_c"))
@@ -1428,14 +1383,14 @@ class TestRollbackCancellation:
     @pytest.mark.asyncio
     async def test_failed_cleanup_is_reported_alongside_a_cancellation(
         self,
-        fake_package: Path,
+        module_factory: ModuleFactory,
         kinds: dict[str, str],
         gates: dict[tuple[str, str], Callable[[], Any]],
         failures: set[tuple[str, str]],
         hook_state: list[str],
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        _chain(fake_package, "rbf_a", "rbf_b", "rbf_c")
+        _chain(module_factory, "rbf_a", "rbf_b", "rbf_c")
         kinds.update({"rbf_a": "async", "rbf_b": "async", "rbf_c": "async"})
         gates[("on_load", "rbf_c")] = _hold_forever
         failures.add(("on_shutdown", "rbf_b"))
@@ -1454,13 +1409,13 @@ class TestRollbackCancellation:
     @pytest.mark.asyncio
     async def test_failed_cleanup_after_an_install_error_and_a_cancel_keeps_the_aggregate_as_cause(
         self,
-        fake_package: Path,
+        module_factory: ModuleFactory,
         kinds: dict[str, str],
         gates: dict[tuple[str, str], Callable[[], Any]],
         failures: set[tuple[str, str]],
         hook_state: list[str],
     ) -> None:
-        _chain(fake_package, "rba_a", "rba_b", "rba_c")
+        _chain(module_factory, "rba_a", "rba_b", "rba_c")
         kinds.update({"rba_a": "async", "rba_b": "async", "rba_c": "async"})
         cleaning = _AsyncBlock()
         gates[("on_shutdown", "rba_b")] = cleaning
@@ -1485,13 +1440,13 @@ class TestRollbackCancellation:
     @pytest.mark.asyncio
     async def test_a_cleanup_hook_that_raises_cancellation_keeps_ownership_of_unfinished_modules(
         self,
-        fake_package: Path,
+        module_factory: ModuleFactory,
         kinds: dict[str, str],
         gates: dict[tuple[str, str], Callable[[], Any]],
         failures: set[tuple[str, str]],
         hook_state: list[str],
     ) -> None:
-        _chain(fake_package, "rbo_a", "rbo_b", "rbo_c")
+        _chain(module_factory, "rbo_a", "rbo_b", "rbo_c")
         kinds.update({"rbo_a": "async", "rbo_b": "async", "rbo_c": "async"})
         failures.add(("on_load", "rbo_c"))
 
@@ -1519,9 +1474,9 @@ class TestRollbackCancellation:
 
     @pytest.mark.asyncio
     async def test_cancel_after_install_succeeded_in_rollback_free_path_is_unchanged(
-        self, fake_package: Path, kinds: dict[str, str], gates: dict[tuple[str, str], Callable[[], Any]]
+        self, module_factory: ModuleFactory, kinds: dict[str, str], gates: dict[tuple[str, str], Callable[[], Any]]
     ) -> None:
-        _chain(fake_package, "rbn_a", "rbn_b")
+        _chain(module_factory, "rbn_a", "rbn_b")
         kinds.update({"rbn_a": "async", "rbn_b": "async"})
         entered = _AsyncBlock()
         gates[("on_load", "rbn_b")] = entered

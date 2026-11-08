@@ -5,12 +5,25 @@ description: >
   Use this skill whenever working with Bedrock modules' manifests, services, entities, database models,
   CLI commands, or any Bedrock-specific patterns. Also use when creating new Bedrock modules,
   debugging module lifecycle issues, writing bootstrap hooks, configuring database migrations,
-  or building applications on top of Bedrock. Trigger on: "python project dependencies contains 'bedrock-py'", "working on a Bedrock module", "writing a manifest.yaml", "using bedrock CLI commands"
+  writing tests for Bedrock modules, or building applications on top of Bedrock. Trigger on: "python project dependencies contains 'bedrock-py'", "working on a Bedrock module", "writing a manifest.yaml", "using bedrock CLI commands", "testing a Bedrock module"
+metadata:
+  bedrock-core: "0.3.2"
 ---
 
 # Bedrock Application Development
 
 Bedrock is a modular Python framework for building applications with manifest-driven module loading, lifecycle orchestration, and clean architecture conventions. This skill teaches you how to use Bedrock to build maintainable, extensible applications.
+
+## Version Check
+
+This skill describes `bedrock-core` at the version in `metadata.bedrock-core` above. Before writing code, compare it with the version installed in the project:
+
+```bash
+uv run python -c "import importlib.metadata as m; print(m.version('bedrock-core'))"
+```
+
+- **Same version**: follow this skill.
+- **Different version**: tell the user, and treat the installed package as the source of truth. Bedrock is pre-1.0, so a minor release may break APIs. Before using an API from this skill, read the [CHANGELOG](https://github.com/maacck/bedrock-py/blob/main/CHANGELOG.md) sections between the two versions and check the installed `bedrock` source. The skill matching the installed version installs with `npx skills add maacck/bedrock-py@v<installed-version>`.
 
 ## Quick Reference
 
@@ -24,6 +37,7 @@ Bedrock is a modular Python framework for building applications with manifest-dr
 
 Named implementation classes: `from bedrock.common.registry import ClassRegistry` (a class, not a singleton).
 Named providers (instances or factories, lazy paths, install hints): `from bedrock.provider import ProviderCatalog` (a class, not a singleton).
+Test fixtures (isolated runtime, temporary modules, DB rollback): `pytest_plugins = ["bedrock.testing"]` in the root `conftest.py`; see section 14.
 
 ## When to Read References
 
@@ -37,9 +51,11 @@ Named providers (instances or factories, lazy paths, install hints): `from bedro
 - **Using signals / events** → Read `references/signals-guide.md`
 - **Understanding project structure** → Read `references/module-hierarchy.md`
 - **Understanding architecture / layer boundaries** → Read `references/architecture.md`
+- **Writing tests: isolated runtime, temporary modules, DB rollback** → Read `references/testing-guide.md`
 - **Using caching / distributed locks** → View `bedrock app playbook bedrock.contrib.cache`
 - **Instrumenting metrics** → View `bedrock app playbook bedrock.contrib.metric`
 - **Using file/object storage** → View `bedrock app playbook bedrock.contrib.storage`
+- **Rate limiting commands, jobs, or outbound calls** → View `bedrock app playbook bedrock.contrib.rate_limit`
 
 ## Contrib Packages
 
@@ -50,6 +66,7 @@ Bedrock ships first-party contrib packages, each documented by a playbook (view 
 | Cache | `bedrock.contrib.cache` | In-memory / Redis cache with TTL, distributed locks, typed namespaces |
 | Metrics | `bedrock.contrib.metric` | Counter/gauge/timer instrumentation with StatsD, Sentry, and Prometheus providers |
 | Storage | `bedrock.contrib.storage` | File/object storage with local and S3-compatible backends |
+| Rate limit | `bedrock.contrib.rate_limit` | Token-bucket rate limiting with a Redis backend and replaceable backends |
 
 ## Quick Start: New Project
 
@@ -129,7 +146,7 @@ bedrock.setup()  # Reads BEDROCK_APP env var, or pass app path explicitly
 bedrock.setup("myproject.app")  # Explicit app path
 ```
 
-Call `bedrock.setup()` once at process start. It is safe to call multiple times, and it does not configure logging. In an async process call `await bedrock.asetup()` and stop with `await bedrock.ashutdown()` (sync: `bedrock.shutdown()`), which stops modules in reverse order and then releases the initialized database. Use one family end to end; see `references/module-guide.md` (Async lifecycle).
+Call `bedrock.setup()` once at process start. It is safe to call multiple times, and it does not configure logging. In an async process call `await bedrock.asetup()` and stop with `await bedrock.ashutdown()` (sync: `bedrock.shutdown()`), which stops modules in reverse order and then releases the initialized database. Use one family end to end; see `references/module-guide.md` (Async lifecycle). Synchronous code that calls async services uses `bedrock.run_async(coro)` rather than `asyncio.run()`, so the clients `on_load` opened stay usable.
 
 Importing Bedrock does not remove loguru handlers or install Bedrock's sink. `configure_logging()` installs Bedrock's stderr sink (or `LOG_FILE` when that variable is set) and, on a later call, replaces only that sink. Handlers already present, including Loguru's preconfigured stderr handler, stay. `LOG_LEVEL`, `LOG_FORMAT`, `LOG_FILE`, `LOG_ROTATION`, `LOG_RETENTION`, `LOG_COMPRESSION`, and `LOG_SERIALIZE` are read when it runs. The `bedrock` CLI calls `configure_cli_logging()` before dispatching commands. That removes Loguru's preconfigured stderr handler so CLI lines are not duplicated and `LOG_*` controls CLI stderr; host handlers stay. Commands inside a module do not need to configure logging.
 
@@ -442,9 +459,35 @@ Failure and execution semantics often decide between hooks and signals:
 | Order | Priority (lower runs first) | Unspecified |
 | On first exception | `call()` / `acall()` raise it; later implementations do not run; earlier side effects stay | `send()` / `asend()` raise it; remaining receivers do not run |
 | Run all, collect exceptions | `call_robust()` (sync only) | `send_robust()` / `asend_robust()` |
-| Async | `acall()` (sync implementations run in a thread) | `asend()`; lifecycle signals always use sync `send()` |
+| Async | `acall()` (sync implementations run in a thread) | `asend()`; lifecycle signals follow the entrypoint: async entrypoints (`asetup`, `ashutdown`, …) use `asend()`, sync entrypoints use `send()` and raise `ModuleAsyncRequiredError` on an async receiver inside a running loop |
 
 **Every implementation must succeed** → hooks with `firstresult=False` (default); implementations signal failure by raising a `BedrockExc` subclass, never by returning `False`. Hooks provide no rollback: see `references/hooks-guide.md` → "Extension Points That Must All Succeed" for fail-fast with DB rollback, collect-all reporting, and external side effects.
+
+### 14. Testing
+
+`bedrock.testing` is a pytest plugin. Enable it once in the project's root `conftest.py` with `pytest_plugins = ["bedrock.testing"]`, then request fixtures by name:
+
+| Fixture | Gives the test |
+|---------|----------------|
+| `bedrock_runtime` | A fresh module registry that `bedrock.setup()` / `asetup()` act on; `.registry`, `.events` (lifecycle `LifecycleEvent(kind, module)`); teardown shuts modules down and restores signals, DI, hooks, env, settings |
+| `module_factory` | `module_factory(name, *, manifest=None, bootstrap=None, models=None, files=None)` writes a temporary Bedrock module; removed (with its models) after the test |
+| `db_session` | A session whose writes, including `commit()` inside `db.session_scope()`, are rolled back after the test; `db.init()` must run in a session-scoped fixture first |
+| `clean_container`, `override_service`, `clean_hooks`, … | DI and hook isolation |
+
+```python
+import bedrock
+
+
+def test_orders_need_billing(bedrock_runtime, module_factory, db_session):
+    module_factory("billing")
+    module_factory("orders", manifest={"title": "Orders", "version": "1.0.0", "depends_on": ["billing"]})
+
+    bedrock.setup("orders")
+
+    assert [e.module for e in bedrock_runtime.events if e.kind == "loaded"] == ["billing", "orders"]
+```
+
+Async tests: `await bedrock.asetup(...)` and `await bedrock_runtime.registry.ashutdown()` before returning; for async DB rollback wrap `arollback_session()` in your own `pytest_asyncio` fixture. Prefer `bedrock_runtime.registry.shutdown()` over `bedrock.shutdown()` in tests, because the latter also closes `db`. See `references/testing-guide.md` for teardown order, limits, and SQLite notes.
 
 ## Anti-Patterns (Avoid These)
 
@@ -453,6 +496,7 @@ Failure and execution semantics often decide between hooks and signals:
 3. **Don't bypass `ModuleRegistry.install()`** to load modules manually — dependency resolution and hooks will be skipped
 4. **Don't recursively call `mark_ready()` or `shutdown()`** from lifecycle hooks or signal receivers
 5. **Don't register extensions via import-time side effects or accept import paths from requests** — register trusted paths in `on_load`
+6. **Don't hand-roll test isolation** — no `monkeypatch.setattr(lifecycle, "apps", ...)`, `db.set_session()` rollback fixtures, or hand-written packages on `sys.path`; use `bedrock_runtime`, `db_session`, and `module_factory`
 
 ## Commands Reference
 

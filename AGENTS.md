@@ -41,6 +41,8 @@ Python monorepo for Bedrock modular framework. `uv` workspaces, `src/` layout.
 - `packages/bedrock` — Core runtime (active)
 - `packages/bedrock-cli` — Scaffolding CLI (planned, gitignored)
 - `packages/bedrock-example` — Example app (gitignored)
+- `integrations/fastapi` — `bedrock-fastapi`: FastAPI adapter library (request DI scope, per-request DB transactions, `BedrockExc` handler)
+- `integrations/celery` — `bedrock-celery`: Celery adapter library (per-process worker lifecycle, per-task DI scope and DB session, async tasks)
 - `docs-web/` — Derived fumadocs Web Doc site (don't hand-edit)
 - `docs-web/content/docs` — Docs source-of-truth (MDX)
 - `xboc/` — Reference prototype (gitignored, not for production)
@@ -64,6 +66,7 @@ uv run ruff format .
 
 # Tests (pytest, 4 test files in packages/bedrock/tests/)
 uv run pytest packages/bedrock/tests/
+uv run pytest integrations/fastapi/tests/ integrations/celery/tests/
 
 # Docs
 cd docs-web && npm run dev    # Dev server with live sync
@@ -103,7 +106,7 @@ A change to a public signature, behavior, default, error type, configuration key
 
 |Surface|Path|Update|
 |---|---|---|
-|Changelog|`CHANGELOG.md`|Entry under `## [Unreleased]`; breaking changes state the migration|
+|Changelog|`CHANGELOG.md`; `integrations/<framework>/CHANGELOG.md` for an integration|Entry under `## [Unreleased]`; breaking changes state the migration|
 |Web Doc|`docs-web/content/docs/{en,zh}/`|Affected pages in both languages; `meta.json` for new pages|
 |Agent skills|`skills/bedrock/`, `skills/bedrock-cli/`|`SKILL.md`, affected `references/*.md`, templates|
 |Playbooks|`packages/bedrock/src/bedrock/contrib/*/playbook/`|When a contrib API changes|

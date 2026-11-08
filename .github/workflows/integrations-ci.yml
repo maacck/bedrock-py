@@ -1,0 +1,123 @@
+name: Integrations CI
+
+on:
+  pull_request:
+    branches: [dev, main, release/v0.2]
+    paths:
+      - 'integrations/**'
+      - 'packages/bedrock/**'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - '.github/workflows/integrations-*.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  discover:
+    name: Discover integrations
+    runs-on: ubuntu-latest
+    outputs:
+      integrations: ${{ steps.list.outputs.integrations }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: List integrations
+        id: list
+        run: |
+          python3 - <<'EOF' >> "$GITHUB_OUTPUT"
+          import json, pathlib, tomllib
+
+          items = [
+              {"dir": str(p.parent), "package": tomllib.loads(p.read_text())["project"]["name"]}
+              for p in sorted(pathlib.Path("integrations").glob("*/pyproject.toml"))
+          ]
+          print("integrations=" + json.dumps(items))
+          EOF
+
+  lint:
+    name: Lint (integrations)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Check formatting
+        run: uv run ruff format --check integrations
+
+      - name: Check linting
+        run: uv run ruff check integrations
+
+  test:
+    name: Test (${{ matrix.integration.package }} / Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    needs: discover
+    strategy:
+      fail-fast: false
+      matrix:
+        integration: ${{ fromJSON(needs.discover.outputs.integrations) }}
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          enable-cache: true
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: uv sync --package ${{ matrix.integration.package }} --locked
+
+      - name: Run tests
+        run: uv run --package ${{ matrix.integration.package }} pytest ${{ matrix.integration.dir }}/tests/ -v --tb=short
+
+  build:
+    name: Build (${{ matrix.integration.package }})
+    runs-on: ubuntu-latest
+    needs: [discover, lint, test]
+    strategy:
+      matrix:
+        integration: ${{ fromJSON(needs.discover.outputs.integrations) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Build package
+        run: uv build --package ${{ matrix.integration.package }}
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist-${{ matrix.integration.package }}
+          path: dist/

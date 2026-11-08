@@ -10,11 +10,13 @@
     "cache",
     "metric",
     "storage",
+    "rate-limit",
     "signals",
     "di",
     "provider",
     "class-registry",
-    "hooks"
+    "hooks",
+    "testing"
   ],
   "defaultOpen": true
 }

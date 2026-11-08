@@ -176,7 +176,7 @@ def ready(*, registry, app) -> None: ...
 def on_shutdown(*, registry, app) -> None: ...  # or: async def on_shutdown(...)
 ```
 
-The registry calls a hook and awaits whatever it returns when that is awaitable. Each operation has a sync entrypoint and an `a`-prefixed async twin (`install`/`ainstall`, `populate`/`apopulate`, `mark_ready`/`amark_ready`, `shutdown`/`ashutdown`), plus `bedrock.setup`/`asetup` and `bedrock.shutdown`/`ashutdown` at the process level. Both run one shared implementation. Async entrypoints await async hooks on the running loop and run plain hooks in a worker thread. Sync entrypoints call plain hooks directly and run async hooks on a private loop that stays open until every module has shut down, but only when no event loop is running in the calling thread; inside a running loop they raise `ModuleAsyncRequiredError` naming the async entrypoint. Start up and shut down through the same entrypoint family, because an async client is bound to the loop that opened it.
+The registry calls a hook and awaits whatever it returns when that is awaitable. Each operation has a sync entrypoint and an `a`-prefixed async twin (`install`/`ainstall`, `populate`/`apopulate`, `mark_ready`/`amark_ready`, `shutdown`/`ashutdown`), plus `bedrock.setup`/`asetup` and `bedrock.shutdown`/`ashutdown` at the process level. Both run one shared implementation. Async entrypoints await async hooks on the running loop and run plain hooks in a worker thread. Sync entrypoints call plain hooks directly and run async hooks on Bedrock's process-wide runtime loop (shared with `bedrock.run_async()`), but only when no event loop is running in the calling thread; inside a running loop they raise `ModuleAsyncRequiredError` naming the async entrypoint. Registry shutdown leaves that loop open; process-level `bedrock.shutdown()` or `bedrock.ashutdown()` closes it. Start up and shut down through the same entrypoint family, because an async client is bound to the loop that opened it.
 
 Supported injected names are `registry`, `app`, `container`, and `hooks`. A hook may declare any supported subset, or `**kwargs` to receive all injected values. Parameters must be keyword-compatible.
 
@@ -311,8 +311,15 @@ adapters/
 - `routes.py` translates transport input to entities and calls `inventory.service`.
 - `schemas.py` contains transport-specific request/response DTOs.
 - `errors.py` maps `inventory.exc` exceptions to transport errors.
+- With database session middleware, each HTTP request runs inside `session_scope()` / `asession_scope()`.
+  Services keep owning their transactions: they work in `db.session` / `db.asession` and commit, but must not
+  open `session_scope()` themselves (it raises `RuntimeError` while the request's session is bound). Anything
+  left uncommitted when the request ends is rolled back.
 
-Web integrations may be published as separate Bedrock ecosystem packages. HTTP dependencies and types do not enter `bedrock-core` or business modules.
+First-party framework integrations live in `integrations/<framework>/` and publish as `bedrock-<framework>`.
+They are adapter libraries, not Bedrock modules: they have no manifest or lifecycle hooks, and the host owns
+the app. FastAPI's integration is `bedrock-fastapi`. HTTP dependencies and types do not enter `bedrock-core`
+or business modules.
 
 ## 8. Contrib anatomy
 

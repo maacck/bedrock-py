@@ -11,9 +11,8 @@ import pytest
 from bedrock.cli.db import db_app
 from bedrock.database.migrations_manager import BranchRevisionStatus, MigrationError, MigrationsManager
 from bedrock.module.registry import ModuleRegistry
+from bedrock.testing.modules import ModuleFactory
 from typer.testing import CliRunner
-
-from tests.helpers import make_fake_module
 
 
 def _revision_a(name: str) -> str:
@@ -111,11 +110,10 @@ def _manager(url: str, lock_timeout: float = 30) -> MigrationsManager:
     return MigrationsManager(registry=ModuleRegistry(), database_url=url, lock_timeout=lock_timeout)
 
 
-def _write_orders_app(root: Path, name: str) -> str:
+def _write_orders_app(factory: ModuleFactory, name: str) -> str:
     """Create an importable app with two revisions on one branch."""
 
-    make_fake_module(
-        root,
+    factory(
         name,
         manifest={"title": "Orders", "version": "0.1.0"},
         models=(
@@ -126,7 +124,7 @@ def _write_orders_app(root: Path, name: str) -> str:
             "    id = Column(Integer, primary_key=True)\n"
         ),
     )
-    migrations = root / name / "migrations"
+    migrations = factory.root / name / "migrations"
     migrations.mkdir()
     (migrations / "mak111a_init.py").write_text(_revision_a(name), encoding="utf-8")
     (migrations / "mak111b_follow.py").write_text(_revision_b(name), encoding="utf-8")
@@ -236,7 +234,7 @@ class TestDbCheck:
     def _invoke(
         self,
         monkeypatch: pytest.MonkeyPatch,
-        fake_package: Path,
+        module_factory: ModuleFactory,
         db_path: Path,
         *,
         upgrade_to: str | None,
@@ -246,7 +244,7 @@ class TestDbCheck:
 
         import bedrock.module.registry as registry_module
 
-        import_path = _write_orders_app(fake_package, app_name)
+        import_path = _write_orders_app(module_factory, app_name)
         monkeypatch.setenv("DATABASE_TYPE", "sqlite")
         monkeypatch.setenv("DATABASE_DRIVER", "pysqlite")
         monkeypatch.setenv("DATABASE_SCHEMA", str(db_path))
@@ -267,12 +265,14 @@ class TestDbCheck:
             BedrockModel.metadata.remove(table)
         return result.exit_code, status
 
-    def test_at_head_exits_zero(self, monkeypatch: pytest.MonkeyPatch, fake_package: Path, tmp_path: Path) -> None:
+    def test_at_head_exits_zero(
+        self, monkeypatch: pytest.MonkeyPatch, module_factory: ModuleFactory, tmp_path: Path
+    ) -> None:
         """A database at head exits 0."""
 
         exit_code, status = self._invoke(
             monkeypatch,
-            fake_package,
+            module_factory,
             tmp_path / "head.db",
             upgrade_to="head",
             app_name="mak111_head",
@@ -283,12 +283,14 @@ class TestDbCheck:
         assert status.head == ("mak111b",)
         assert exit_code == 0
 
-    def test_behind_exits_nonzero(self, monkeypatch: pytest.MonkeyPatch, fake_package: Path, tmp_path: Path) -> None:
+    def test_behind_exits_nonzero(
+        self, monkeypatch: pytest.MonkeyPatch, module_factory: ModuleFactory, tmp_path: Path
+    ) -> None:
         """A database on an older revision exits non-zero."""
 
         exit_code, status = self._invoke(
             monkeypatch,
-            fake_package,
+            module_factory,
             tmp_path / "behind.db",
             upgrade_to="mak111a",
             app_name="mak111_behind",
@@ -302,7 +304,7 @@ class TestDbCheck:
     def test_uninitialized_exits_nonzero_without_mutating(
         self,
         monkeypatch: pytest.MonkeyPatch,
-        fake_package: Path,
+        module_factory: ModuleFactory,
         tmp_path: Path,
     ) -> None:
         """A database with no applied revision exits non-zero and stays uninitialized."""
@@ -310,7 +312,7 @@ class TestDbCheck:
         db_path = tmp_path / "empty.db"
         exit_code, status = self._invoke(
             monkeypatch,
-            fake_package,
+            module_factory,
             db_path,
             upgrade_to=None,
             app_name="mak111_empty",

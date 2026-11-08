@@ -3,9 +3,20 @@
 from __future__ import annotations
 
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from bedrock._loop import runtime_loop
+
+pytest_plugins = ["bedrock.testing"]
+
+
+@pytest.fixture(autouse=True)
+def _close_runtime_loop() -> Iterator[None]:
+    """Close the process-wide runtime loop after each test; registries used directly never close it."""
+    yield
+    runtime_loop.close()
 
 
 @pytest.fixture(autouse=True)

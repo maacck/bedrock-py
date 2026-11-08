@@ -31,6 +31,16 @@ The Bedrock agent skill is available for multiple AI coding assistants.
 npx skills add https://github.com/maacck/bedrock-py
 ```
 
+### Match Your Bedrock Version
+
+The command above installs the skill for the latest `bedrock-core` release. If your project uses an older version, install the skill from the matching release tag so your assistant does not use APIs your version lacks:
+
+```bash
+npx skills add maacck/bedrock-py@v0.3.1  # use your bedrock-core version
+```
+
+Each skill records the version it describes in its `SKILL.md` frontmatter (`metadata.bedrock-core` for `bedrock`, `metadata.bedrock-cli` for `bedrock-cli`). The `bedrock` skill tells the assistant to compare it with the installed `bedrock-core` and, when they differ, to trust the installed package and the [changelog](/docs/changelog). The version in the site header is the `bedrock-core` version these docs describe.
+
 ## What the Skill Teaches
 
 The Bedrock agent skill provides:
@@ -100,6 +110,7 @@ The repository provides `skills/bedrock/SKILL.md` and `skills/bedrock-cli/SKILL.
 - `module-guide.md` and `module-hierarchy.md`
 - `provider-guide.md`
 - `signals-guide.md`
+- `testing-guide.md`
 
 ## Next Steps
 

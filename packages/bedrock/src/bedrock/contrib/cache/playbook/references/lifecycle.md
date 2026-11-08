@@ -55,7 +55,7 @@ finally:
     cache.close()
 ```
 
-Async shutdown: `close()` releases the sync client and `await cache.aclose()` the async one (Redis owns both). Registry shutdown does both: `bedrock.shutdown()` runs the async close on the registry's private loop, `await bedrock.ashutdown()` on the running loop. In a running loop, a sync `registry.shutdown()` raises `ModuleAsyncRequiredError` instead when async clients are open; the module stays retryable. Memory-only apps shut down from any context.
+Async shutdown: `close()` releases the sync client and `await cache.aclose()` the async one (Redis owns both). Registry shutdown does both: `bedrock.shutdown()` runs the async close on Bedrock's process-wide runtime loop, `await bedrock.ashutdown()` on the running loop. In a running loop, a sync `registry.shutdown()` raises `ModuleAsyncRequiredError` instead when async clients are open; the module stays retryable. Memory-only apps shut down from any context.
 
 ## Service states
 
