@@ -1,0 +1,21 @@
+---
+title: 集成
+description: 将 Bedrock 接入 Web 框架和 worker 的官方适配器
+---
+
+Bedrock 核心运行时不依赖任何 Web 框架或任务队列。集成是官方提供的适配器，用于把 Bedrock 应用接入其中某一个框架。每个集成都是单独安装的包：不使用该框架的项目不会安装它，`bedrock-core` 也从不导入它。
+
+## 集成的工作方式
+
+- **框架由宿主持有。**FastAPI 应用（或 worker、CLI）以及它的启动和关闭，由你的项目自己创建。集成不会替你创建或配置。
+- **按需选用组件。**集成是一组小型构建块，例如中间件和异常处理器。只添加应用实际用到的部分。
+- **不是 Bedrock 模块。**集成没有 `manifest.yaml`，也没有生命周期钩子。它位于 [模块解剖](/docs/guides/module-anatomy) 中所说的适配器层，调用各模块的 service；service 从不导入它。
+- **独立发布。**每个集成有自己的版本号、changelog 和发布节奏。它对 `bedrock-core` 的版本要求说明了支持哪些核心版本。
+
+## 可用的集成
+
+| 集成 | 包 | 提供 |
+| --- | --- | --- |
+| [FastAPI](/docs/integrations/fastapi) | `bedrock-fastapi` | 每个请求的 DI 作用域、每个请求的数据库 session、把 `BedrockExc` 转成 HTTP 错误响应 |
+
+在仓库中，每个集成位于 `integrations/<framework>/`，发布名为 `bedrock-<framework>`。
