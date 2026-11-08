@@ -83,17 +83,26 @@ def setup(app: str | None = None) -> None:
 
         application = create_app()
 
-    Example — Celery entry-point (``myproject/celery.py``)::
+    Example — Celery worker (``myproject/celery.py``). The default prefork pool imports this module in the
+    parent process and forks the children that run tasks, so set Bedrock up in each child after the fork;
+    setting it up at import would share its connections and clients across children::
 
         import bedrock
-        from bedrock.logging import configure_logging
-
-        configure_logging()
-        bedrock.setup()
-
-        from celery import Celery
+        from celery import Celery, signals
 
         app = Celery("myproject")
+
+
+        @signals.worker_process_init.connect
+        def setup_bedrock(**kwargs):
+            bedrock.setup()
+
+
+        @signals.worker_process_shutdown.connect
+        def shutdown_bedrock(**kwargs):
+            bedrock.shutdown()
+
+    The ``bedrock-celery`` integration does this for every pool type and adds per-task scopes.
     """
     if apps.ready:
         return

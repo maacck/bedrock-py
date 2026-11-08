@@ -17,5 +17,6 @@ Bedrock 核心运行时不依赖任何 Web 框架或任务队列。集成是官�
 | 集成 | 包 | 提供 |
 | --- | --- | --- |
 | [FastAPI](/docs/integrations/fastapi) | `bedrock-fastapi` | 每个请求的 DI 作用域、每个请求的数据库 session、把 `BedrockExc` 转成 HTTP 错误响应 |
+| [Celery](/docs/integrations/celery) | `bedrock-celery` | 每个 worker 进程的生命周期、每个任务的 DI 作用域和数据库 session、异步任务 |
 
 在仓库中，每个集成位于 `integrations/<framework>/`，发布名为 `bedrock-<framework>`。

@@ -23,6 +23,7 @@ docs = [
 bedrock-core = { workspace = true }
 bedrock-cli = { workspace = true }
 bedrock-fastapi = { workspace = true }
+bedrock-celery = { workspace = true }
 
 
 [tool.ruff]

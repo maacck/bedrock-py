@@ -39,6 +39,7 @@ Test fixtures (isolated runtime, temporary modules, DB rollback): `pytest_plugin
 - **Understanding project structure** → Read `references/module-hierarchy.md`
 - **Understanding architecture / layer boundaries** → Read `references/architecture.md`
 - **Writing tests: isolated runtime, temporary modules, DB rollback** → Read `references/testing-guide.md`
+- **Running modules in Celery workers (`bedrock-celery`)** → Read `references/celery-guide.md`
 - **Using caching / distributed locks** → View `bedrock app playbook bedrock.contrib.cache`
 - **Instrumenting metrics** → View `bedrock app playbook bedrock.contrib.metric`
 - **Using file/object storage** → View `bedrock app playbook bedrock.contrib.storage`

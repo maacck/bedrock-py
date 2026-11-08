@@ -3,5 +3,5 @@
   "title": "集成",
   "description": "Bedrock 的框架适配器",
   "icon": "Plug",
-  "pages": ["index", "fastapi"]
+  "pages": ["index", "fastapi", "celery"]
 }
