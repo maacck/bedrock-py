@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from collections import defaultdict
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Collection, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Literal, NamedTuple
@@ -43,23 +43,33 @@ def _reset_settings_proxies() -> None:
         proxy._wrapped = None
 
 
-# One list of deferred cleanups per open ``isolated_runtime()``, innermost last.
-_AFTER_SHUTDOWN: list[list[Callable[[], object]]] = []
+# Each open ``isolated_runtime()``: its registry and the cleanups to run after it shuts down, innermost last.
+_AFTER_SHUTDOWN: list[tuple[ModuleRegistry, list[Callable[[], object]]]] = []
 
 
-def _defer_until_runtime_shutdown(callback: Callable[[], object]) -> bool:
-    """Run ``callback`` in the innermost open runtime's teardown, right after it shuts its modules down.
+def _defer_until_runtime_shutdown(callback: Callable[[], object], packages: Collection[str]) -> bool:
+    """Run ``callback`` right after an open runtime shuts down modules from ``packages``.
 
     Fixtures that own resources the modules' ``on_shutdown`` hooks may still need (such as the temporary packages of
-    ``module_factory``) use this so their cleanup does not depend on fixture teardown order.
+    ``module_factory``) use this so their cleanup does not depend on fixture teardown order. Only a runtime that still
+    holds a module from ``packages`` that is not shut down takes the callback, so a runtime that outlives the test
+    does not keep that test's packages alive.
+
+    Args:
+        callback: Cleanup to run after the runtime's teardown shutdown.
+        packages: Top-level package names the cleanup removes.
 
     Returns:
-        ``False`` when no runtime is open; the caller then cleans up immediately.
+        ``False`` when no open runtime holds such a module; the caller then cleans up immediately.
     """
-    if not _AFTER_SHUTDOWN:
-        return False
-    _AFTER_SHUTDOWN[-1].append(callback)
-    return True
+    for registry, callbacks in reversed(_AFTER_SHUTDOWN):
+        if any(
+            name.split(".")[0] in packages and app.lifecycle_state is not ModuleLifecycleState.SHUTDOWN
+            for name, app in registry._app_configs.items()
+        ):
+            callbacks.append(callback)
+            return True
+    return False
 
 
 @contextmanager
@@ -129,7 +139,7 @@ def isolated_runtime() -> Iterator[BedrockRuntime]:
 
     body_error: BaseException | None = None
     try:
-        _AFTER_SHUTDOWN.append(after_shutdown)
+        _AFTER_SHUTDOWN.append((runtime.registry, after_shutdown))
         for owner in owners:
             setattr(owner, "apps", runtime.registry)  # noqa: B010
         for signal, kind in (
@@ -155,7 +165,7 @@ def isolated_runtime() -> Iterator[BedrockRuntime]:
                 runtime.registry.shutdown()
 
         attempt(shutdown)
-        _AFTER_SHUTDOWN[:] = [entry for entry in _AFTER_SHUTDOWN if entry is not after_shutdown]
+        _AFTER_SHUTDOWN[:] = [entry for entry in _AFTER_SHUTDOWN if entry[1] is not after_shutdown]
         for callback in after_shutdown:
             attempt(callback)
         attempt(restore_signals)

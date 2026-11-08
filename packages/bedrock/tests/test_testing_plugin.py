@@ -151,3 +151,34 @@ def test_teardown_shutdown_can_import_temporary_modules(pytester: pytest.Pyteste
     result = pytester.runpytest_subprocess("-p", "no:cacheprovider")
 
     result.assert_outcomes(passed=4)
+
+
+WIDE_RUNTIME_TESTS = """
+import importlib
+
+import pytest
+from bedrock.testing import isolated_runtime
+
+
+@pytest.fixture(scope="module")
+def wide_runtime():
+    with isolated_runtime() as runtime:
+        yield runtime
+
+
+@pytest.mark.parametrize("value", ["first", "second"])
+def test_same_name_under_one_runtime(wide_runtime, module_factory, value):
+    module_factory("wide_module", bootstrap=f"VALUE = {value!r}\\n")
+    assert importlib.import_module("wide_module.bootstrap").VALUE == value
+"""
+
+
+def test_module_factory_cleans_up_per_test_under_a_longer_lived_runtime(pytester: pytest.Pytester) -> None:
+    """A runtime that outlives the test does not keep the test's modules alive when it never installed them."""
+
+    pytester.makeconftest('pytest_plugins = ["bedrock.testing"]\n')
+    pytester.makepyfile(test_app=WIDE_RUNTIME_TESTS)
+
+    result = pytester.runpytest_subprocess("-p", "no:cacheprovider")
+
+    result.assert_outcomes(passed=2)

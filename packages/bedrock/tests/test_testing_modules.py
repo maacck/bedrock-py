@@ -117,6 +117,35 @@ def test_cleanup_removes_unmapped_association_tables(tmp_path: Path, monkeypatch
             assert not {"factory_post_tags", "factory_tags", "factory_posts"} & set(BedrockModel.metadata.tables)
 
 
+def test_cleanup_keeps_tables_of_modules_a_temporary_module_imports(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app_root = tmp_path / "app"
+    (app_root / "factory_host_app").mkdir(parents=True)
+    (app_root / "factory_host_app" / "__init__.py").write_text("")
+    (app_root / "factory_host_app" / "models.py").write_text(
+        "from sqlalchemy import Column, Integer, Table\n"
+        "from bedrock.database.base import BedrockModel\n"
+        "links = Table('factory_host_links', BedrockModel.metadata, Column('id', Integer, primary_key=True))\n"
+    )
+    monkeypatch.syspath_prepend(str(app_root))
+    root = tmp_path / "modules"
+    root.mkdir()
+    monkeypatch.syspath_prepend(str(root))
+    factory = ModuleFactory(root)
+    try:
+        factory("factory_importer", bootstrap="import factory_host_app.models\n")
+        importlib.import_module("factory_importer.bootstrap")
+    finally:
+        factory.cleanup()
+    try:
+        assert "factory_host_links" in BedrockModel.metadata.tables
+    finally:
+        table = BedrockModel.metadata.tables.get("factory_host_links")
+        if table is not None:
+            BedrockModel.metadata.remove(table)
+
+
 def test_rejects_invalid_and_duplicate_names(module_factory: ModuleFactory) -> None:
     for name in ("invalid.name", "invalid-name", "", "1invalid"):
         with pytest.raises(ValueError):
