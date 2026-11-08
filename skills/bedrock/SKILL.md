@@ -6,11 +6,24 @@ description: >
   CLI commands, or any Bedrock-specific patterns. Also use when creating new Bedrock modules,
   debugging module lifecycle issues, writing bootstrap hooks, configuring database migrations,
   writing tests for Bedrock modules, or building applications on top of Bedrock. Trigger on: "python project dependencies contains 'bedrock-py'", "working on a Bedrock module", "writing a manifest.yaml", "using bedrock CLI commands", "testing a Bedrock module"
+metadata:
+  bedrock-core: "0.3.2"
 ---
 
 # Bedrock Application Development
 
 Bedrock is a modular Python framework for building applications with manifest-driven module loading, lifecycle orchestration, and clean architecture conventions. This skill teaches you how to use Bedrock to build maintainable, extensible applications.
+
+## Version Check
+
+This skill describes `bedrock-core` at the version in `metadata.bedrock-core` above. Before writing code, compare it with the version installed in the project:
+
+```bash
+uv run python -c "import importlib.metadata as m; print(m.version('bedrock-core'))"
+```
+
+- **Same version**: follow this skill.
+- **Different version**: tell the user, and treat the installed package as the source of truth. Bedrock is pre-1.0, so a minor release may break APIs. Before using an API from this skill, read the [CHANGELOG](https://github.com/maacck/bedrock-py/blob/main/CHANGELOG.md) sections between the two versions and check the installed `bedrock` source. The skill matching the installed version installs with `npx skills add maacck/bedrock-py@v<installed-version>`.
 
 ## Quick Reference
 

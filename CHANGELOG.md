@@ -53,6 +53,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   if synchronous code used it). Code that calls `registry.shutdown()` without `bedrock.shutdown()` leaves the
   loop open until the next `bedrock.shutdown()` or interpreter exit; call `bedrock.shutdown()` to release it.
 
+### Documentation
+
+- **Versioning**: the `bedrock` and `bedrock-cli` skills record the version they describe in `metadata.bedrock-core` /
+  `metadata.bedrock-cli`, and the `bedrock` skill tells assistants to compare it with the installed
+  `bedrock-core` and trust the installed package and changelog when they differ. CI fails when a skill's version
+  differs from its package version. The docs site header shows the `bedrock-core` version it describes, and the
+  Agent Skills page explains how to install the skill matching an older release (`npx skills add
+  maacck/bedrock-py@vX.Y.Z`).
+
 ## [0.3.1] - 2026-11-08
 
 ### Breaking changes
