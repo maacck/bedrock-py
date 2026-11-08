@@ -19,7 +19,7 @@ import weakref
 from collections.abc import Awaitable, Callable, Generator, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, TypeVar
 
 from .exc import ModuleLifecycleError
@@ -239,14 +239,17 @@ class _Operation:
     stack: list[str]
     thread_id: int
     active: bool = True
+    installs: list[Lease] = field(default_factory=list)
+    """Leases of the install calls in progress, outermost first. Only the innermost may start a nested install."""
 
 
-_ACTIVE_OPERATIONS: ContextVar[tuple[_Operation, ...]] = ContextVar("bedrock_active_registry_operations", default=())
-"""Operations the current context belongs to.
+_ACTIVE_LEASES: ContextVar[tuple[Lease, ...]] = ContextVar("bedrock_active_registry_leases", default=())
+"""Leases of the operations, and nested installs, the current context runs inside.
 
 Hooks and receivers run inside the context of the operation that called them, including child tasks they spawn and
 worker threads started with ``asyncio.to_thread``, so a call back into the registry from there is recognized as
-re-entrant. Unrelated tasks and threads have no entry and wait their turn instead.
+re-entrant. Unrelated tasks and threads have no entry and wait their turn instead. The innermost lease tells which
+install a context runs inside, which separates a genuinely nested install from a concurrent sibling.
 """
 
 
@@ -256,7 +259,7 @@ class Lease:
 
     operation: _Operation | None
     nested: bool = False
-    token: Token[tuple[_Operation, ...]] | None = None
+    token: Token[tuple[Lease, ...]] | None = None
 
     @property
     def outermost(self) -> bool:
@@ -269,9 +272,10 @@ class OperationGate:
 
     The gate state is guarded by a short-lived ``threading.Condition`` that is never held while a hook runs. A
     caller that already belongs to the running operation (same context) is re-entrant: only ``install`` may nest
-    inside ``install``, anything else raises ``ModuleLifecycleError``. Any other caller waits: a thread blocks, a
-    task awaits. A synchronous caller on the thread that owns the running operation raises instead of waiting,
-    because waiting there would deadlock.
+    inside ``install``, and only from the innermost running install, so concurrent sibling installs are refused;
+    anything else raises ``ModuleLifecycleError``. Any other caller waits: a thread blocks, a task awaits. A
+    synchronous caller on the thread that owns the running operation raises instead of waiting, because waiting
+    there would deadlock.
     """
 
     def __init__(self) -> None:
@@ -282,7 +286,7 @@ class OperationGate:
     def entrypoint(self) -> str | None:
         """Return the top-level operation the current context is running inside, if any."""
         mine = self._mine()
-        return mine.stack[0] if mine is not None else None
+        return mine.operation.stack[0] if mine is not None and mine.operation is not None else None
 
     def enter(self, name: str, introduces: Callable[[], bool] | None = None) -> Lease:
         """Admit ``name``, blocking the calling thread while another context runs an operation.
@@ -352,14 +356,15 @@ class OperationGate:
         operation = lease.operation
         if operation is None:
             return
-        if lease.nested:
-            operation.stack.pop()
-            return
         if lease.token is not None:
             try:
-                _ACTIVE_OPERATIONS.reset(lease.token)
+                _ACTIVE_LEASES.reset(lease.token)
             except ValueError:
                 pass  # released from another context; the inactive operation is ignored from now on
+        if lease.nested:
+            operation.stack.pop()
+            operation.installs.pop()
+            return
         with self._cond:
             operation.active = False
             self._current = None
@@ -372,43 +377,56 @@ class OperationGate:
     def phase(self, name: str) -> Iterator[None]:
         """Name an internal phase of the running operation, such as the ready phase of ``populate``."""
         mine = self._mine()
-        if mine is None:
+        if mine is None or mine.operation is None:
             yield
             return
-        mine.stack.append(name)
+        stack = mine.operation.stack
+        stack.append(name)
         try:
             yield
         finally:
-            mine.stack.pop()
+            stack.pop()
 
-    def _mine(self) -> _Operation | None:
-        for operation in reversed(_ACTIVE_OPERATIONS.get()):
-            if operation.gate is self and operation.active:
-                return operation
+    def _mine(self) -> Lease | None:
+        """Return the innermost lease of the running operation the current context belongs to."""
+        for lease in reversed(_ACTIVE_LEASES.get()):
+            operation = lease.operation
+            if operation is not None and operation.gate is self and operation.active:
+                return lease
         return None
 
     def _admit(self, name: str, introduces: Callable[[], bool] | None) -> Lease | None:
         """Return a lease, or ``None`` when another context must finish first (call with the condition held)."""
-        mine = self._mine()
-        if mine is not None:
+        lease = self._mine()
+        if lease is not None and lease.operation is not None:
+            mine = lease.operation
             outer = mine.stack[-1]
             if name == "install" and introduces is not None and not introduces():
                 return Lease(operation=None)
             if name == "install" and outer == "install":
+                if mine.installs[-1] is not lease:
+                    raise ModuleLifecycleError(
+                        f"Cannot call install() while another install() started inside the same {mine.stack[0]}() "
+                        "is still running; a failed install would roll back modules its sibling added. Await each "
+                        "install() before starting the next."
+                    )
+                nested = Lease(operation=mine, nested=True)
                 mine.stack.append(name)
-                return Lease(operation=mine, nested=True)
+                mine.installs.append(nested)
+                return nested
             raise ModuleLifecycleError(_reentry_message(name, outer))
         if self._current is not None:
             return None
         operation = _Operation(gate=self, stack=[name], thread_id=threading.get_ident())
+        outermost = Lease(operation=operation)
+        operation.installs.append(outermost)
         self._current = operation
-        return Lease(operation=operation)
+        return outermost
 
     @staticmethod
     def _bind(lease: Lease) -> None:
-        if lease.outermost:
-            assert lease.operation is not None
-            lease.token = _ACTIVE_OPERATIONS.set((*_ACTIVE_OPERATIONS.get(), lease.operation))
+        if lease.operation is not None:
+            lease.token = _ACTIVE_LEASES.set((*_ACTIVE_LEASES.get(), lease))
 
 
 def _wake(loop: asyncio.AbstractEventLoop, future: asyncio.Future[None]) -> None:

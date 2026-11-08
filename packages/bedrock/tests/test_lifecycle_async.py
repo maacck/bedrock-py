@@ -597,6 +597,39 @@ class TestOperationGuards:
         assert hook_state.count("on_shutdown:nest_inner") == 1
 
     @pytest.mark.asyncio
+    async def test_concurrent_sibling_ainstall_is_rejected_before_it_changes_membership(
+        self, fake_package: Path, kinds: dict[str, str], hook_state: list[str]
+    ) -> None:
+        for name in ("sib_parent", "sib_bad", "sib_ok"):
+            make_fake_module(fake_package, name, manifest={"title": name, "version": "1"}, bootstrap=_BOOTSTRAP)
+            kinds[name] = "async"
+        registry = ModuleRegistry()
+        release = asyncio.Event()
+
+        async def fail_after_release() -> None:
+            await release.wait()
+            raise RuntimeError("sib_bad fails while its sibling could be loaded")
+
+        async def start_siblings() -> None:
+            bad = asyncio.create_task(registry.ainstall("sib_bad"))
+            await _wait_until(lambda: "on_load:sib_bad" in hook_state)
+            # A rollback of sib_bad would remove anything a concurrent sibling added, so the sibling is refused.
+            with pytest.raises(ModuleLifecycleError, match="another install"):
+                await registry.ainstall("sib_ok")
+            release.set()
+            with pytest.raises(ModuleLifecycleError):
+                await bad
+            await registry.ainstall("sib_ok")
+
+        builtins._hook_gates[("on_load", "sib_bad")] = fail_after_release  # type: ignore[attr-defined]
+        builtins._hook_gates[("on_load", "sib_parent")] = start_siblings  # type: ignore[attr-defined]
+
+        await registry.ainstall("sib_parent")
+        assert registry.list_installed() == ["sib_parent", "sib_ok"]
+        assert hook_state.count("on_load:sib_ok") == 1
+        assert "on_shutdown:sib_ok" not in hook_state
+
+    @pytest.mark.asyncio
     async def test_concurrent_tasks_are_serialized(
         self, fake_package: Path, kinds: dict[str, str], hook_state: list[str]
     ) -> None:

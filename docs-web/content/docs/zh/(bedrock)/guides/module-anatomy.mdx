@@ -293,7 +293,7 @@ shutdown()
 
 生命周期步骤失败时，registry 会保持状态一致：启动可以重试，关闭会尽力释放所有资源。
 
-- **安装具备失败原子性。** `install()`（或 `populate()` 的安装阶段）失败时，本次调用引入的所有模块都会从 registry 和安装顺序中移除；调用之前已安装的模块不会被移除。已完成 `on_load` 的新模块会按安装逆序尽力回滚：只有 `on_shutdown` 钩子成功后才触发 `module_shutdown`。如果回滚失败，则抛出 `ModuleStartupRollbackError`（`ModuleLifecycleError` 的子类），其 `failures` 先是原始失败，随后是回滚失败。
+- **安装具备失败原子性。** `install()`（或 `populate()` 的安装阶段）失败时，本次调用引入的所有模块都会从 registry 和安装顺序中移除；调用之前已安装的模块不会被移除。已完成 `on_load` 的新模块会按安装逆序尽力回滚：只有 `on_shutdown` 钩子成功后才触发 `module_shutdown`。如果回滚失败，则抛出 `ModuleStartupRollbackError`（`ModuleLifecycleError` 的子类），其 `failures` 先是原始失败，随后是回滚失败。钩子可以继续安装其他模块，但必须逐个进行：同一钩子发起的另一个安装仍在运行时再发起安装（例如 `asyncio.gather(registry.ainstall("a"), registry.ainstall("b"))`），会在加载任何内容之前抛出 `ModuleLifecycleError`，因为失败的兄弟安装回滚时也会把它移除。请依次 `await` 每个安装。
 - **回滚期间不能扩展注册表。** 清理钩子和信号接收器不得在回滚期间通过 `install()` 或 `populate()` 引入新模块。此类调用会在加载新模块之前抛出 `ModuleLifecycleError`；未捕获的错误会计入回滚失败。
 - **就绪状态按模块记录。** 模块经历 `loading → loaded → ready → shutdown`，但已加载的模块也可以在就绪前关闭。`AppConfig.lifecycle_state` 是只读的（对其赋值会抛出 `AttributeError`，传给构造函数会抛出 `ValidationError`），只有 registry 会通过 `AppConfig.transition_to()` 修改它，该方法会拒绝非法转换。registry 就绪之后才安装的模块会保持 `loaded`，直到再次调用 `mark_ready()`，而 `registry.ready` 仍为 `True`；因此请检查模块自身的 `lifecycle_state`，不要把 `registry.ready` 理解为“所有已安装模块都已就绪”。`ready` 钩子失败后，已就绪的模块保持就绪；重试 `mark_ready()`（或用相同路径调用 `populate()`）会跳过它们。`module_ready` 接收器失败时模块已就绪，因此不会重试该模块的钩子或信号。
 - **关闭会尝试每个模块。** `shutdown()` 按安装逆序尝试每个尚未完成的模块，并将钩子和 `module_shutdown` 接收器的失败汇总为 `ModuleLifecycleError`；该次调用不会触发 `registry_shutdown`。失败的钩子会重试，但失败的 `module_shutdown` 接收器不会：模块已标记为关闭。其余模块完成后，下次调用可触发 `registry_shutdown`。
