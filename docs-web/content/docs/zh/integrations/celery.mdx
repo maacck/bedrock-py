@@ -138,6 +138,8 @@ celery -A shop.adapters.worker.app worker --pool prefork
 
 钩子的运行方式与直接调用 `bedrock.setup()` 完全一样：同步钩子在启动 Bedrock 的线程中运行，异步钩子在 Bedrock 的运行时循环上运行。异步任务通过 `bedrock.run_async()` 使用同一个循环，因此钩子打开的异步客户端可以在任务中使用。`bedrock.shutdown()` 也会关闭数据库 engine 和运行时循环。因 `worker_max_tasks_per_child` 被替换的子进程会重新启动 Bedrock。
 
+如果 `bedrock.setup()` 在某个 worker 进程中失败，失败会被记录到日志，并且整个 worker 停止，而不是在没有 Bedrock 的情况下继续消费任务。Celery 本身对信号处理函数抛出的异常只记录日志并继续运行。使用 prefork 进程池时，失败的子进程会请求父进程关闭，避免进程池不断替换以同样方式失败的子进程。
+
 在创建 Celery 应用的模块中调用一次 `connect_worker()`。它不配置日志；如果需要 Bedrock 的日志输出，请在那里调用 `bedrock.logging.configure_logging()`。
 
 ## 任务、作用域和数据库 Session
@@ -150,6 +152,7 @@ celery -A shop.adapters.worker.app worker --pool prefork
 - **每次提交都是最终的。**如果任务在 service 提交后重试，已提交的内容会保留。必须一起成功或失败的写入放在同一个只提交一次的 service 方法中，并让任务可以安全地重复执行。
 - **没人提交的写入会丢失。**任务仍然会成功结束。
 - **不应与任务共享事务的旁路事务**使用 `db.independent_session()` / `db.aindependent_session()`。
+- **基于类的任务**使用定义 `run` 的那个类对应的会话：继承 `async def run` 的子类仍是异步任务，用 `def run` 覆盖它的子类使用 `db.session`。
 - 如果 worker 中没有调用 `db.init()`，每个 `BedrockTask` 都会因 `DatabaseNotConfiguredError` 失败。首个异步任务会创建异步 engine，需要设置 `DATABASE_ASYNC_DRIVER`。
 
 ## 异步任务

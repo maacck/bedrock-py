@@ -138,6 +138,8 @@ A task that raises, such as `ItemNotFound`, fails like any Celery task: the exce
 
 Hooks run exactly as under a plain `bedrock.setup()`: synchronous hooks in the thread that sets Bedrock up, async hooks on Bedrock's runtime loop. Async tasks use that same loop through `bedrock.run_async()`, so an async client opened by a hook is usable from tasks. `bedrock.shutdown()` also closes the database engines and the runtime loop. A child replaced because of `worker_max_tasks_per_child` sets Bedrock up again.
 
+If `bedrock.setup()` fails in a worker process, the failure is logged and the whole worker stops instead of consuming tasks without Bedrock. Celery itself only logs exceptions raised by signal handlers and keeps running. With the prefork pool, the failing child asks the parent to shut down, so the pool does not keep replacing children that fail the same way.
+
 Call `connect_worker()` once, in the module that creates the Celery app. It does not configure logging; call `bedrock.logging.configure_logging()` there if you want Bedrock's sink.
 
 ## Tasks, scopes, and database sessions
@@ -150,6 +152,7 @@ A `def` task runs inside `db.session_scope()`; an `async def` task runs inside `
 - **Each commit is final.** If a task retries after a service committed, the committed work stays. Keep writes that must succeed or fail together in one service method that commits once, and make tasks safe to run again.
 - **A write nobody commits is lost.** The task still finishes successfully.
 - **Side transactions** that must not share the task's transaction use `db.independent_session()` / `db.aindependent_session()`.
+- **Class-based tasks** get the session of the class that defines `run`: a subclass inheriting an `async def run` stays async, and one overriding it with `def run` gets `db.session`.
 - If `db.init()` was not called in the worker, every `BedrockTask` fails with `DatabaseNotConfiguredError`. The first async task builds the async engine and requires `DATABASE_ASYNC_DRIVER`.
 
 ## Async tasks

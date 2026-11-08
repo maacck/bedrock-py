@@ -30,16 +30,18 @@ class BedrockTask(Task):
         """Turn an ``async def`` ``run`` into a sync one that runs it with ``bedrock.run_async()``.
 
         Celery calls ``run`` synchronously, with the task's request pushed for the calling thread. Running the
-        coroutine to completion inside that call keeps ``self.request`` and ``self.retry()`` working.
+        coroutine to completion inside that call keeps ``self.request`` and ``self.retry()`` working. A subclass
+        that only inherits ``run`` keeps its parent's kind; one that overrides ``run`` is classified by the override.
         """
         super().__init_subclass__(**kwargs)
-        raw = cls.__dict__.get("run")
-        fn = raw.__func__ if isinstance(raw, staticmethod) else raw
-        if not inspect.iscoroutinefunction(fn):
+        if "run" not in cls.__dict__:
             return
-        runner = _run_with_async_session(fn)
-        cls.run = staticmethod(runner) if isinstance(raw, staticmethod) else runner
-        cls._runs_async = True
+        raw = cls.__dict__["run"]
+        fn = raw.__func__ if isinstance(raw, staticmethod) else raw
+        cls._runs_async = inspect.iscoroutinefunction(fn)
+        if cls._runs_async:
+            runner = _run_with_async_session(fn)
+            cls.run = staticmethod(runner) if isinstance(raw, staticmethod) else runner
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         """Execute the task inside its DI scope and database session.

@@ -6,10 +6,16 @@ every child. Bedrock is therefore set up after the fork, in each child, and shut
 without child processes (solo, threads, gevent, eventlet) set Bedrock up once in the worker process.
 """
 
+import logging
+import os
+import signal
+from contextlib import suppress
 from typing import Any
 
 import bedrock
 from celery import signals
+
+logger = logging.getLogger(__name__)
 
 _PREFORK_POOL = "celery.concurrency.prefork:TaskPool"
 
@@ -22,6 +28,9 @@ def connect_worker(app: str | None = None) -> None:
     it up once in the worker process. Hooks run exactly as under a plain ``bedrock.setup()``: synchronous hooks in
     the calling thread, async hooks on Bedrock's runtime loop, which ``async def`` tasks also use.
 
+    If ``bedrock.setup()`` fails, the failure is logged and the whole worker stops instead of consuming tasks
+    without Bedrock. Celery would otherwise log the exception from the signal handler and keep running.
+
     Args:
         app: Dotted import path of the root application module. When *None*, ``BEDROCK_APP`` is read from the
             environment when the worker starts.
@@ -29,10 +38,10 @@ def connect_worker(app: str | None = None) -> None:
 
     def on_worker_init(sender: Any, **kwargs: Any) -> None:
         if not _is_prefork(sender.pool_cls):
-            bedrock.setup(app)
+            _setup_or_stop(app, pool_child=False)
 
     def on_process_init(**kwargs: Any) -> None:
-        bedrock.setup(app)
+        _setup_or_stop(app, pool_child=True)
 
     def on_shutdown(**kwargs: Any) -> None:
         bedrock.shutdown()
@@ -41,6 +50,24 @@ def connect_worker(app: str | None = None) -> None:
     signals.worker_process_init.connect(on_process_init, weak=False, dispatch_uid="bedrock_celery.process_init")
     signals.worker_process_shutdown.connect(on_shutdown, weak=False, dispatch_uid="bedrock_celery.process_shutdown")
     signals.worker_shutdown.connect(on_shutdown, weak=False, dispatch_uid="bedrock_celery.worker_shutdown")
+
+
+def _setup_or_stop(app: str | None, *, pool_child: bool) -> None:
+    """Run ``bedrock.setup()``; on failure stop the worker, which Celery would not do for a signal handler error.
+
+    ``SystemExit`` passes through Celery's signal dispatcher, which only catches ``Exception``. In the worker
+    process it aborts startup. A prefork child also asks its parent to shut down, so the pool does not keep
+    replacing children that fail the same way.
+    """
+    try:
+        bedrock.setup(app)
+    except Exception:
+        logger.exception("Bedrock setup failed; stopping the Celery worker so it does not run tasks without Bedrock.")
+        with suppress(Exception):
+            bedrock.shutdown()  # release modules that loaded before the failure
+        if pool_child:
+            os.kill(os.getppid(), signal.SIGTERM)
+        raise SystemExit(1) from None
 
 
 def _is_prefork(pool_cls: object) -> bool:

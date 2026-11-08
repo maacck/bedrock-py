@@ -189,6 +189,49 @@ def test_async_tasks_from_several_threads_share_the_loop() -> None:
     assert _stored_names() == ["committed"] * 3
 
 
+class AsyncWrite(app.Task):
+    """Class-based async task."""
+
+    name = "tests.async_write"
+
+    async def run(self) -> str:
+        db.asession.add(Item(name="committed"))
+        await db.asession.commit()
+        db.asession.add(Item(name="uncommitted"))
+        await db.asession.flush()
+        return "async"
+
+
+class InheritedAsyncWrite(AsyncWrite):
+    """Inherits the async ``run`` unchanged."""
+
+    name = "tests.inherited_async_write"
+
+
+class SyncOverride(AsyncWrite):
+    """Overrides the async ``run`` with a sync one, which must get a sync session."""
+
+    name = "tests.sync_override"
+
+    def run(self) -> str:
+        db.session.add(Item(name="committed"))
+        db.session.commit()
+        db.session.add(Item(name="uncommitted"))
+        db.session.flush()
+        return "sync"
+
+
+@pytest.mark.usefixtures("runtime")
+@pytest.mark.parametrize(("task_cls", "kind"), [(InheritedAsyncWrite, "async"), (SyncOverride, "sync")])
+def test_class_based_tasks_bind_the_session_of_their_own_run(task_cls: type, kind: str) -> None:
+    task = app.register_task(task_cls())
+
+    assert task.apply().get() == kind
+    assert task.apply().get() == kind
+
+    assert _stored_names() == ["committed", "committed"]
+
+
 WORKER_MODULE = """
 import asyncio
 import os
@@ -259,3 +302,33 @@ def test_worker_sets_bedrock_up_in_each_process_that_runs_tasks(
     assert len(set(setup_pids)) == len(setup_pids) == max(children, 1)
     assert all(answer["same_loop"] and answer["pid"] in setup_pids for answer in answers)
     assert sorted(_logged_pids(log, "shutdown")) == sorted(setup_pids)
+
+
+@pytest.mark.parametrize("pool", ["prefork", "solo", "threads"])
+def test_worker_stops_when_bedrock_setup_fails(tmp_path: Path, pool: str) -> None:
+    broken = tmp_path / "broken_app"
+    broken.mkdir()
+    (broken / "__init__.py").write_text("")
+    (broken / "manifest.yaml").write_text('title: Broken\nversion: "0.1.0"\n')
+    (broken / "bootstrap.py").write_text("def on_load(**kwargs):\n    raise RuntimeError('config missing')\n")
+    (tmp_path / "queue").mkdir()
+    source = WORKER_MODULE.format(queue=tmp_path / "queue", results=tmp_path, database=tmp_path / "worker.db")
+    (tmp_path / "probe_worker.py").write_text(
+        source.replace('connect_worker("probe_app")', 'connect_worker("broken_app")')
+    )
+    worker = subprocess.Popen(
+        [sys.executable, "-m", "celery", "-A", "probe_worker", "worker", "--pool", pool, "--concurrency", "2"]
+        + ["--without-heartbeat", "--without-mingle", "--without-gossip", "--loglevel", "WARNING"],
+        cwd=tmp_path,
+        env={**os.environ, "PYTHONPATH": str(tmp_path)},
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        _, stderr = worker.communicate(timeout=30)
+    except subprocess.TimeoutExpired:
+        worker.kill()
+        raise AssertionError("The worker kept running after Bedrock setup failed.") from None
+
+    assert "Bedrock setup failed" in stderr
+    assert "config missing" in stderr
