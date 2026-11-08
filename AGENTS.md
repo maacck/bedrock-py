@@ -23,7 +23,7 @@ Every feature design or implementation plan must answer all of the following. If
 | 2 | **Adapter at the edge.** HTTP, worker, and CLI types stay out of core, `service.py`, and `entities.py`. Web-related work ships as a separate package, not `bedrock-core`. | |
 | 3 | **Convention.** It follows [`docs/bedrock-anatomy.md`](docs/bedrock-anatomy.md). A new parallel pattern needs an explicit reason in the design. | |
 | 4 | **Deepen before widen.** It tightens an existing contract (lifecycle, provider/adapter, cache, storage, metrics, database, testing) before adding a sibling API or contrib. | |
-| 5 | **Real caller.** A new contrib has a caller that needs it, or it is infrastructure several applications would otherwise rewrite. Speculative contrib is out of vision. | |
+| 5 | **Real caller.** A new contrib, or a new option on an existing contrib contract, has a caller that needs it, or it is infrastructure several applications would otherwise rewrite. A foundational core capability (a domain-agnostic primitive that applications and contribs build on, such as a provider catalog) does not need a caller inside this repository: the design names the downstream use case, and the capability ships with tests and docs. Speculative contrib and speculative contract options are out of vision. | |
 | 6 | **Core stays domain-agnostic.** Shipping it does not require Bedrock to know about a particular application's domain. | |
 
 Record the check results in the design or plan (a short table is enough). A plan that skips `VISION.md` is incomplete.
