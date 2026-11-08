@@ -18,4 +18,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   services commit, and anything uncommitted when the task ends is rolled back.
 - `async def` tasks run with `bedrock.run_async()` on Bedrock's runtime loop, the loop async lifecycle hooks
   ran on, so they share async clients opened by those hooks. `self.request` and `self.retry()` work inside them.
-  Requires a `bedrock-core` that provides `bedrock.run_async()`.
+  Requires `bedrock-core` 0.3.2 or later, the first release with `bedrock.run_async()`.

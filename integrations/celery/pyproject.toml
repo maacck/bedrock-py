@@ -20,7 +20,7 @@ classifiers = [
 ]
 requires-python = ">=3.12"
 dependencies = [
-    "bedrock-core>=0.3.1",
+    "bedrock-core>=0.3.2",
     "celery>=5.3",
 ]
 

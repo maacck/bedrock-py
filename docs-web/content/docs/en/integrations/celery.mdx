@@ -23,7 +23,7 @@ description: Install bedrock-celery and run Bedrock modules in Celery workers
   `uv add "bedrock-celery @ git+https://github.com/maacck/bedrock-py#subdirectory=integrations/celery"`.
 </Callout>
 
-`bedrock-celery` requires Python 3.12+ and installs `bedrock-core` and Celery 5.3+. Install your broker's extra yourself, for example `celery[redis]`. To use async tasks with a database, also install an async driver, for example `bedrock-core[async-postgresql]`.
+`bedrock-celery` requires Python 3.12+ and installs `bedrock-core` 0.3.2+ (the first release with `bedrock.run_async()`) and Celery 5.3+. Install your broker's extra yourself, for example `celery[redis]`. To use async tasks with a database, also install an async driver, for example `bedrock-core[async-postgresql]`.
 
 ## Project layout
 

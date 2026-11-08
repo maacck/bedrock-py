@@ -23,7 +23,7 @@ description: 安装 bedrock-celery，在 Celery worker 中运行 Bedrock 模块
   `uv add "bedrock-celery @ git+https://github.com/maacck/bedrock-py#subdirectory=integrations/celery"`。
 </Callout>
 
-`bedrock-celery` 需要 Python 3.12+，会安装 `bedrock-core` 和 Celery 5.3+。broker 对应的 extra 需自行安装，例如 `celery[redis]`。要在异步任务中使用数据库，还需安装异步驱动，例如 `bedrock-core[async-postgresql]`。
+`bedrock-celery` 需要 Python 3.12+，会安装 `bedrock-core` 0.3.2+（首个提供 `bedrock.run_async()` 的版本）和 Celery 5.3+。broker 对应的 extra 需自行安装，例如 `celery[redis]`。要在异步任务中使用数据库，还需安装异步驱动，例如 `bedrock-core[async-postgresql]`。
 
 ## 项目结构
 
