@@ -14,10 +14,10 @@ pytest_plugins = ["bedrock.testing"]
 
 `bedrock-core` 不依赖 pytest，请在测试环境中自行安装。
 
-| Fixture | 提供给测试的内容 | 底层上下文管理器 |
+| Fixture | 提供给测试的内容 | 底层 API |
 |---|---|---|
-| `bedrock_runtime` | 一个全新的注册表，`bedrock.setup()` / `asetup()` / `shutdown()` / `ashutdown()` 都作用于它；以及记录下来的生命周期事件 | `isolated_runtime()` |
-| `module_factory` | 一个可调用对象，用于写出可导入的临时 Bedrock 模块 | `ModuleFactory` |
+| `bedrock_runtime` | 一个 `BedrockRuntime`：全新的 `.registry`，`bedrock.setup()` / `asetup()` / `shutdown()` / `ashutdown()` 都作用于它；以及记录下来的生命周期事件 `.events` | `isolated_runtime()` 上下文管理器，产出 `BedrockRuntime` |
+| `module_factory` | 一个可调用对象，用于写出可导入的临时 Bedrock 模块 | `ModuleFactory(root)`；不用 fixture 时需自行把 `root` 加入 `sys.path` 并调用 `cleanup()` |
 | `db_session` | 一个 session，所在连接的事务在测试结束后回滚 | `rollback_session()` / `arollback_session()` |
 | `clean_container`、`di_container`、`override_service` | 依赖注入隔离 | 见 [依赖注入](/docs/guides/di) |
 | `clean_hooks`、`hook_registry`、`hook_namespace` | Hook 注册表隔离 | 见 [Hook 系统](/docs/guides/hooks) |

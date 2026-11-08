@@ -8,10 +8,10 @@ Enable once in the project's root `conftest.py`:
 pytest_plugins = ["bedrock.testing"]
 ```
 
-| Fixture | Use for | Context manager behind it |
+| Fixture | Use for | API behind it |
 |---|---|---|
-| `bedrock_runtime` | Tests that call `bedrock.setup()` / `asetup()` or assert lifecycle order | `isolated_runtime()` |
-| `module_factory` | Temporary Bedrock modules (manifest, bootstrap, models, any file) | `ModuleFactory` |
+| `bedrock_runtime` | Tests that call `bedrock.setup()` / `asetup()` or assert lifecycle order; yields `BedrockRuntime(registry, events)` | `isolated_runtime()` context manager |
+| `module_factory` | Temporary Bedrock modules (manifest, bootstrap, models, any file) | `ModuleFactory(root)` class; without the fixture, put `root` on `sys.path` and call `cleanup()` |
 | `db_session` | Database writes that must not survive the test | `rollback_session()` / `arollback_session()` |
 | `clean_container`, `di_container`, `override_service` | DI isolation (`references/di-guide.md`) | — |
 | `clean_hooks`, `hook_registry`, `hook_namespace` | Hook isolation (`references/hooks-guide.md`) | — |

@@ -15,10 +15,10 @@ pytest_plugins = ["bedrock.testing"]
 
 pytest is not a dependency of `bedrock-core`; install it in your test environment.
 
-| Fixture | Gives the test | Underlying context manager |
+| Fixture | Gives the test | Underlying API |
 |---|---|---|
-| `bedrock_runtime` | A fresh registry that `bedrock.setup()` / `asetup()` / `shutdown()` / `ashutdown()` act on, plus recorded lifecycle events | `isolated_runtime()` |
-| `module_factory` | A callable that writes importable temporary Bedrock modules | `ModuleFactory` |
+| `bedrock_runtime` | A `BedrockRuntime`: a fresh `.registry` that `bedrock.setup()` / `asetup()` / `shutdown()` / `ashutdown()` act on, plus recorded lifecycle `.events` | `isolated_runtime()` context manager, yields `BedrockRuntime` |
+| `module_factory` | A callable that writes importable temporary Bedrock modules | `ModuleFactory(root)`; without the fixture, put `root` on `sys.path` and call `cleanup()` yourself |
 | `db_session` | A session on a connection whose transaction is rolled back after the test | `rollback_session()` / `arollback_session()` |
 | `clean_container`, `di_container`, `override_service` | Dependency injection isolation | see [Dependency Injection](/docs/guides/di) |
 | `clean_hooks`, `hook_registry`, `hook_namespace` | Hook registry isolation | see [Hook System](/docs/guides/hooks) |

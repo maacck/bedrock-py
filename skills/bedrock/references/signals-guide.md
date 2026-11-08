@@ -346,7 +346,7 @@ During `registry.shutdown()`:
 4. Each module's `on_shutdown` hook called in **reverse** order, `module_shutdown` per module
 5. Registry signals completion, `registry_shutdown` once
 
-Lifecycle signals are delivered inside the operation that emits them, so receiver exceptions can interrupt it; they are not detached background tasks. Async entrypoints (`asetup()`, `apopulate()`, `amark_ready()`, `ashutdown()`) use `asend()`: async receivers are awaited on the running loop and sync receivers run in a worker thread. Sync entrypoints use `send()`; outside an event loop they run async receivers on the registry's private loop, and inside a running loop they raise `ModuleAsyncRequiredError` when they reach an async receiver. Failed `registry_ready` or `registry_shutdown` notifications may be retried, so their receivers should be retry-safe. Module shutdown is also used to unwind modules after a failed installation.
+Lifecycle signals are delivered inside the operation that emits them, so receiver exceptions can interrupt it; they are not detached background tasks. Async entrypoints (`asetup()`, `apopulate()`, `amark_ready()`, `ashutdown()`) use `asend()`: async receivers are awaited on the running loop and sync receivers run in a worker thread. Sync entrypoints use `send()`; outside an event loop they run async receivers on Bedrock's process-wide runtime loop (the one `bedrock.run_async()` uses), and inside a running loop they raise `ModuleAsyncRequiredError` when they reach an async receiver. Failed `registry_ready` or `registry_shutdown` notifications may be retried, so their receivers should be retry-safe. Module shutdown is also used to unwind modules after a failed installation.
 
 ---
 
