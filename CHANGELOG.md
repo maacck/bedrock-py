@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Testing**: runtime-level pytest fixtures in `bedrock.testing` (enabled with
+  `pytest_plugins = ["bedrock.testing"]`):
+  - `bedrock_runtime` gives each test a fresh module registry that `bedrock.setup()`, `asetup()`,
+    `shutdown()` and `ashutdown()` act on, records lifecycle events as `LifecycleEvent(kind, module)`,
+    and on teardown shuts the registry's modules down, removes lifecycle-signal receivers added
+    during the test, resets the DI container and hooks, restores `os.environ`, and drops cached
+    `SettingsProxy` values. Backed by the `isolated_runtime()` context manager.
+  - `module_factory(name, *, manifest=None, bootstrap=None, models=None, files=None)` writes
+    importable temporary Bedrock modules and removes them, including their SQLAlchemy models,
+    after the test, so the next test can reuse the name.
+  - `db_session` runs the test's database work on one connection inside an outer transaction that
+    is rolled back afterwards; `commit()` in service code (including `db.session_scope()`) commits a
+    savepoint. `rollback_session()` and `arollback_session()` provide the same isolation as context
+    managers, the async one for use in an async fixture. SQLite is supported.
+
 ## [0.3.1] - 2026-11-08
 
 ### Breaking changes

@@ -14,7 +14,8 @@
     "di",
     "provider",
     "class-registry",
-    "hooks"
+    "hooks",
+    "testing"
   ],
   "defaultOpen": true
 }
