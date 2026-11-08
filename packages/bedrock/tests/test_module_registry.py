@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -13,17 +12,15 @@ from bedrock.module.exc import (
 )
 from bedrock.module.registry import ModuleRegistry
 from bedrock.module.signals import module_loaded, module_ready, module_shutdown, registry_ready, registry_shutdown
-
-from tests.helpers import make_fake_module
+from bedrock.testing.modules import ModuleFactory
 
 
 class TestDependencyResolution:
     """Installation order and dependency graph validation."""
 
-    def test_installs_dependencies_in_order(self, fake_package: Path) -> None:
-        make_fake_module(fake_package, "core", manifest={"title": "Core", "version": "1"})
-        make_fake_module(
-            fake_package,
+    def test_installs_dependencies_in_order(self, module_factory: ModuleFactory) -> None:
+        module_factory("core", manifest={"title": "Core", "version": "1"})
+        module_factory(
             "api",
             manifest={"title": "API", "version": "1", "depends_on": ["core"]},
         )
@@ -33,15 +30,13 @@ class TestDependencyResolution:
 
         assert registry.list_installed() == ["core", "api"]
 
-    def test_installs_deep_dependency_chain(self, fake_package: Path) -> None:
-        make_fake_module(fake_package, "db", manifest={"title": "DB", "version": "1"})
-        make_fake_module(
-            fake_package,
+    def test_installs_deep_dependency_chain(self, module_factory: ModuleFactory) -> None:
+        module_factory("db", manifest={"title": "DB", "version": "1"})
+        module_factory(
             "models",
             manifest={"title": "Models", "version": "1", "depends_on": ["db"]},
         )
-        make_fake_module(
-            fake_package,
+        module_factory(
             "api",
             manifest={"title": "API", "version": "1", "depends_on": ["models"]},
         )
@@ -51,8 +46,8 @@ class TestDependencyResolution:
 
         assert registry.list_installed() == ["db", "models", "api"]
 
-    def test_repeated_install_is_noop(self, fake_package: Path) -> None:
-        make_fake_module(fake_package, "once", manifest={"title": "Once", "version": "1"})
+    def test_repeated_install_is_noop(self, module_factory: ModuleFactory) -> None:
+        module_factory("once", manifest={"title": "Once", "version": "1"})
 
         registry = ModuleRegistry()
         first = registry.install("once")
@@ -61,14 +56,12 @@ class TestDependencyResolution:
         assert registry.list_installed() == ["once"]
         assert first is second
 
-    def test_detects_circular_dependency(self, fake_package: Path) -> None:
-        make_fake_module(
-            fake_package,
+    def test_detects_circular_dependency(self, module_factory: ModuleFactory) -> None:
+        module_factory(
             "loop_a",
             manifest={"title": "Loop A", "version": "1", "depends_on": ["loop_b"]},
         )
-        make_fake_module(
-            fake_package,
+        module_factory(
             "loop_b",
             manifest={"title": "Loop B", "version": "1", "depends_on": ["loop_a"]},
         )
@@ -78,9 +71,8 @@ class TestDependencyResolution:
         with pytest.raises(ModuleDependencyError, match="Circular dependency detected"):
             registry.install("loop_a")
 
-    def test_detects_self_dependency(self, fake_package: Path) -> None:
-        make_fake_module(
-            fake_package,
+    def test_detects_self_dependency(self, module_factory: ModuleFactory) -> None:
+        module_factory(
             "self_loop",
             manifest={"title": "Self", "version": "1", "depends_on": ["self_loop"]},
         )
@@ -94,8 +86,8 @@ class TestDependencyResolution:
 class TestReadinessApi:
     """``get`` / ``all`` raise before the registry is marked ready."""
 
-    def test_get_raises_before_ready(self, fake_package: Path) -> None:
-        make_fake_module(fake_package, "mod_a", manifest={"title": "A", "version": "1"})
+    def test_get_raises_before_ready(self, module_factory: ModuleFactory) -> None:
+        module_factory("mod_a", manifest={"title": "A", "version": "1"})
 
         registry = ModuleRegistry()
         registry.install("mod_a")
@@ -103,8 +95,8 @@ class TestReadinessApi:
         with pytest.raises(AppRegistryNotReady):
             registry.get("mod_a")
 
-    def test_all_raises_before_ready(self, fake_package: Path) -> None:
-        make_fake_module(fake_package, "mod_b", manifest={"title": "B", "version": "1"})
+    def test_all_raises_before_ready(self, module_factory: ModuleFactory) -> None:
+        module_factory("mod_b", manifest={"title": "B", "version": "1"})
 
         registry = ModuleRegistry()
         registry.install("mod_b")
@@ -112,8 +104,8 @@ class TestReadinessApi:
         with pytest.raises(AppRegistryNotReady):
             registry.all()
 
-    def test_get_and_all_work_after_mark_ready(self, fake_package: Path) -> None:
-        make_fake_module(fake_package, "mod_c", manifest={"title": "C", "version": "1"})
+    def test_get_and_all_work_after_mark_ready(self, module_factory: ModuleFactory) -> None:
+        module_factory("mod_c", manifest={"title": "C", "version": "1"})
 
         registry = ModuleRegistry()
         registry.install("mod_c")
@@ -122,8 +114,8 @@ class TestReadinessApi:
         assert registry.get("mod_c").name == "mod_c"
         assert len(registry.all()) == 1
 
-    def test_is_installed_works_before_ready(self, fake_package: Path) -> None:
-        make_fake_module(fake_package, "mod_d", manifest={"title": "D", "version": "1"})
+    def test_is_installed_works_before_ready(self, module_factory: ModuleFactory) -> None:
+        module_factory("mod_d", manifest={"title": "D", "version": "1"})
 
         registry = ModuleRegistry()
         registry.install("mod_d")
@@ -135,9 +127,9 @@ class TestReadinessApi:
 class TestPopulate:
     """Bulk installation via ``populate``."""
 
-    def test_populate_installs_multiple_modules(self, fake_package: Path) -> None:
-        make_fake_module(fake_package, "alpha", manifest={"title": "Alpha", "version": "1"})
-        make_fake_module(fake_package, "beta", manifest={"title": "Beta", "version": "1"})
+    def test_populate_installs_multiple_modules(self, module_factory: ModuleFactory) -> None:
+        module_factory("alpha", manifest={"title": "Alpha", "version": "1"})
+        module_factory("beta", manifest={"title": "Beta", "version": "1"})
 
         registry = ModuleRegistry()
         result = registry.populate(["alpha", "beta"])
@@ -145,8 +137,8 @@ class TestPopulate:
         assert registry.ready is True
         assert [app.name for app in result] == ["alpha", "beta"]
 
-    def test_populate_is_not_reentrant(self, fake_package: Path) -> None:
-        make_fake_module(fake_package, "reent", manifest={"title": "Reent", "version": "1"})
+    def test_populate_is_not_reentrant(self, module_factory: ModuleFactory) -> None:
+        module_factory("reent", manifest={"title": "Reent", "version": "1"})
 
         registry = ModuleRegistry()
         registry._loading = True  # simulate in-progress populate
@@ -154,14 +146,13 @@ class TestPopulate:
         with pytest.raises(ModuleLifecycleError, match="not reentrant"):
             registry.populate(["reent"])
 
-    def test_populate_resets_loading_flag_after_hook_failure(self, fake_package: Path) -> None:
-        make_fake_module(
-            fake_package,
+    def test_populate_resets_loading_flag_after_hook_failure(self, module_factory: ModuleFactory) -> None:
+        module_factory(
             "bad_load",
             manifest={"title": "BadLoad", "version": "1"},
             bootstrap="def on_load(r, a): pass\n",
         )
-        make_fake_module(fake_package, "good_load", manifest={"title": "GoodLoad", "version": "1"})
+        module_factory("good_load", manifest={"title": "GoodLoad", "version": "1"})
 
         registry = ModuleRegistry()
 
@@ -180,13 +171,14 @@ class TestPopulate:
 class TestMarkReady:
     """Lifecycle transition from *loaded* to *ready*."""
 
-    def test_calls_ready_hooks_and_emits_signals(self, fake_package: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_calls_ready_hooks_and_emits_signals(
+        self, module_factory: ModuleFactory, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         import builtins
 
         ready_calls: list[str] = []
         monkeypatch.setattr(builtins, "_ready_calls", ready_calls, raising=False)
-        make_fake_module(
-            fake_package,
+        module_factory(
             "ready_mod",
             manifest={"title": "Ready", "version": "1"},
             bootstrap="def ready(*, app): __import__('builtins')._ready_calls.append(f'ready:{app.name}')\n",
@@ -216,9 +208,8 @@ class TestMarkReady:
         assert "module_ready" in sig_calls
         assert "registry_ready" in reg_calls
 
-    def test_raises_module_lifecycle_error_on_bad_ready_hook(self, fake_package: Path) -> None:
-        make_fake_module(
-            fake_package,
+    def test_raises_module_lifecycle_error_on_bad_ready_hook(self, module_factory: ModuleFactory) -> None:
+        module_factory(
             "bad_ready",
             manifest={"title": "Bad Ready", "version": "1"},
             bootstrap="def ready(*, registry, app): raise ValueError('boom')\n",
@@ -234,15 +225,13 @@ class TestMarkReady:
 class TestShutdown:
     """Reverse-order shutdown and signal emission."""
 
-    def test_shutdown_calls_hooks_in_reverse_order(self, fake_package: Path) -> None:
-        make_fake_module(
-            fake_package,
+    def test_shutdown_calls_hooks_in_reverse_order(self, module_factory: ModuleFactory) -> None:
+        module_factory(
             "first",
             manifest={"title": "First", "version": "1"},
             bootstrap="def on_shutdown(*, app): __import__('builtins')._shutdown_order.append(app.name)\n",
         )
-        make_fake_module(
-            fake_package,
+        module_factory(
             "second",
             manifest={"title": "Second", "version": "1", "depends_on": ["first"]},
             bootstrap="def on_shutdown(*, app): __import__('builtins')._shutdown_order.append(app.name)\n",
@@ -275,9 +264,8 @@ class TestShutdown:
         assert "module_shutdown" in sig_calls
         assert "registry_shutdown" in reg_calls
 
-    def test_shutdown_wraps_hook_errors(self, fake_package: Path) -> None:
-        make_fake_module(
-            fake_package,
+    def test_shutdown_wraps_hook_errors(self, module_factory: ModuleFactory) -> None:
+        module_factory(
             "bad_shutdown",
             manifest={"title": "Bad Shutdown", "version": "1"},
             bootstrap="def on_shutdown(*, registry, app): raise RuntimeError('shutdown boom')\n",
@@ -293,9 +281,8 @@ class TestShutdown:
 class TestLifecycleHooks:
     """on_load hook invocation and error wrapping."""
 
-    def test_on_load_hook_called_during_install(self, fake_package: Path) -> None:
-        make_fake_module(
-            fake_package,
+    def test_on_load_hook_called_during_install(self, module_factory: ModuleFactory) -> None:
+        module_factory(
             "load_mod",
             manifest={"title": "Load", "version": "1"},
             bootstrap="def on_load(*, app): __import__('builtins')._load_calls.append(app.name)\n",
@@ -310,9 +297,8 @@ class TestLifecycleHooks:
 
         assert builtins._load_calls == ["load_mod"]
 
-    def test_on_load_error_raises_module_lifecycle_error(self, fake_package: Path) -> None:
-        make_fake_module(
-            fake_package,
+    def test_on_load_error_raises_module_lifecycle_error(self, module_factory: ModuleFactory) -> None:
+        module_factory(
             "bad_load",
             manifest={"title": "Bad Load", "version": "1"},
             bootstrap="def on_load(*, registry, app): raise ZeroDivisionError('load boom')\n",
@@ -323,9 +309,8 @@ class TestLifecycleHooks:
         with pytest.raises(ModuleLifecycleError, match="on_load.*raised an error"):
             registry.install("bad_load")
 
-    def test_unsupported_legacy_positional_hook_raises_clear_error(self, fake_package: Path) -> None:
-        make_fake_module(
-            fake_package,
+    def test_unsupported_legacy_positional_hook_raises_clear_error(self, module_factory: ModuleFactory) -> None:
+        module_factory(
             "legacy_bad_load",
             manifest={"title": "Legacy Bad Load", "version": "1"},
             bootstrap="def on_load(r, a): pass\n",
@@ -338,8 +323,8 @@ class TestLifecycleHooks:
 
         assert "Unsupported required parameters: r, a" in str(exc_info.value)
 
-    def test_module_loaded_signal_emitted(self, fake_package: Path) -> None:
-        make_fake_module(fake_package, "sig_mod", manifest={"title": "Sig", "version": "1"})
+    def test_module_loaded_signal_emitted(self, module_factory: ModuleFactory) -> None:
+        module_factory("sig_mod", manifest={"title": "Sig", "version": "1"})
 
         events: list[str] = []
 

@@ -1,0 +1,189 @@
+---
+title: Testing
+description: Isolated runtime, temporary modules, and rollback-isolated database sessions with bedrock.testing
+---
+
+# Testing
+
+`bedrock.testing` is a pytest plugin. It gives every test its own module registry, creates
+temporary Bedrock modules on demand, and runs database work inside a transaction that is rolled
+back when the test ends. Enable it once in the project's root `conftest.py`:
+
+```python
+pytest_plugins = ["bedrock.testing"]
+```
+
+pytest is not a dependency of `bedrock-core`; install it in your test environment.
+
+| Fixture | Gives the test | Underlying context manager |
+|---|---|---|
+| `bedrock_runtime` | A fresh registry that `bedrock.setup()` / `asetup()` / `shutdown()` / `ashutdown()` act on, plus recorded lifecycle events | `isolated_runtime()` |
+| `module_factory` | A callable that writes importable temporary Bedrock modules | `ModuleFactory` |
+| `db_session` | A session on a connection whose transaction is rolled back after the test | `rollback_session()` / `arollback_session()` |
+| `clean_container`, `di_container`, `override_service` | Dependency injection isolation | see [Dependency Injection](/docs/guides/di) |
+| `clean_hooks`, `hook_registry`, `hook_namespace` | Hook registry isolation | see [Hook System](/docs/guides/hooks) |
+
+## Isolated runtime
+
+```python
+import bedrock
+
+
+def test_orders_start_after_billing(bedrock_runtime, module_factory):
+    module_factory("billing")
+    module_factory("orders", manifest={"title": "Orders", "version": "1.0.0", "depends_on": ["billing"]})
+
+    bedrock.setup("orders")
+
+    loaded = [event.module for event in bedrock_runtime.events if event.kind == "loaded"]
+    assert loaded == ["billing", "orders"]
+    assert bedrock_runtime.registry.is_installed("billing")
+```
+
+While the test runs, `bedrock.apps` (and every other alias of the global registry) is a new
+`ModuleRegistry`, so the real entrypoints work and `bedrock.setup()` is never short-circuited by an
+earlier test.
+
+`bedrock_runtime.events` is a list of `LifecycleEvent(kind, module)` named tuples. `kind` is one of
+`loaded`, `ready`, `registry_ready`, `shutdown`, `registry_shutdown`; `module` is the module's import
+path, or `None` for the two registry events. A failed installation that rolls back shows up as
+`shutdown` events. Only events from this test's registry are recorded.
+
+When the test ends, whether it passed or failed:
+
+1. Modules that are not shut down yet are shut down with `registry.shutdown()`.
+2. Receivers connected to the lifecycle signals (`bedrock.module.signals`) during the test are removed.
+3. The DI container and the hook registry are reset, like `clean_container` and `clean_hooks`.
+4. `os.environ` is restored.
+5. Every `SettingsProxy` drops its cached settings, so the next access reads the environment again.
+   The same reset also happens when the fixture starts, so `monkeypatch.setenv(...)` takes effect even
+   for settings an earlier test already loaded.
+6. The original global registry is put back.
+
+Every step runs even if an earlier one fails; the first failure is then reported as a teardown
+error.
+
+Things to know:
+
+- **Async tests stop the runtime themselves.** Call `await bedrock.ashutdown()` (or
+  `await bedrock_runtime.registry.ashutdown()`) before the test returns. Teardown has no running
+  event loop, so it can only use the synchronous `shutdown()`, and async clients opened on the test's
+  loop may no longer close from there.
+- **`bedrock.shutdown()` also closes the database.** As in production, it releases `db` after the
+  modules. Teardown deliberately calls only `registry.shutdown()`, so a database initialized once
+  per session stays usable.
+- **Hooks should use the injected `registry`.** Code that bound the global registry at import time
+  (`from bedrock import apps` at module level) keeps the old object. Bootstrap hooks receive
+  `registry` as a keyword argument; use it.
+- **Turn deliberate shutdown failures off before the test ends.** A module whose `on_shutdown` failed is
+  not shut down yet, so teardown calls `shutdown()` for it again and reports the failure if the hook
+  still raises.
+
+## Temporary modules
+
+```python
+def test_ready_hook_runs(bedrock_runtime, module_factory):
+    module_factory(
+        "inventory",
+        bootstrap="""
+            def ready(*, app):
+                app.package_module.READY = True
+        """,
+        files={"installation.py": "def install(**kwargs):\n    pass\n"},
+    )
+
+    bedrock.setup("inventory")
+
+    assert bedrock_runtime.registry.get("inventory").package_module.READY
+```
+
+`module_factory(name, *, manifest=None, bootstrap=None, models=None, files=None)` writes the package
+and returns its import path.
+
+| Argument | Written to | Default |
+|---|---|---|
+| `manifest` | `manifest.yaml` (replaces the whole manifest) | `{"title": name, "version": "0.1.0"}` |
+| `bootstrap` | `bootstrap.py` | not written |
+| `models` | `models.py` | not written |
+| `files` | any relative path, e.g. `installation.py`, `commands.py`, `domains/x/service.py` | none |
+
+Source strings are dedented. `name` must be a plain identifier and unique within the test.
+After the test, the package and its submodules leave `sys.modules`, and SQLAlchemy models it defined
+are removed from `BedrockModel.metadata` and the mapper registry. The next test can therefore create
+a module with the same name and the same model classes without warnings.
+
+## Database rollback
+
+Initialize the database once per session, then request `db_session` in tests that write data:
+
+```python
+# conftest.py
+import pytest
+from bedrock.database import db
+from bedrock.database.base import BedrockModel
+
+pytest_plugins = ["bedrock.testing"]
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _database():
+    db.init(url="postgresql+psycopg://app:app@localhost:5432/app_test")
+    BedrockModel.metadata.create_all(db.engine)
+    yield
+    db.close()
+```
+
+```python
+# test_orders.py
+from sqlalchemy import select
+
+
+def test_place_order(db_session):
+    place_order(sku="A1")  # service code: with db.session_scope() as session: ... (commits)
+
+    assert db_session.scalar(select(Order).where(Order.sku == "A1")) is not None
+    # The row is gone in the next test.
+```
+
+During the test, every session that `db` hands out (`db.session`, `db.session_scope()`,
+`db.independent_session()`) runs on one connection inside an outer transaction. A `commit()` in
+service code commits a savepoint; the outer transaction is rolled back when the test ends, also when
+the test fails. The `db_session` session itself is not bound to `db.session`, so service code that
+opens `db.session_scope()` keeps working.
+
+SQLite needs explicit `BEGIN` statements for savepoints to roll back with the outer transaction; the
+plugin switches only the test's own connection into that mode and restores it afterwards.
+
+Limits:
+
+- `db.independent_session()` shares the test connection, so it sees the caller's uncommitted data.
+- Code that opens its own connection with `db.engine.connect()` bypasses the rollback.
+- Calling `db.init()` inside the test replaces the session factory and ends the isolation.
+- If `db` was not initialized, `rollback_session()` raises `DatabaseNotConfiguredError`.
+
+### Async sessions
+
+The plugin's fixtures are synchronous so that it does not depend on an async test plugin. With
+pytest-asyncio, wrap `arollback_session()` in your own fixture:
+
+```python
+import pytest_asyncio
+from bedrock.testing import arollback_session
+
+
+@pytest_asyncio.fixture
+async def adb_session():
+    async with arollback_session() as session:
+        yield session
+```
+
+`db.asession`, `db.asession_scope()` and `db.aindependent_session()` then share the rolled-back
+connection, with the same limits as above. Both context managers accept a `DatabaseManager` other
+than the global `db`: `rollback_session(manager)`.
+
+## Related
+
+- [Dependency Injection](/docs/guides/di)
+- [Hook System](/docs/guides/hooks)
+- [Module Anatomy](/docs/guides/module-anatomy)
+- [Database](/docs/guides/database)

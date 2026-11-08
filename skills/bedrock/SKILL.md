@@ -37,6 +37,7 @@ Named providers (instances or factories, lazy paths, install hints): `from bedro
 - **Using signals / events** → Read `references/signals-guide.md`
 - **Understanding project structure** → Read `references/module-hierarchy.md`
 - **Understanding architecture / layer boundaries** → Read `references/architecture.md`
+- **Writing tests: isolated runtime, temporary modules, DB rollback** → Read `references/testing-guide.md`
 - **Using caching / distributed locks** → View `bedrock app playbook bedrock.contrib.cache`
 - **Instrumenting metrics** → View `bedrock app playbook bedrock.contrib.metric`
 - **Using file/object storage** → View `bedrock app playbook bedrock.contrib.storage`

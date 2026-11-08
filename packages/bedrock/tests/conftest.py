@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+pytest_plugins = ["bedrock.testing"]
+
 
 @pytest.fixture(autouse=True)
 def _clean_sys_modules() -> None:

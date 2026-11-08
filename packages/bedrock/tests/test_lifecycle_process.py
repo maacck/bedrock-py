@@ -21,9 +21,8 @@ from bedrock.module import (
     ModuleLifecycleState,
     ModuleRegistry,
 )
+from bedrock.testing import BedrockRuntime, ModuleFactory
 from sqlalchemy import event, select
-
-from tests.helpers import make_fake_module
 
 pytestmark = pytest.mark.filterwarnings(
     "error::RuntimeWarning",
@@ -83,11 +82,14 @@ def proc_state(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[str]]:
 
 
 @pytest.fixture
-def registry(monkeypatch: pytest.MonkeyPatch) -> ModuleRegistry:
-    """A fresh registry installed as the global one used by ``bedrock.lifecycle``."""
-    fresh = ModuleRegistry()
-    monkeypatch.setattr(lifecycle, "apps", fresh)
-    return fresh
+def registry(bedrock_runtime: BedrockRuntime) -> Iterator[ModuleRegistry]:
+    """The isolated registry that ``bedrock.setup()`` and ``bedrock.shutdown()`` act on.
+
+    Injected hook failures are cleared first, so the runtime's teardown can finish shutting down modules that a
+    test left behind after a deliberate shutdown failure.
+    """
+    yield bedrock_runtime.registry
+    builtins._proc_failures.clear()
 
 
 @pytest.fixture
@@ -98,11 +100,9 @@ def db(monkeypatch: pytest.MonkeyPatch) -> DatabaseManager:
     return fresh
 
 
-def _modules(root: Path) -> None:
-    make_fake_module(root, "proc_a", manifest={"title": "a", "version": "1"}, bootstrap=_BOOTSTRAP)
-    make_fake_module(
-        root, "proc_b", manifest={"title": "b", "version": "1", "depends_on": ["proc_a"]}, bootstrap=_BOOTSTRAP
-    )
+def _modules(factory: ModuleFactory) -> None:
+    factory("proc_a", manifest={"title": "a", "version": "1"}, bootstrap=_BOOTSTRAP)
+    factory("proc_b", manifest={"title": "b", "version": "1", "depends_on": ["proc_a"]}, bootstrap=_BOOTSTRAP)
 
 
 def _open_engines(
@@ -144,9 +144,9 @@ class TestPublicSurface:
         assert bedrock.ashutdown is lifecycle.ashutdown
 
     def test_setup_is_idempotent_and_shutdown_stops_modules(
-        self, fake_package: Path, registry: ModuleRegistry, proc_state: list[str]
+        self, module_factory: ModuleFactory, registry: ModuleRegistry, proc_state: list[str]
     ) -> None:
-        _modules(fake_package)
+        _modules(module_factory)
 
         bedrock.setup("proc_b")
         bedrock.setup("proc_b")
@@ -158,9 +158,9 @@ class TestPublicSurface:
 
     @pytest.mark.asyncio
     async def test_asetup_is_idempotent_and_ashutdown_stops_modules(
-        self, fake_package: Path, registry: ModuleRegistry, proc_state: list[str]
+        self, module_factory: ModuleFactory, registry: ModuleRegistry, proc_state: list[str]
     ) -> None:
-        _modules(fake_package)
+        _modules(module_factory)
         builtins._proc_async.update({"proc_a", "proc_b"})  # type: ignore[attr-defined]
 
         await bedrock.asetup("proc_b")
@@ -176,14 +176,14 @@ class TestDatabaseReleasedAfterModules:
     @pytest.mark.parametrize("mode", MODES)
     def test_both_engines_are_disposed_after_every_module_hook(
         self,
-        fake_package: Path,
+        module_factory: ModuleFactory,
         tmp_path: Path,
         registry: ModuleRegistry,
         db: DatabaseManager,
         proc_state: list[str],
         mode: str,
     ) -> None:
-        _modules(fake_package)
+        _modules(module_factory)
         builtins._proc_async.add("proc_a")  # type: ignore[attr-defined]
         registry.populate(["proc_b"])
         _open_engines(db, tmp_path, proc_state)
@@ -201,14 +201,14 @@ class TestDatabaseReleasedAfterModules:
     @pytest.mark.parametrize("mode", MODES)
     def test_repeated_shutdown_does_nothing_more(
         self,
-        fake_package: Path,
+        module_factory: ModuleFactory,
         tmp_path: Path,
         registry: ModuleRegistry,
         db: DatabaseManager,
         proc_state: list[str],
         mode: str,
     ) -> None:
-        _modules(fake_package)
+        _modules(module_factory)
         registry.populate(["proc_b"])
         _open_engines(db, tmp_path, proc_state)
         _shutdown(mode)
@@ -222,14 +222,14 @@ class TestDatabaseReleasedAfterModules:
     @pytest.mark.parametrize("mode", MODES)
     def test_database_is_released_even_when_a_module_fails(
         self,
-        fake_package: Path,
+        module_factory: ModuleFactory,
         tmp_path: Path,
         registry: ModuleRegistry,
         db: DatabaseManager,
         proc_state: list[str],
         mode: str,
     ) -> None:
-        _modules(fake_package)
+        _modules(module_factory)
         registry.populate(["proc_b"])
         _open_engines(db, tmp_path, proc_state)
         builtins._proc_failures.add(("on_shutdown", "proc_b"))  # type: ignore[attr-defined]
@@ -250,7 +250,7 @@ class TestDatabaseReleasedAfterModules:
     @pytest.mark.parametrize("mode", MODES)
     def test_database_failures_are_aggregated_and_every_step_runs(
         self,
-        fake_package: Path,
+        module_factory: ModuleFactory,
         tmp_path: Path,
         registry: ModuleRegistry,
         db: DatabaseManager,
@@ -258,7 +258,7 @@ class TestDatabaseReleasedAfterModules:
         monkeypatch: pytest.MonkeyPatch,
         mode: str,
     ) -> None:
-        _modules(fake_package)
+        _modules(module_factory)
         registry.populate(["proc_b"])
         _open_engines(db, tmp_path, proc_state)
         builtins._proc_failures.add(("on_shutdown", "proc_a"))  # type: ignore[attr-defined]
@@ -283,7 +283,7 @@ class TestDatabaseReleasedAfterModules:
     @pytest.mark.parametrize("mode", MODES)
     def test_async_release_failure_is_reported(
         self,
-        fake_package: Path,
+        module_factory: ModuleFactory,
         tmp_path: Path,
         registry: ModuleRegistry,
         db: DatabaseManager,
@@ -291,7 +291,7 @@ class TestDatabaseReleasedAfterModules:
         monkeypatch: pytest.MonkeyPatch,
         mode: str,
     ) -> None:
-        _modules(fake_package)
+        _modules(module_factory)
         registry.populate(["proc_b"])
         _open_engines(db, tmp_path, proc_state)
 
@@ -310,13 +310,13 @@ class TestDatabaseReleasedAfterModules:
     @pytest.mark.parametrize("mode", MODES)
     def test_never_initialized_database_is_a_no_op(
         self,
-        fake_package: Path,
+        module_factory: ModuleFactory,
         registry: ModuleRegistry,
         db: DatabaseManager,
         monkeypatch: pytest.MonkeyPatch,
         mode: str,
     ) -> None:
-        _modules(fake_package)
+        _modules(module_factory)
         registry.populate(["proc_b"])
         built: list[str] = []
         monkeypatch.setattr(manager_module, "build_async_engine", lambda *a, **k: built.append("async"))
@@ -333,7 +333,7 @@ class TestDatabaseReleasedAfterModules:
     @pytest.mark.parametrize("mode", MODES)
     def test_sync_only_database_never_touches_the_async_side(
         self,
-        fake_package: Path,
+        module_factory: ModuleFactory,
         tmp_path: Path,
         registry: ModuleRegistry,
         db: DatabaseManager,
@@ -341,7 +341,7 @@ class TestDatabaseReleasedAfterModules:
         monkeypatch: pytest.MonkeyPatch,
         mode: str,
     ) -> None:
-        _modules(fake_package)
+        _modules(module_factory)
         registry.populate(["proc_b"])
         _open_engines(db, tmp_path, proc_state, asynchronous=False)
         calls: list[str] = []
@@ -361,14 +361,14 @@ class TestDatabaseReleasedAfterModules:
     @pytest.mark.parametrize("mode", MODES)
     def test_async_engine_alone_is_released(
         self,
-        fake_package: Path,
+        module_factory: ModuleFactory,
         tmp_path: Path,
         registry: ModuleRegistry,
         db: DatabaseManager,
         proc_state: list[str],
         mode: str,
     ) -> None:
-        _modules(fake_package)
+        _modules(module_factory)
         registry.populate(["proc_b"])
         _open_engines(db, tmp_path, proc_state, sync=False)
         proc_state.clear()
@@ -379,9 +379,14 @@ class TestDatabaseReleasedAfterModules:
         assert db.has_async_engine is False
 
     def test_sync_shutdown_closes_an_async_engine_used_on_another_loop(
-        self, fake_package: Path, tmp_path: Path, registry: ModuleRegistry, db: DatabaseManager, proc_state: list[str]
+        self,
+        module_factory: ModuleFactory,
+        tmp_path: Path,
+        registry: ModuleRegistry,
+        db: DatabaseManager,
+        proc_state: list[str],
     ) -> None:
-        _modules(fake_package)
+        _modules(module_factory)
         registry.populate(["proc_b"])
         _open_engines(db, tmp_path, proc_state)
 
@@ -394,9 +399,14 @@ class TestDatabaseReleasedAfterModules:
 class TestRunningLoop:
     @pytest.mark.asyncio
     async def test_sync_shutdown_with_async_engine_fails_before_mutating(
-        self, fake_package: Path, tmp_path: Path, registry: ModuleRegistry, db: DatabaseManager, proc_state: list[str]
+        self,
+        module_factory: ModuleFactory,
+        tmp_path: Path,
+        registry: ModuleRegistry,
+        db: DatabaseManager,
+        proc_state: list[str],
     ) -> None:
-        _modules(fake_package)
+        _modules(module_factory)
         await registry.apopulate(["proc_b"])
         db.init(
             settings=DbSettings(
@@ -419,9 +429,14 @@ class TestRunningLoop:
 
     @pytest.mark.asyncio
     async def test_sync_shutdown_with_sync_engine_only_works_in_a_running_loop(
-        self, fake_package: Path, tmp_path: Path, registry: ModuleRegistry, db: DatabaseManager, proc_state: list[str]
+        self,
+        module_factory: ModuleFactory,
+        tmp_path: Path,
+        registry: ModuleRegistry,
+        db: DatabaseManager,
+        proc_state: list[str],
     ) -> None:
-        _modules(fake_package)
+        _modules(module_factory)
         registry.populate(["proc_b"])
         _open_engines(db, tmp_path, proc_state, asynchronous=False)
         proc_state.clear()
@@ -432,9 +447,14 @@ class TestRunningLoop:
 
     @pytest.mark.asyncio
     async def test_cancelled_ashutdown_leaves_the_database_open_until_retried(
-        self, fake_package: Path, tmp_path: Path, registry: ModuleRegistry, db: DatabaseManager, proc_state: list[str]
+        self,
+        module_factory: ModuleFactory,
+        tmp_path: Path,
+        registry: ModuleRegistry,
+        db: DatabaseManager,
+        proc_state: list[str],
     ) -> None:
-        _modules(fake_package)
+        _modules(module_factory)
         builtins._proc_async.update({"proc_a", "proc_b"})  # type: ignore[attr-defined]
         await registry.apopulate(["proc_b"])
         db.init(
@@ -466,9 +486,9 @@ class TestRunningLoop:
 
 
 def test_summary_of_module_failure_without_database_keeps_the_original_error(
-    fake_package: Path, registry: ModuleRegistry, db: DatabaseManager
+    module_factory: ModuleFactory, registry: ModuleRegistry, db: DatabaseManager
 ) -> None:
-    _modules(fake_package)
+    _modules(module_factory)
     registry.populate(["proc_b"])
     builtins._proc_failures.add(("on_shutdown", "proc_b"))  # type: ignore[attr-defined]
 

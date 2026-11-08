@@ -10,17 +10,15 @@ import pytest
 import yaml
 from bedrock.module.exc import InvalidManifestError
 from bedrock.module.manifest import build_app_config, load_bootstrap, load_manifest, load_models
+from bedrock.testing.modules import ModuleFactory
 from pydantic import ValidationError
-
-from tests.helpers import make_fake_module, make_fake_module_no_manifest
 
 
 class TestLoadManifest:
     """Success and failure paths for ``load_manifest``."""
 
-    def test_loads_valid_manifest(self, fake_package: Path) -> None:
-        make_fake_module(
-            fake_package,
+    def test_loads_valid_manifest(self, module_factory: ModuleFactory) -> None:
+        module_factory(
             "valid_mod",
             manifest={"title": "Valid Module", "version": "1.0.0", "depends_on": ["other_mod"]},
         )
@@ -36,13 +34,17 @@ class TestLoadManifest:
             load_manifest("nonexistent_package_xyz")
 
     def test_raises_when_manifest_missing(self, fake_package: Path) -> None:
-        make_fake_module_no_manifest(fake_package, "no_manifest_mod")
+        package = fake_package / "no_manifest_mod"
+        package.mkdir()
+        (package / "__init__.py").write_text("")
 
         with pytest.raises(InvalidManifestError, match="Missing manifest.yaml"):
             load_manifest("no_manifest_mod")
 
-    def test_raises_on_unreadable_manifest(self, fake_package: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        make_fake_module(fake_package, "bad_read_mod", manifest={"title": "x", "version": "1"})
+    def test_raises_on_unreadable_manifest(
+        self, module_factory: ModuleFactory, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        module_factory("bad_read_mod", manifest={"title": "x", "version": "1"})
 
         def boom(*_args: Any, **_kwargs: Any) -> None:
             raise OSError("disk failure")
@@ -52,8 +54,8 @@ class TestLoadManifest:
         with pytest.raises(InvalidManifestError, match="Failed to read manifest"):
             load_manifest("bad_read_mod")
 
-    def test_raises_on_invalid_yaml(self, fake_package: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        make_fake_module(fake_package, "bad_yaml_mod", manifest={"title": "x", "version": "1"})
+    def test_raises_on_invalid_yaml(self, module_factory: ModuleFactory, monkeypatch: pytest.MonkeyPatch) -> None:
+        module_factory("bad_yaml_mod", manifest={"title": "x", "version": "1"})
 
         def bad_load(*_args: Any, **_kwargs: Any) -> None:
             raise yaml.YAMLError("bad yaml")
@@ -63,16 +65,20 @@ class TestLoadManifest:
         with pytest.raises(InvalidManifestError, match="Failed to parse manifest"):
             load_manifest("bad_yaml_mod")
 
-    def test_raises_when_yaml_is_not_mapping(self, fake_package: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        make_fake_module(fake_package, "list_yaml_mod", manifest={"title": "x", "version": "1"})
+    def test_raises_when_yaml_is_not_mapping(
+        self, module_factory: ModuleFactory, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        module_factory("list_yaml_mod", manifest={"title": "x", "version": "1"})
 
         monkeypatch.setattr(yaml, "safe_load", lambda _s: ["not", "a", "dict"])
 
         with pytest.raises(InvalidManifestError, match="must contain a YAML mapping"):
             load_manifest("list_yaml_mod")
 
-    def test_raises_on_pydantic_validation_error(self, fake_package: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        make_fake_module(fake_package, "invalid_mod", manifest={"title": "x", "version": "1"})
+    def test_raises_on_pydantic_validation_error(
+        self, module_factory: ModuleFactory, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        module_factory("invalid_mod", manifest={"title": "x", "version": "1"})
 
         def bad_validate(*_args: Any, **_kwargs: Any) -> None:
             raise ValidationError.from_exception_data(
@@ -90,9 +96,8 @@ class TestLoadManifest:
 class TestLoadBootstrap:
     """Importing optional ``bootstrap.py`` submodules."""
 
-    def test_returns_module_when_bootstrap_exists(self, fake_package: Path) -> None:
-        make_fake_module(
-            fake_package,
+    def test_returns_module_when_bootstrap_exists(self, module_factory: ModuleFactory) -> None:
+        module_factory(
             "boot_mod",
             manifest={"title": "Boot", "version": "1"},
             bootstrap="def on_load(*, registry, app): pass\n",
@@ -103,8 +108,8 @@ class TestLoadBootstrap:
         assert isinstance(result, ModuleType)
         assert hasattr(result, "on_load")
 
-    def test_returns_none_when_bootstrap_missing(self, fake_package: Path) -> None:
-        make_fake_module(fake_package, "no_boot_mod", manifest={"title": "No Boot", "version": "1"})
+    def test_returns_none_when_bootstrap_missing(self, module_factory: ModuleFactory) -> None:
+        module_factory("no_boot_mod", manifest={"title": "No Boot", "version": "1"})
 
         result = load_bootstrap("no_boot_mod")
 
@@ -114,9 +119,8 @@ class TestLoadBootstrap:
 class TestLoadModels:
     """Importing optional ``models.py`` submodules."""
 
-    def test_returns_module_when_models_exists(self, fake_package: Path) -> None:
-        make_fake_module(
-            fake_package,
+    def test_returns_module_when_models_exists(self, module_factory: ModuleFactory) -> None:
+        module_factory(
             "models_mod",
             manifest={"title": "Models", "version": "1"},
             models="x = 1\n",
@@ -126,8 +130,8 @@ class TestLoadModels:
 
         assert isinstance(result, ModuleType)
 
-    def test_returns_none_when_models_missing(self, fake_package: Path) -> None:
-        make_fake_module(fake_package, "no_models_mod", manifest={"title": "No Models", "version": "1"})
+    def test_returns_none_when_models_missing(self, module_factory: ModuleFactory) -> None:
+        module_factory("no_models_mod", manifest={"title": "No Models", "version": "1"})
 
         result = load_models("no_models_mod")
 
@@ -137,9 +141,8 @@ class TestLoadModels:
 class TestBuildAppConfig:
     """``build_app_config`` assembles a full ``AppConfig``."""
 
-    def test_builds_full_config(self, fake_package: Path) -> None:
-        make_fake_module(
-            fake_package,
+    def test_builds_full_config(self, module_factory: ModuleFactory) -> None:
+        module_factory(
             "full_mod",
             manifest={"title": "Full", "version": "2.0.0"},
             bootstrap="def ready(*, registry, app): pass\n",
@@ -154,11 +157,10 @@ class TestBuildAppConfig:
         assert isinstance(result.package_module, ModuleType)
         assert isinstance(result.bootstrap_module, ModuleType)
         assert isinstance(result.models_module, ModuleType)
-        assert result.package_dir == fake_package / "full_mod"
+        assert result.package_dir == module_factory.root / "full_mod"
 
-    def test_builds_minimal_config_without_optional_modules(self, fake_package: Path) -> None:
-        make_fake_module(
-            fake_package,
+    def test_builds_minimal_config_without_optional_modules(self, module_factory: ModuleFactory) -> None:
+        module_factory(
             "minimal_mod",
             manifest={"title": "Minimal", "version": "0.1.0"},
         )

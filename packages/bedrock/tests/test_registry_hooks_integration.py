@@ -1,20 +1,16 @@
 """Integration tests for ModuleRegistry bootstrap hook keyword invocation."""
 
-from pathlib import Path
-
 import pytest
 from bedrock.module.exc import ModuleLifecycleError
 from bedrock.module.registry import ModuleRegistry
-
-from tests.helpers import make_fake_module
+from bedrock.testing.modules import ModuleFactory
 
 
 class TestCallHookKeywordInjection:
     """Bootstrap hooks are invoked through the keyword-only contract."""
 
-    def test_hook_receives_registry_and_app_keywords(self, fake_package: Path) -> None:
-        make_fake_module(
-            fake_package,
+    def test_hook_receives_registry_and_app_keywords(self, module_factory: ModuleFactory) -> None:
+        module_factory(
             "kw_registry_app",
             manifest={"title": "KWRegistryApp", "version": "1"},
             bootstrap=(
@@ -33,9 +29,8 @@ class TestCallHookKeywordInjection:
 
         assert ("registry_app", "ModuleRegistry", "kw_registry_app") in builtins._hook_log
 
-    def test_hook_receives_container_kwarg(self, fake_package: Path) -> None:
-        make_fake_module(
-            fake_package,
+    def test_hook_receives_container_kwarg(self, module_factory: ModuleFactory) -> None:
+        module_factory(
             "kw_container",
             manifest={"title": "KWContainer", "version": "1"},
             bootstrap=(
@@ -54,9 +49,8 @@ class TestCallHookKeywordInjection:
 
         assert ("container", "Container") in builtins._hook_log
 
-    def test_hook_receives_hooks_kwarg(self, fake_package: Path) -> None:
-        make_fake_module(
-            fake_package,
+    def test_hook_receives_hooks_kwarg(self, module_factory: ModuleFactory) -> None:
+        module_factory(
             "kw_hooks",
             manifest={"title": "KWHooks", "version": "1"},
             bootstrap=(
@@ -75,9 +69,8 @@ class TestCallHookKeywordInjection:
 
         assert ("hooks", "HookRegistry") in builtins._hook_log
 
-    def test_hook_receives_all_keyword_injections(self, fake_package: Path) -> None:
-        make_fake_module(
-            fake_package,
+    def test_hook_receives_all_keyword_injections(self, module_factory: ModuleFactory) -> None:
+        module_factory(
             "kw_all",
             manifest={"title": "KWAll", "version": "1"},
             bootstrap=(
@@ -96,9 +89,8 @@ class TestCallHookKeywordInjection:
 
         assert ("all", "kw_all", "Container", "HookRegistry", "ModuleRegistry") in builtins._hook_log
 
-    def test_hook_with_kwargs_receives_all_named_injections(self, fake_package: Path) -> None:
-        make_fake_module(
-            fake_package,
+    def test_hook_with_kwargs_receives_all_named_injections(self, module_factory: ModuleFactory) -> None:
+        module_factory(
             "kw_splat",
             manifest={"title": "KWSplat", "version": "1"},
             bootstrap=(
@@ -117,9 +109,10 @@ class TestCallHookKeywordInjection:
 
         assert ("splat", ["app", "container", "hooks", "registry"]) in builtins._hook_log
 
-    def test_hook_with_named_param_and_kwargs_receives_all_named_injections(self, fake_package: Path) -> None:
-        make_fake_module(
-            fake_package,
+    def test_hook_with_named_param_and_kwargs_receives_all_named_injections(
+        self, module_factory: ModuleFactory
+    ) -> None:
+        module_factory(
             "kw_mixed_kwargs",
             manifest={"title": "KWMixedKwargs", "version": "1"},
             bootstrap=(
@@ -142,9 +135,8 @@ class TestCallHookKeywordInjection:
 class TestCallHookUnsupportedSignatures:
     """Unsupported legacy signatures fail with clear errors."""
 
-    def test_legacy_positional_names_are_rejected(self, fake_package: Path) -> None:
-        make_fake_module(
-            fake_package,
+    def test_legacy_positional_names_are_rejected(self, module_factory: ModuleFactory) -> None:
+        module_factory(
             "legacy_pos",
             manifest={"title": "LegacyPos", "version": "1"},
             bootstrap="def on_load(r, a): pass\n",
@@ -158,9 +150,8 @@ class TestCallHookUnsupportedSignatures:
         message = str(exc_info.value)
         assert "Unsupported required parameters: r, a" in message
 
-    def test_positional_only_parameters_are_rejected(self, fake_package: Path) -> None:
-        make_fake_module(
-            fake_package,
+    def test_positional_only_parameters_are_rejected(self, module_factory: ModuleFactory) -> None:
+        module_factory(
             "pos_only",
             manifest={"title": "PosOnly", "version": "1"},
             bootstrap="def on_load(registry, /, app): pass\n",
@@ -175,9 +166,8 @@ class TestCallHookUnsupportedSignatures:
 
         assert "Unsupported required parameters: registry" in str(exc_info.value)
 
-    def test_hook_with_no_supported_injected_parameters_is_rejected(self, fake_package: Path) -> None:
-        make_fake_module(
-            fake_package,
+    def test_hook_with_no_supported_injected_parameters_is_rejected(self, module_factory: ModuleFactory) -> None:
+        module_factory(
             "no_supported_params",
             manifest={"title": "NoSupportedParams", "version": "1"},
             bootstrap="def on_load(flag=False): pass\n",
@@ -188,9 +178,8 @@ class TestCallHookUnsupportedSignatures:
         with pytest.raises(ModuleLifecycleError, match="does not declare any supported injected keyword parameters"):
             registry.install("no_supported_params")
 
-    def test_unknown_required_parameter_is_rejected(self, fake_package: Path) -> None:
-        make_fake_module(
-            fake_package,
+    def test_unknown_required_parameter_is_rejected(self, module_factory: ModuleFactory) -> None:
+        module_factory(
             "unknown_required",
             manifest={"title": "UnknownRequired", "version": "1"},
             bootstrap="def on_load(*, service): pass\n",
@@ -205,9 +194,8 @@ class TestCallHookUnsupportedSignatures:
 class TestCallHookNoHook:
     """Modules without bootstrap hooks are handled gracefully."""
 
-    def test_no_bootstrap_module(self, fake_package: Path) -> None:
-        make_fake_module(
-            fake_package,
+    def test_no_bootstrap_module(self, module_factory: ModuleFactory) -> None:
+        module_factory(
             "no_bootstrap",
             manifest={"title": "NoBootstrap", "version": "1"},
         )
@@ -217,9 +205,8 @@ class TestCallHookNoHook:
 
         assert registry.is_installed("no_bootstrap")
 
-    def test_bootstrap_without_hook_function(self, fake_package: Path) -> None:
-        make_fake_module(
-            fake_package,
+    def test_bootstrap_without_hook_function(self, module_factory: ModuleFactory) -> None:
+        module_factory(
             "empty_bootstrap",
             manifest={"title": "EmptyBootstrap", "version": "1"},
             bootstrap="pass\n",
@@ -234,9 +221,8 @@ class TestCallHookNoHook:
 class TestCallHookErrorWrapping:
     """Hook exceptions are wrapped in ModuleLifecycleError."""
 
-    def test_keyword_hook_error_wrapped(self, fake_package: Path) -> None:
-        make_fake_module(
-            fake_package,
+    def test_keyword_hook_error_wrapped(self, module_factory: ModuleFactory) -> None:
+        module_factory(
             "err_kw",
             manifest={"title": "ErrKW", "version": "1"},
             bootstrap="def on_load(*, registry, app, container): raise ValueError('keyword boom')\n",
@@ -247,9 +233,8 @@ class TestCallHookErrorWrapping:
         with pytest.raises(ModuleLifecycleError, match="on_load.*raised an error"):
             registry.install("err_kw")
 
-    def test_ready_hook_error_wrapped(self, fake_package: Path) -> None:
-        make_fake_module(
-            fake_package,
+    def test_ready_hook_error_wrapped(self, module_factory: ModuleFactory) -> None:
+        module_factory(
             "err_ready",
             manifest={"title": "ErrReady", "version": "1"},
             bootstrap="def ready(*, registry, app): raise RuntimeError('ready boom')\n",
@@ -265,9 +250,8 @@ class TestCallHookErrorWrapping:
 class TestCallHookLifecycleIntegration:
     """Full lifecycle uses keyword-based hook injection."""
 
-    def test_full_lifecycle_with_hooks(self, fake_package: Path) -> None:
-        make_fake_module(
-            fake_package,
+    def test_full_lifecycle_with_hooks(self, module_factory: ModuleFactory) -> None:
+        module_factory(
             "lifecycle",
             manifest={"title": "Lifecycle", "version": "1"},
             bootstrap=(
@@ -302,17 +286,15 @@ class TestCallHookLifecycleIntegration:
         assert ready_entry == ("ready", "lifecycle", "ModuleRegistry", "HookRegistry")
         assert shutdown_entry == ("on_shutdown", "lifecycle")
 
-    def test_dependency_order_with_hooks(self, fake_package: Path) -> None:
-        make_fake_module(
-            fake_package,
+    def test_dependency_order_with_hooks(self, module_factory: ModuleFactory) -> None:
+        module_factory(
             "base_mod",
             manifest={"title": "Base", "version": "1"},
             bootstrap=(
                 "def on_load(*, app):\n    import builtins\n    builtins._hook_log.append(('load', app.name))\n"
             ),
         )
-        make_fake_module(
-            fake_package,
+        module_factory(
             "dep_mod",
             manifest={"title": "Dep", "version": "1", "depends_on": ["base_mod"]},
             bootstrap=(
@@ -330,17 +312,15 @@ class TestCallHookLifecycleIntegration:
         load_entries = [entry for entry in builtins._hook_log if entry[0] == "load"]
         assert [entry[1] for entry in load_entries] == ["base_mod", "dep_mod"]
 
-    def test_multiple_modules_require_keyword_contract(self, fake_package: Path) -> None:
-        make_fake_module(
-            fake_package,
+    def test_multiple_modules_require_keyword_contract(self, module_factory: ModuleFactory) -> None:
+        module_factory(
             "mod_keyword_only",
             manifest={"title": "KeywordOnly", "version": "1"},
             bootstrap=(
                 "def on_load(*, app):\n    import builtins\n    builtins._hook_log.append(('keyword_only', app.name))\n"
             ),
         )
-        make_fake_module(
-            fake_package,
+        module_factory(
             "mod_bad_legacy",
             manifest={"title": "BadLegacy", "version": "1", "depends_on": ["mod_keyword_only"]},
             bootstrap="def on_load(r, a): pass\n",

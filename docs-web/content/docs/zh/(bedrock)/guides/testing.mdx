@@ -1,0 +1,175 @@
+---
+title: 测试
+description: 使用 bedrock.testing 获得隔离的 runtime、临时模块和自动回滚的数据库 session
+---
+
+# 测试
+
+`bedrock.testing` 是一个 pytest 插件：每个测试拥有自己的模块注册表，可以按需生成临时
+Bedrock 模块，数据库操作运行在测试结束时回滚的事务里。在项目根目录的 `conftest.py` 中启用一次：
+
+```python
+pytest_plugins = ["bedrock.testing"]
+```
+
+`bedrock-core` 不依赖 pytest，请在测试环境中自行安装。
+
+| Fixture | 提供给测试的内容 | 底层上下文管理器 |
+|---|---|---|
+| `bedrock_runtime` | 一个全新的注册表，`bedrock.setup()` / `asetup()` / `shutdown()` / `ashutdown()` 都作用于它；以及记录下来的生命周期事件 | `isolated_runtime()` |
+| `module_factory` | 一个可调用对象，用于写出可导入的临时 Bedrock 模块 | `ModuleFactory` |
+| `db_session` | 一个 session，所在连接的事务在测试结束后回滚 | `rollback_session()` / `arollback_session()` |
+| `clean_container`、`di_container`、`override_service` | 依赖注入隔离 | 见 [依赖注入](/docs/guides/di) |
+| `clean_hooks`、`hook_registry`、`hook_namespace` | Hook 注册表隔离 | 见 [Hook 系统](/docs/guides/hooks) |
+
+## 隔离的 runtime
+
+```python
+import bedrock
+
+
+def test_orders_start_after_billing(bedrock_runtime, module_factory):
+    module_factory("billing")
+    module_factory("orders", manifest={"title": "Orders", "version": "1.0.0", "depends_on": ["billing"]})
+
+    bedrock.setup("orders")
+
+    loaded = [event.module for event in bedrock_runtime.events if event.kind == "loaded"]
+    assert loaded == ["billing", "orders"]
+    assert bedrock_runtime.registry.is_installed("billing")
+```
+
+测试运行期间，`bedrock.apps`（以及全局注册表的其他所有别名）是一个新的 `ModuleRegistry`，
+因此真实入口照常可用，`bedrock.setup()` 也不会因为之前的测试已经 setup 过而直接返回。
+
+`bedrock_runtime.events` 是 `LifecycleEvent(kind, module)` 命名元组的列表。`kind` 取值为
+`loaded`、`ready`、`registry_ready`、`shutdown`、`registry_shutdown`；`module` 是模块的 import
+路径，两个注册表级事件为 `None`。安装失败触发的回滚表现为 `shutdown` 事件。只记录本测试注册表的事件。
+
+测试结束时（无论通过还是失败）：
+
+1. 尚未关闭的模块通过 `registry.shutdown()` 关闭。
+2. 测试期间连接到生命周期 signal（`bedrock.module.signals`）的 receiver 被移除。
+3. DI 容器和 hook 注册表被重置，与 `clean_container`、`clean_hooks` 相同。
+4. 恢复 `os.environ`。
+5. 每个 `SettingsProxy` 丢弃缓存的 settings，下次访问时重新读取环境变量。fixture 开始时也会做一次，
+   所以即使之前的测试已经加载过某个 settings，`monkeypatch.setenv(...)` 依然生效。
+6. 还原原来的全局注册表。
+
+即使前面的步骤失败，后面的步骤也都会执行；之后把第一个失败作为 teardown 错误报告。
+
+注意事项：
+
+- **async 测试需要自己关闭 runtime。** 在测试返回前调用 `await bedrock.ashutdown()`（或
+  `await bedrock_runtime.registry.ashutdown()`）。teardown 时没有运行中的事件循环，只能使用同步
+  `shutdown()`，在测试事件循环上打开的 async 客户端届时可能无法关闭。
+- **`bedrock.shutdown()` 同时会关闭数据库。** 与生产环境一致，它在关闭模块之后释放 `db`。
+  teardown 有意只调用 `registry.shutdown()`，因此按 session 初始化一次的数据库仍然可用。
+- **Hook 应使用注入的 `registry`。** 在 import 时绑定全局注册表的代码（模块顶层的
+  `from bedrock import apps`）拿到的仍是旧对象。bootstrap hook 会以关键字参数收到 `registry`，请使用它。
+- **测试结束前关掉人为注入的关闭失败。** `on_shutdown` 失败的模块尚未关闭，teardown 会对它再调用一次
+  `shutdown()`；如果 hook 仍然抛错，就会报告为 teardown 错误。
+
+## 临时模块
+
+```python
+def test_ready_hook_runs(bedrock_runtime, module_factory):
+    module_factory(
+        "inventory",
+        bootstrap="""
+            def ready(*, app):
+                app.package_module.READY = True
+        """,
+        files={"installation.py": "def install(**kwargs):\n    pass\n"},
+    )
+
+    bedrock.setup("inventory")
+
+    assert bedrock_runtime.registry.get("inventory").package_module.READY
+```
+
+`module_factory(name, *, manifest=None, bootstrap=None, models=None, files=None)` 写出包并返回其 import 路径。
+
+| 参数 | 写入位置 | 默认值 |
+|---|---|---|
+| `manifest` | `manifest.yaml`（整体替换） | `{"title": name, "version": "0.1.0"}` |
+| `bootstrap` | `bootstrap.py` | 不写 |
+| `models` | `models.py` | 不写 |
+| `files` | 任意相对路径，如 `installation.py`、`commands.py`、`domains/x/service.py` | 无 |
+
+源码字符串会先去除公共缩进。`name` 必须是普通标识符，并且在一个测试内唯一。
+测试结束后，该包及其子模块从 `sys.modules` 移除，它定义的 SQLAlchemy 模型从 `BedrockModel.metadata`
+和 mapper 注册表中移除。因此下一个测试可以创建同名模块和同名模型类，不会产生警告。
+
+## 数据库回滚
+
+每个测试 session 初始化一次数据库，需要写数据的测试请求 `db_session`：
+
+```python
+# conftest.py
+import pytest
+from bedrock.database import db
+from bedrock.database.base import BedrockModel
+
+pytest_plugins = ["bedrock.testing"]
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _database():
+    db.init(url="postgresql+psycopg://app:app@localhost:5432/app_test")
+    BedrockModel.metadata.create_all(db.engine)
+    yield
+    db.close()
+```
+
+```python
+# test_orders.py
+from sqlalchemy import select
+
+
+def test_place_order(db_session):
+    place_order(sku="A1")  # service 代码：with db.session_scope() as session: ...（会提交）
+
+    assert db_session.scalar(select(Order).where(Order.sku == "A1")) is not None
+    # 下一个测试中这一行已不存在。
+```
+
+测试期间，`db` 提供的每个 session（`db.session`、`db.session_scope()`、`db.independent_session()`）
+都运行在同一个连接的外层事务中。service 代码里的 `commit()` 只提交到 savepoint；测试结束时外层事务回滚，
+测试失败时也一样。`db_session` 本身不绑定到 `db.session`，因此 service 代码里的 `db.session_scope()` 照常工作。
+
+SQLite 需要显式的 `BEGIN` 语句，savepoint 才能随外层事务一起回滚；插件只把测试自己的那一条连接切换到这种模式，
+结束后再还原。
+
+限制：
+
+- `db.independent_session()` 与测试共用连接，因此能看到调用方尚未提交的数据。
+- 通过 `db.engine.connect()` 自己打开连接的代码会绕过回滚。
+- 在测试内调用 `db.init()` 会替换 session 工厂，隔离随之失效。
+- 如果 `db` 尚未初始化，`rollback_session()` 抛出 `DatabaseNotConfiguredError`。
+
+### 异步 session
+
+插件的 fixture 都是同步的，因此不依赖任何异步测试插件。使用 pytest-asyncio 时，把
+`arollback_session()` 包进自己的 fixture：
+
+```python
+import pytest_asyncio
+from bedrock.testing import arollback_session
+
+
+@pytest_asyncio.fixture
+async def adb_session():
+    async with arollback_session() as session:
+        yield session
+```
+
+之后 `db.asession`、`db.asession_scope()` 和 `db.aindependent_session()` 共享这条会回滚的连接，
+限制与上面相同。两个上下文管理器都可以传入全局 `db` 以外的 `DatabaseManager`：`rollback_session(manager)`。
+
+## 相关
+
+- [依赖注入](/docs/guides/di)
+- [Hook 系统](/docs/guides/hooks)
+- [模块解剖](/docs/guides/module-anatomy)
+- [数据库](/docs/guides/database)
