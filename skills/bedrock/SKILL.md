@@ -444,7 +444,7 @@ Failure and execution semantics often decide between hooks and signals:
 | Order | Priority (lower runs first) | Unspecified |
 | On first exception | `call()` / `acall()` raise it; later implementations do not run; earlier side effects stay | `send()` / `asend()` raise it; remaining receivers do not run |
 | Run all, collect exceptions | `call_robust()` (sync only) | `send_robust()` / `asend_robust()` |
-| Async | `acall()` (sync implementations run in a thread) | `asend()`; lifecycle signals always use sync `send()` |
+| Async | `acall()` (sync implementations run in a thread) | `asend()`; lifecycle signals follow the entrypoint: async entrypoints (`asetup`, `ashutdown`, …) use `asend()`, sync entrypoints use `send()` and raise `ModuleAsyncRequiredError` on an async receiver inside a running loop |
 
 **Every implementation must succeed** → hooks with `firstresult=False` (default); implementations signal failure by raising a `BedrockExc` subclass, never by returning `False`. Hooks provide no rollback: see `references/hooks-guide.md` → "Extension Points That Must All Succeed" for fail-fast with DB rollback, collect-all reporting, and external side effects.
 
