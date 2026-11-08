@@ -34,7 +34,7 @@ notifiers = ProviderCatalog[Notifier](
 )
 
 # bootstrap.py
-def on_load() -> None:
+def on_load(**kwargs: object) -> None:
     notifiers.register_lazy("email", "myapp.notify.providers.email:create_email_notifier")
 ```
 
