@@ -403,6 +403,7 @@ CacheError
 ├── CacheSerializationError   — Serialization/deserialization failure
 ├── BackendNotConfiguredError — Backend not available
 ├── CacheClearRequiresPrefixError — Redis clear has neither configured nor explicit prefix
+├── CacheCloseError           — close()/aclose() failed for one or more backends
 └── CacheLockError
     ├── CacheLockAcquisitionError — Lock acquisition failure
     └── CacheLockOwnershipError   — Lock ownership violation
@@ -415,6 +416,7 @@ from bedrock.contrib.cache import (
     CacheSerializationError,
     BackendNotConfiguredError,
     CacheClearRequiresPrefixError,
+    CacheCloseError,
     CacheLockError,
     CacheLockAcquisitionError,
     CacheLockOwnershipError,
@@ -423,7 +425,7 @@ from bedrock.contrib.cache import (
 
 ## Anti-Patterns
 
-**Don't call `configure()` more than once.** The backend is initialized once. Calling `configure()` again replaces the previous backend without cleanup.
+**Don't reconfigure in a hot path.** Calling `configure()` again keeps the replaced backend open, with its connections, until `close()` / `aclose()` or registry shutdown closes it. Prefer `CACHE_BACKEND`; when code must switch backends, call `close()` / `aclose()` first.
 
 **Don't use the in-memory backend for distributed locks.** `InMemoryBackend` is process-local. Locks only coordinate within a single process. Use `RedisBackend` for cross-process coordination.
 

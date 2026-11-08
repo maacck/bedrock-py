@@ -403,6 +403,7 @@ CacheError
 ├── CacheSerializationError   — Serialization/deserialization failure
 ├── BackendNotConfiguredError — Backend not available
 ├── CacheClearRequiresPrefixError — Redis clear 既无配置前缀也无显式 prefix
+├── CacheCloseError           — close()/aclose() 关闭一个或多个后端失败
 └── CacheLockError
     ├── CacheLockAcquisitionError — Lock acquisition failure
     └── CacheLockOwnershipError   — Lock ownership violation
@@ -415,6 +416,7 @@ from bedrock.contrib.cache import (
     CacheSerializationError,
     BackendNotConfiguredError,
     CacheClearRequiresPrefixError,
+    CacheCloseError,
     CacheLockError,
     CacheLockAcquisitionError,
     CacheLockOwnershipError,
@@ -423,7 +425,7 @@ from bedrock.contrib.cache import (
 
 ## 反模式
 
-**不要多次调用 `configure()`。** 后端只会初始化一次。再次调用 `configure()` 会在不清理旧后端的情况下替换之前的后端。
+**不要在热路径中重新配置。** 再次调用 `configure()` 时，被替换的后端及其连接会一直保持打开，直到 `close()` / `aclose()` 或 registry 关闭时才被关闭。优先使用 `CACHE_BACKEND`；代码中确需切换后端时，先调用 `close()` / `aclose()`。
 
 **不要将内存后端用于分布式锁。** `InMemoryBackend` 只在单个进程内有效。锁只能协调同一进程内的操作。跨进程协调请使用 `RedisBackend`。
 

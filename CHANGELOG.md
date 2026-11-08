@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.3.1] - 2026-11-08
 
 ### Breaking changes
 
@@ -18,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   handler when it is still installed, then installs Bedrock's sink, so `LOG_*` controls CLI stderr
   and log lines are not duplicated. Handlers added by the host are kept. Repeated calls replace only
   the sink Bedrock installed; configuration never calls `logger.remove()` without a handler id.
+  The module constants `bedrock.logging.LOG_LEVEL`, `LOG_FORMAT`, `LOG_FILE`, `LOG_ROTATION`,
+  `LOG_RETENTION`, `LOG_COMPRESSION`, and `LOG_SERIALIZE` are removed; read the same values from
+  `bedrock.logging.LoggingSettings()`.
 - **Database connection ceiling.** `DATABASE_MAX_CONNECTIONS` is the per-process cap.
   Non-SQLite engines set SQLAlchemy `max_overflow` to `MAX_CONNECTIONS - POOL_SIZE`.
   The defaults (`POOL_SIZE=10`, `MAX_CONNECTIONS=10`) now allow 10 connections.
@@ -73,7 +76,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `bedrock-core[async-mysql]`. `db.aengine`, `db.asession`, `db.asession_scope()`,
   and `db.aindependent_session()` follow the sync session rules and use a separate
   context variable. A missing driver raises `DatabaseConfigurationError` naming the extra.
-  The SQLAlchemy asyncio extra (`greenlet`) is now a core dependency.
+  The SQLAlchemy asyncio extra (`greenlet`) is now a core dependency. `AsyncSessionFactory` is exported
+  from `bedrock.database` next to `SessionFactory`.
 - **`db.close()` and `db.aclose()`** dispose one side each. `close()` disposes the
   synchronous engine and leaves an already built async engine usable. `await aclose()`
   disposes the async engine and leaves the synchronous engine usable. If both were
@@ -85,10 +89,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   take a PostgreSQL advisory lock or a MySQL/MariaDB `GET_LOCK`. SQLite stays unlocked
   and must be migrated from one process. `DATABASE_MIGRATION_LOCK_TIMEOUT` (default 30
   seconds; `0` does not wait) bounds the wait. MySQL rounds a positive timeout up to
-  whole seconds. A timeout raises `MigrationError`.
+  whole seconds. A timeout raises `MigrationError`. `MigrationsManager(..., lock_timeout=30)` sets the
+  same bound in code.
 - **`bedrock db check <app>`** prints each loaded branch's current and head revisions
   without changing the database. It exits with status 1 when any branch is behind head
   or the revision is unknown, including a database that has never been migrated.
+  `MigrationsManager.check(app)` returns the same data as `BranchRevisionStatus` records
+  (`branch`, `current`, `head`, `state`), exported from `bedrock.database`.
+- `DbSettings.sqlalchemy_url(*, driver=None)` returns the connection `URL` with every component quoted;
+  `DbSettings.database_uri(*, driver=None)` renders it as a string.
 - **`bedrock.provider`** — `ProviderCatalog[P]` maps names to providers of one capability. Register an
   imported class or factory with `register()`, or a `module:attribute` path with `register_lazy()` (or
   `ProviderSpec` entries passed as `specs=`); lazy paths are imported only when selected. `create(name,
@@ -132,8 +141,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `db.close()` no longer disposes the async engine, and `db.aclose()` no longer
   disposes the sync engine. `init()` no longer sync-disposes an async engine that
   has already opened a connection, which failed with `MissingGreenlet`.
-
-## [0.3.1] - 2026-11-07
 
 ### Documentation
 

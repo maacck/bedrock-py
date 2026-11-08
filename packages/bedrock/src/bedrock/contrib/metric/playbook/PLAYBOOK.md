@@ -64,6 +64,14 @@ Prometheus fixes a metric's type and label-key schema at first observation; late
 - Emission is synchronous — providers run I/O inline on the caller's thread (StatsD `sendto`, Prometheus HTTP POST), so a slow sink can block the caller.
 - Failing providers are not auto-disabled.
 
+## Shutdown
+
+| Method | Behavior |
+|--------|----------|
+| `metrics.close()` | Call each provider's `flush()` (if defined) and sync `close()`, then clear the provider list. Called by the module's `on_shutdown` hook. |
+| `await metrics.aclose()` | Await `aflush()` then `aclose()` on providers that define them. Registry shutdown awaits it. |
+| `metrics.has_async_resources()` | `True` while `aclose()` still has a provider to release. |
+
 ## Exceptions
 
 `MetricError` (a `BedrockExc`) → `MetricConfigurationError`, `MetricProviderError`. Raised only at provider construction time; emission never raises.
