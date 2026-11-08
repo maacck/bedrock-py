@@ -32,6 +32,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a loop that is still open, and from a thread that a coroutine on the runtime loop is waiting for.
   `bedrock.shutdown()` and `ashutdown()` raise `RuntimeError` before shutting anything down when called from
   work running on the runtime loop, which cannot close itself; call `shutdown()` after `run_async()` returns.
+- **Rate limit**: new `bedrock.contrib.rate_limit` module, a framework-agnostic token bucket (GCRA).
+  `RateLimitPolicy(name, limit, period)` lets `limit` units be spent at once and returns one every
+  `period / limit`. `rate_limit.hit(policy, key, cost=1)` / `ahit()` return
+  `RateLimitDecision(allowed, limit, remaining, retry_after, reset_after)` with durations in seconds; denied hits
+  consume nothing. `reset()` / `areset()` refill a bucket. Keys are hashed before storage. The built-in Redis
+  backend (extra `bedrock-core[rate-limit-redis]`, Redis 5+) evaluates each hit atomically in one Lua script
+  on the server clock; it is selected by `RATE_LIMIT_BACKEND` (default `redis`) and configured by
+  `RATE_LIMIT_REDIS_*`, independent of `CACHE_REDIS_*`. `register_backend()` / `register_backend_lazy()` add
+  replacement backends implementing `RateLimitBackend`. Errors: `InvalidRateLimitPolicyError`,
+  `InvalidRateLimitArgumentError`, `RateLimitPolicyConflictError`, `RateLimitBackendError` (no connection
+  details in the message), `RateLimitBackendNotConfiguredError`, `RateLimitCloseError`, all under
+  `RateLimitError`.
 
 ### Changed
 

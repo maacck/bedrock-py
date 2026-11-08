@@ -94,18 +94,14 @@ from .exc import ItemConflict, ItemNotFound
 from .models import ItemModel
 
 
-def _to_entity(model: ItemModel) -> Item:
-    return Item(id=model.id, sku=model.sku, name=model.name)
-
-
 class InventoryService:
     async def acreate_item(self, data: ItemCreate) -> Item:
         if await db.asession.scalar(select(ItemModel).where(ItemModel.sku == data.sku)) is not None:
             raise ItemConflict()
-        model = ItemModel(sku=data.sku, name=data.name)
+        model = ItemModel(**data.model_dump())
         db.asession.add(model)
         await db.asession.flush()  # assigns model.id
-        item = _to_entity(model)  # read before commit: commit expires loaded attributes
+        item = Item.model_validate(model, from_attributes=True)  # read before commit: commit expires loaded attributes
         await db.asession.commit()
         return item
 
@@ -113,11 +109,13 @@ class InventoryService:
         model = await db.asession.get(ItemModel, item_id)
         if model is None:
             raise ItemNotFound()
-        return _to_entity(model)
+        return Item.model_validate(model, from_attributes=True)
 
 
 inventory_service = InventoryService()
 ```
+
+`Item.model_validate(model, from_attributes=True)` copies every `Item` field from the ORM object by attribute name, so no hand-written mapping function has to track new columns. It reads each field, so in async code call it before `commit()`, and do not declare entity fields for relationships that are not already loaded: an expired or lazy attribute cannot load there, and validation fails with a `ValidationError`.
 
 The adapter translates between HTTP and the service:
 
