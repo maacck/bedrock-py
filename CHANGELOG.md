@@ -5,6 +5,166 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-11-08
+
+### Breaking changes
+
+- **Logging**: importing `bedrock` or `bedrock.logging` no longer configures loguru.
+  `configure_logging()` is not called at import, and `bedrock.setup()` does not install a sink.
+  Sinks registered before the import stay in place. Non-CLI processes that relied on implicit
+  stderr output must call `configure_logging()` from their process entry point. That call leaves
+  existing handlers in place, including Loguru's preconfigured stderr handler. The `bedrock` CLI
+  calls `configure_cli_logging()` before dispatching commands: it removes that preconfigured stderr
+  handler when it is still installed, then installs Bedrock's sink, so `LOG_*` controls CLI stderr
+  and log lines are not duplicated. Handlers added by the host are kept. Repeated calls replace only
+  the sink Bedrock installed; configuration never calls `logger.remove()` without a handler id.
+  The module constants `bedrock.logging.LOG_LEVEL`, `LOG_FORMAT`, `LOG_FILE`, `LOG_ROTATION`,
+  `LOG_RETENTION`, `LOG_COMPRESSION`, and `LOG_SERIALIZE` are removed; read the same values from
+  `bedrock.logging.LoggingSettings()`.
+- **Database connection ceiling.** `DATABASE_MAX_CONNECTIONS` is the per-process cap.
+  Non-SQLite engines set SQLAlchemy `max_overflow` to `MAX_CONNECTIONS - POOL_SIZE`.
+  The defaults (`POOL_SIZE=10`, `MAX_CONNECTIONS=10`) now allow 10 connections.
+  They previously allowed SQLAlchemy's implicit overflow and capped at 20.
+  Raise `DATABASE_MAX_CONNECTIONS` when a deployment needs that extra capacity.
+  `MAX_CONNECTIONS < POOL_SIZE` raises `DatabaseConfigurationError` and names both settings, and so does
+  `POOL_SIZE < 1`, which SQLAlchemy would treat as an unlimited pool.
+  SQLite engines still ignore pool settings.
+- **Database passwords are secrets.** `DbSettings.PASSWORD` is a Pydantic `SecretStr`.
+  Settings `repr` and validation errors do not include the password. Call
+  `get_secret_value()` only at the edge that opens a connection. The URL is built
+  with `sqlalchemy.engine.URL.create`, so reserved characters in each component are escaped.
+
+### Added
+
+- **Async lifecycle.** `ModuleRegistry` gains `ainstall()`, `apopulate()`, `amark_ready()` and `ashutdown()`,
+  and `bedrock` gains `asetup()`, `shutdown()` and `ashutdown()` next to `setup()`. Existing hook names
+  (`on_load`, `ready`, `on_shutdown`) and signal receivers accept either sync or async implementations; a hook
+  that returns an awaitable is awaited too. Async entrypoints run async hooks on the running loop and plain
+  hooks in a worker thread, in dependency order and reverse order on shutdown. Sync entrypoints keep working
+  and adapt async hooks on a private loop that stays open until every module has shut down, so a client opened
+  by `on_load` is closed on the same loop. Called inside a running event loop, a sync entrypoint raises the new
+  `ModuleAsyncRequiredError` (a `ModuleLifecycleError`) that names the async entrypoint, instead of nesting a
+  loop or leaving a coroutine unawaited; `mark_ready()` and `shutdown()` check coroutine hooks before running
+  anything. Both modes share one state machine, so rollback, retry, idempotency and aggregate errors are
+  identical, and cancelling an async operation leaves every module in a valid state. A cancelled async operation
+  waits for synchronous hooks and receivers already running in a worker thread before it rolls back or releases
+  the registry, because a blocking function cannot be forced to stop; repeated cancellation does not skip that
+  wait, and an awaitable returned by a cancelled plain hook is released instead of left unawaited. Installation
+  rollback cannot be interrupted by a caller cancellation: every introduced module is still cleaned in reverse
+  order and the operation stays held until then, after which `CancelledError` is raised (chained to the install
+  error that started the rollback, with cleanup failures logged and attached as notes). A cleanup hook that
+  itself raises `CancelledError` or `KeyboardInterrupt` leaves that module and its dependencies registered so
+  `shutdown()` can finish them. Installs started from a hook must run one at a time: an `ainstall()` started while
+  a sibling install from the same operation is still running (for example via `asyncio.gather` in `on_load`)
+  raises `ModuleLifecycleError` before loading anything, because a failing sibling's rollback would remove it.
+- `bedrock.shutdown()` / `bedrock.ashutdown()` stop every module, then release the initialized database: `db.close()`
+  for the sync engine and `db.aclose()` for the async engine, each only if it exists, even when a module hook
+  failed. A database failure is reported with the module failures as `ModuleFailure("bedrock.database", ...)`.
+  `db.close()` and `db.aclose()` keep their sync-only and async-only contracts.
+  `DatabaseManager.has_async_engine` reports whether an async engine exists without building one.
+- `CacheService.aclose()` closes the async client of every backend the service created (including replaced
+  ones) and `close()` the sync client, so the Redis async client is no longer left open at shutdown.
+  `CacheService.has_async_resources()`, `CacheBackend.holds_async_resources` and `CacheCloseError` support it.
+- The cache module's `on_shutdown` hook and a new metrics `on_shutdown` hook close sync resources and return
+  the async close to the registry, which awaits it before the module counts as shut down. Metric providers may
+  define optional `flush()`, `aflush()` and `aclose()`; `MetricsManager.aclose()` and `has_async_resources()`
+  are new, and providers are now flushed and closed at registry shutdown (failures are still only logged).
+- `bedrock.logging.LoggingSettings` (prefix `LOG_`) is read when `configure_logging()` runs, so
+  `LOG_LEVEL`, `LOG_FORMAT`, `LOG_FILE`, `LOG_ROTATION`, `LOG_RETENTION`, `LOG_COMPRESSION`, and
+  `LOG_SERIALIZE` set after import are honored.
+- `configure_cli_logging()` is the process-owned CLI initializer. It retires Loguru's preconfigured
+  stderr handler, then calls `configure_logging()`.
+- **Async database sessions.** Set `DATABASE_ASYNC_DRIVER` and install
+  `bedrock-core[async-sqlite]`, `bedrock-core[async-postgresql]`, or
+  `bedrock-core[async-mysql]`. `db.aengine`, `db.asession`, `db.asession_scope()`,
+  and `db.aindependent_session()` follow the sync session rules and use a separate
+  context variable. A missing driver raises `DatabaseConfigurationError` naming the extra (`psycopg` and
+  `aiomysql` are not in an extra, so the message names the package to install). The session is unbound
+  even when leaving `asession_scope()` or `aclear_session()` is cancelled while closing it.
+  The SQLAlchemy asyncio extra (`greenlet`) is now a core dependency. `AsyncSessionFactory` is exported
+  from `bedrock.database` next to `SessionFactory`.
+- **`db.close()` and `db.aclose()`** dispose one side each. `close()` disposes the
+  synchronous engine and leaves an already built async engine usable. `await aclose()`
+  disposes the async engine and leaves the synchronous engine usable. If both were
+  built, call both. Each call is safe to repeat. They do not shut down the module
+  registry. `init()` disposes the previous synchronous engine. It does not
+  synchronously dispose an async engine that has already opened a connection;
+  `await aclose()` before `init()` when that engine should be closed.
+- **Migration lock.** `upgrade` and `downgrade`, including uninstall and `ensure_schema`,
+  take a PostgreSQL advisory lock or a MySQL/MariaDB `GET_LOCK`. SQLite stays unlocked
+  and must be migrated from one process. `DATABASE_MIGRATION_LOCK_TIMEOUT` (default 30
+  seconds; `0` does not wait) bounds the wait. MySQL rounds a positive timeout up to
+  whole seconds. A timeout raises `MigrationError`. `MigrationsManager(..., lock_timeout=30)` sets the
+  same bound in code.
+- **`bedrock db check <app>`** prints each loaded branch's current and head revisions
+  without changing the database. It exits with status 1 when any branch is behind head
+  or the revision is unknown, including a database that has never been migrated.
+  `MigrationsManager.check(app)` returns the same data as `BranchRevisionStatus` records
+  (`branch`, `current`, `head`, `state`), exported from `bedrock.database`.
+- `DbSettings.sqlalchemy_url(*, driver=None)` returns the connection `URL` with every component quoted;
+  `DbSettings.database_uri(*, driver=None)` renders it as a string.
+- **`bedrock.provider`** — `ProviderCatalog[P]` maps names to providers of one capability. Register an
+  imported class or factory with `register()`, or a `module:attribute` path with `register_lazy()` (or
+  `ProviderSpec` entries passed as `specs=`); lazy paths are imported only when selected. `create(name,
+  **kwargs)` calls the factory and validates the result with `isinstance` against a class or
+  `@runtime_checkable` Protocol, so implementations need not inherit it. `resolve(name)` returns the class or
+  factory for application-side construction, without validation. Re-registering the same target is a no-op;
+  a different target under a used name raises `ProviderConflictError`. Load failures raise `ProviderLoadError`
+  naming the spec's `install_requirement` and keeping the original exception as `__cause__`. Provider guide
+  (en/zh) and the `provider-guide.md` skill reference describe when to use `ClassRegistry` instead.
+- `register_backend_lazy(name, "module:attribute", install_requirement=None)` in `bedrock.contrib.cache` and
+  `bedrock.contrib.storage` registers a backend by path; the module is imported only when `configure()`
+  selects it. `StorageCloseError` is new.
+- **`CACHE_BACKEND`** selects the cache backend by registered name (default `memory`). `cache.configure()`
+  without a name, the cache module's `ready` hook, and the lazy configure on first use all read it, so
+  `CACHE_BACKEND=redis` with `CACHE_REDIS_*` switches an app to Redis without code. `configure()`'s
+  `backend_name` default changes from `"memory"` to `None`; an explicit name ignores the variable. An unknown
+  name raises `BackendNotConfiguredError` saying it came from `CACHE_BACKEND`.
+
+### Changed
+
+- **Cache and storage backends** are registered in a `bedrock.provider.ProviderCatalog` instead of a
+  `ClassRegistry`. `register_backend()` accepts a class or a factory taking `settings=`; inheriting
+  `CacheBackend` / `StorageBackend` is optional, and `configure()` rejects an object that lacks a protocol
+  member. Registering the same object again is a no-op; a different backend under a taken name still raises
+  `DuplicateRegistrationError`. A missing optional SDK now raises `BackendNotConfiguredError` /
+  `StorageBackendNotConfiguredError` naming the extra (`bedrock-core[cache-redis]`,
+  `bedrock-core[storage-s3]`); before, S3 raised a bare `ModuleNotFoundError`. The configuration error's
+  `__cause__` is now a `bedrock.provider` error instead of a `ClassRegistryError`. Importing
+  `bedrock.contrib.cache.backends.redis` without `redis` no longer fails; constructing `RedisBackend` does.
+- **Storage**: `storage.close()` also closes backends replaced by earlier `configure()` calls. A backend
+  whose `close()` fails stays tracked and is retried by the next call; failures raise `StorageCloseError`
+  after every backend was attempted, instead of the backend's own exception. A failed `configure()` keeps the
+  previous backend. Importing `bedrock.contrib.storage` no longer imports backend modules; `LocalBackend`,
+  `S3Backend` and their settings are loaded on first access.
+
+### Fixed
+
+- Async engines use the URL already resolved by `db.init()`, including an explicit
+  `url=` argument. Only the DBAPI driver is swapped for `DATABASE_ASYNC_DRIVER`; the query string is kept,
+  including for SQLite `:memory:`. An explicit SQLite path no longer falls back to the default `bedrock.db`.
+- `db.close()` no longer disposes the async engine, and `db.aclose()` no longer
+  disposes the sync engine. `init()` no longer sync-disposes an async engine that
+  has already opened a connection, which failed with `MissingGreenlet`.
+
+### Documentation
+
+- Docs site: new Changelog page (en/zh) rendered from `CHANGELOG.md`; Chinese Class Registry guide.
+- Agent skills: new `class-registry-guide.md` reference and ClassRegistry section in the `bedrock` skill;
+  skills, guides, and getting-started pages realigned with the v0.3.0 lifecycle, registry, cache, storage,
+  hooks, database, and CLI APIs (e.g. `bedrock run --app <app> <module> <command>`, `BEDROCK_APP`,
+  `bedrock --help` instead of the unsupported `bedrock -v`).
+- Agent skills: one "Choosing a Mechanism" table (direct call, DI, `ClassRegistry`, hooks, signals) with
+  failure/async semantics replaces four diverging comparisons; the hooks guide documents extension points
+  where every implementation must succeed (fail-fast with DB rollback, collect-all, external side effects).
+- Contributing: public signature/behavior changes must update `CHANGELOG.md`, Web Doc (en + zh), and agent
+  skills in the same change (`AGENTS.md`, `CONTRIBUTING.md`, PR template); `CONTRIBUTING.md` gains a
+  Releasing section with a pre-release alignment check and bump steps.
+- Guides and skills: `on_load` examples in the cache, storage, Class Registry, and Provider guides declare an
+  injected parameter (`def on_load(*, app)`); the zero-argument form they showed is rejected by the registry.
+  The Signals guide describes lifecycle signal dispatch for both entrypoint families instead of sync-only
+  `send()`.
+
 ## [0.3.0] - 2026-11-07
 
 ### Breaking changes
@@ -37,9 +197,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- `ModuleRegistry.install()`, `populate()`, `mark_ready()` and `shutdown()` hold the registry lock for the
-  whole operation (`populate()` keeps it across both its install and ready phases), so other threads wait
-  until the operation finishes and cannot run a hook twice.
+- `ModuleRegistry.install()`, `populate()`, `mark_ready()` and `shutdown()` run as one serialized operation
+  (`populate()` covers both its install and ready phases), so other threads and tasks wait until the
+  operation finishes and cannot run a hook twice. The guard no longer holds a thread lock, so it stays correct
+  across `await` points; see the async lifecycle entry below.
 - `mark_ready()` and `shutdown()` are not re-entrant: calling either from a bootstrap hook or a lifecycle
   signal receiver while one of them is running raises `ModuleLifecycleError` instead of re-running hooks
   (previously this recursed until `RecursionError`). The guard is registry state, not a thread lock.
@@ -47,11 +208,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `shutdown()`. `failures` are always attributed to the module and step where they happened
   (`on_load`, `manifest`, `dependency`, `module_loaded`, `ready`, `on_shutdown`, ...), and the `__cause__` of
   every aggregated lifecycle error is an `ExceptionGroup` of all its failures.
-- `AppConfig` validates assignments, so assigning a plain string to `lifecycle_state` is coerced to
-  `ModuleLifecycleState` (invalid values raise `ValidationError`).
+- `AppConfig.lifecycle_state` is a read-only property. Assigning to it raises `AttributeError`, and passing it
+  to `AppConfig(...)` or `AppConfig.model_validate(...)` raises `ValidationError`. A module starts at
+  `loading` and changes state only through `AppConfig.transition_to()`, which validates the transition and
+  accepts a `ModuleLifecycleState` or its string value. Every other `AppConfig` field keeps its behavior:
+  unknown keyword arguments are still ignored, and assignments are still validated and coerced.
+- `install()` is now a registry operation like `mark_ready()` and `shutdown()`. While it runs, an `on_load`
+  hook, a `module_loaded` receiver, or a rollback hook that calls `shutdown()` or `mark_ready()` gets a
+  `ModuleLifecycleError` ("Cannot call shutdown() while install() is running") instead of acting on a
+  half-installed registry. To abort an installation from a hook, raise an error: the installation rolls back.
+  Installing further modules from `on_load` or `module_loaded` stays supported.
+- Installing a module that is not installed yet from a `ready` or `on_shutdown` hook, or from a
+  `module_ready`, `registry_ready`, `module_shutdown`, or `registry_shutdown` receiver, raises
+  `ModuleLifecycleError` before anything is loaded. Previously it left a `loaded` module in a registry that
+  already reported `ready`, with no way to ready it from inside the hook. Install the module before
+  `mark_ready()`, or call `install()` and then `mark_ready()` again, which readies only the new module.
+  Installing an already installed module remains a no-op everywhere.
+- `registry.ready` records that readiness was announced. It stays `True` when a new module is installed
+  afterwards, and that module stays `loaded` until `mark_ready()` runs again. Check each module's
+  `lifecycle_state` instead of reading `registry.ready` as "every installed module is ready".
 
 ### Fixed
 
+- Calling `shutdown()` from an `on_load` hook no longer shuts down other modules in the middle of the
+  installation and then fails on an invalid `loading` to `shutdown` transition that cut cleanup short.
+  Calling it from a `module_loaded` receiver no longer shuts down the registry during installation.
+  Both now fail with `ModuleLifecycleError`, and the failed installation still unwinds every module that
+  had loaded.
 - Failed `registry_ready` and `registry_shutdown` notifications can be retried without
   repeating completed module hooks. A failed ready notification resets `registry.ready`,
   so retrying `bedrock.setup()` also resumes notification delivery.

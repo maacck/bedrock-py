@@ -18,6 +18,7 @@ from .coder import CacheCoder
 from .exc import (
     BackendNotConfiguredError,
     CacheClearRequiresPrefixError,
+    CacheCloseError,
     CacheConnectionError,
     CacheError,
     CacheLockAcquisitionError,
@@ -27,12 +28,13 @@ from .exc import (
 )
 from .lock import CacheLock
 from .schema import CacheNamespace, CacheSlot
-from .service import CacheService, cache, register_backend
+from .service import CacheService, cache, register_backend, register_backend_lazy
 
 __all__ = [
     "BackendNotConfiguredError",
     "CacheBackend",
     "CacheClearRequiresPrefixError",
+    "CacheCloseError",
     "CacheCoder",
     "CacheConnectionError",
     "CacheError",
@@ -46,4 +48,5 @@ __all__ = [
     "CacheSlot",
     "cache",
     "register_backend",
+    "register_backend_lazy",
 ]

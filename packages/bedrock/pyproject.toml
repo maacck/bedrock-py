@@ -1,6 +1,6 @@
 [project]
 name = "bedrock-core"
-version = "0.3.0"
+version = "0.3.1"
 description = "A modular Python application framework with manifest-driven module loading, lifecycle management, and contrib modules."
 readme = "README.md"
 license = "MIT"
@@ -28,7 +28,7 @@ dependencies = [
     "pydantic>=2.12.5",
     "pydantic-settings>=2.14.2",
     "pyyaml>=6.0.2",
-    "sqlalchemy>=2.0.49",
+    "sqlalchemy[asyncio]>=2.0.49",
     "typer>=0.24.1",
 ]
 
@@ -43,6 +43,9 @@ cache-redis = ["redis>=4.2.0"]
 metric-prometheus = ["prometheus-client>=0.20.0"]
 metric-sentry = ["sentry-sdk>=2.44.0"]
 storage-s3 = ["boto3>=1.34.0"]
+async-sqlite = ["aiosqlite>=0.20.0"]
+async-postgresql = ["asyncpg>=0.30.0"]
+async-mysql = ["asyncmy>=0.2.9"]
 
 [project.scripts]
 bedrock = "bedrock.cli.main:entrypoint"
@@ -65,4 +68,5 @@ dev = [
     "moto>=5.0.0",
     "flask>=3.0.0",
     "flask-cors>=4.0.0",
+    "aiosqlite>=0.20.0",
 ]

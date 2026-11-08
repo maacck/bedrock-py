@@ -9,8 +9,8 @@ Bedrock organizes code into three conceptual levels: Project, Submodule, and Dom
 
 | Type | Has manifest.yaml | Participates in Bedrock lifecycle | Purpose |
 |------|-------------------|-----------------------------------|---------|
-| Project | Optional | No (unless it has a manifest) | Organizational container for your application |
-| Submodule | Yes | Yes | Business-level module with full Bedrock integration |
+| Project | Optional | If installed and it has a manifest | Organizational container for your application |
+| Submodule | Yes | When installed | Business-level module with full Bedrock integration |
 | Domain Module | No | No | Recommended file structure convention within a submodule |
 
 ## Project
@@ -102,5 +102,5 @@ my_app_worker/                   # Another project (e.g., a worker runtime)
 This hierarchy is an organizational convention, not a framework constraint.
 
 - Bedrock's `ModuleRegistry` does not distinguish between Project, Submodule, or Domain Module.
-- All modules with a `manifest.yaml` are treated identically at runtime.
+- Importable modules with a `manifest.yaml` are treated identically when explicitly installed or included as dependencies; a manifest alone does not install them.
 - The hierarchy helps teams organize code predictably. It does not affect loading, dependency resolution, or lifecycle behavior.

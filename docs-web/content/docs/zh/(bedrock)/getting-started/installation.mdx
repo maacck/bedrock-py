@@ -30,10 +30,8 @@ Bedrock 支持多种 Python 包管理器。选择最适合你工作流的那一�
 
 Bedrock 提供了可选依赖组，以支持更多后端：
 
-<Tabs items={['Redis Cache', 'Memcached Cache']}>
-  <Tab value="Redis Cache"><CodeBlock code={'uv add bedrock[cache-redis]'} lang={'bash'} /></Tab>
-
-
+<Tabs items={['Redis Cache']}>
+  <Tab value="Redis Cache"><CodeBlock code={'uv add bedrock-core[cache-redis]'} lang={'bash'} /></Tab>
 </Tabs>
 
 | 扩展 | 包 | 说明 |
@@ -95,18 +93,36 @@ depends_on: []
 ```python
 import bedrock
 
-bedrock.setup()
+bedrock.setup("my_app.my_module")
 
 apps = bedrock.apps
-print(f"Registry ready with {len(apps.modules)} module(s) loaded")
+print(f"Registry ready with {len(apps.all())} module(s) loaded")
+
+bedrock.shutdown()
 ```
+
+在异步进程中请改用 `await bedrock.asetup(...)` 和 `await bedrock.ashutdown()`，见[异步生命周期](/docs/guides/module-anatomy#异步生命周期)。
+
+## 日志
+
+`import bedrock` 和 `bedrock.setup()` 都不会配置日志，也不会移除已经注册的 loguru sink。需要 Bedrock 的 stderr 输出或 `LOG_FILE` 轮转时，在进程入口调用 `configure_logging()`：
+
+```python
+import bedrock
+from bedrock.logging import configure_logging
+
+configure_logging()
+bedrock.setup("my_app.my_module")
+```
+
+`LOG_LEVEL`、`LOG_FORMAT`、`LOG_FILE`、`LOG_ROTATION`、`LOG_RETENTION`、`LOG_COMPRESSION` 和 `LOG_SERIALIZE` 在 `configure_logging()` 执行时读取。再次调用只会替换 Bedrock 自己安装的 sink。`bedrock` 命令行调用 `configure_cli_logging()`：它会先移除 Loguru 预配置的 stderr handler，使 CLI 日志只输出一次，并由 `LOG_*` 控制该 stderr。其他 handler 会保留。
 
 ## 验证安装
 
 安装完成后，验证 Bedrock 是否正常工作：
 
 ```bash
-bedrock -v
+bedrock --help
 ```
 
 查看可用的 CLI 命令：
@@ -126,6 +142,5 @@ bedrock app info <module_name>
 ```python
 import bedrock
 
-bedrock -v
-# Output: Hello from bedrock!
+print(bedrock)
 ```

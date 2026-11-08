@@ -14,7 +14,7 @@ Bedrock 在 `bedrock.hooks` 中提供了一个结构化 Hook 系统，用于那�
 ## 快速开始
 
 ```python
-from bedrock.hooks import HookNamespace
+from bedrock.hooks import HookNamespace, hookimpl
 
 payment_hooks = HookNamespace("payment")
 
@@ -25,7 +25,7 @@ def process(method: str, amount: int) -> str | None:
 
 
 class CardHooks:
-    @payment_hooks.impl(priority=0)
+    @hookimpl(priority=0)
     def process(self, method: str, amount: int) -> str | None:
         if method == "card":
             return "charged"
@@ -98,6 +98,7 @@ auth_hooks.add_impls_from(JwtHooks(), module="jwt_auth")
 ```
 
 优先级数值越小，执行越早。
+独立函数可以使用 `@auth_hooks.impl` 立即注册；通过 `add_impls_from` 扫描方法时，请使用 `@hookimpl` 并传入实例以绑定方法。`@auth_hooks.impl` 会立即注册，不会为扫描标记方法。
 
 ## 调用 Hooks
 
@@ -121,7 +122,7 @@ results = await auth_hooks.acall("get_permissions", user_id="user-1")
 results = auth_hooks.call_robust("get_permissions", user_id="user-1")
 ```
 
-robust 调用会收集 `Exception` 结果，而不是立即抛出。
+robust 调用返回 `(implementation, result_or_exception)` 元组，收集 `Exception` 而不是立即抛出。设置 `firstresult=True` 时，异常仍会被收集，分发继续直到首个非 `None` 结果。
 
 ## 通过扫描注册
 
@@ -155,10 +156,12 @@ search_hooks.add_impls_from(ElasticHooks(), module="elastic")
 模块最常见的用法是在 `bootstrap.py` 中注册实现。
 
 ```python
+from bedrock.hooks import hookimpl
 from modules.auth.hookspecs import auth_hooks
 
 
 class ApiKeyHooks:
+    @hookimpl
     def authenticate(self, token: str) -> str | None:
         if token == "api-key":
             return "user-2"

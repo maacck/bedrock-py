@@ -9,8 +9,8 @@ Bedrock 将代码组织为三个概念层级：Project、Submodule 和 Domain Mo
 
 | 类型 | 是否有 manifest.yaml | 是否参与 Bedrock 生命周期 | 目的 |
 |------|-------------------|-----------------------------------|---------|
-| Project | 可选 | 否（除非它有 manifest） | 应用的组织容器 |
-| Submodule | 是 | 是 | 具备完整 Bedrock 集成的业务级模块 |
+| Project | 可选 | 有 manifest 且被安装时参与 | 应用的组织容器 |
+| Submodule | 是 | 安装时参与 | 具备完整 Bedrock 集成的业务级模块 |
 | Domain Module | 否 | 否 | 子模块内部推荐的文件结构约定 |
 
 ## Project（项目）
@@ -102,5 +102,5 @@ my_app_worker/                   # Another project (e.g., a worker runtime)
 这种层级结构是一种组织约定，不是框架约束。
 
 - Bedrock 的 `ModuleRegistry` 不区分 Project、Submodule 或 Domain Module。
-- 所有带有 `manifest.yaml` 的模块在运行时都会被一视同仁地对待。
+- 带有 `manifest.yaml` 的可导入模块在被显式安装或作为依赖引入时会被一视同仁地对待；仅有 manifest 不会自动安装模块。
 - 这种层级有助于团队以可预测的方式组织代码，但不会影响加载、依赖解析或生命周期行为。

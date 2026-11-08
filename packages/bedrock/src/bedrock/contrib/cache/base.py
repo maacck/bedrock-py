@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from pydantic_settings import BaseSettings
 
 
+@runtime_checkable
 class CacheBackend(Protocol):
     """Protocol that all cache backends must implement.
 
@@ -15,11 +16,18 @@ class CacheBackend(Protocol):
     is handled by :class:`CacheService` and shared across backends.
     Both sync and async variants are required.
 
-    Backends registered with :func:`bedrock.contrib.cache.register_backend`
-    must explicitly subclass this protocol.
+    Backends registered with :func:`bedrock.contrib.cache.register_backend` or
+    :func:`bedrock.contrib.cache.register_backend_lazy` may subclass this protocol or implement it
+    structurally; :meth:`CacheService.configure` checks that every member exists.
 
     Clients are created at ``__init__`` time.
+
+    ``close()`` releases the synchronous client and ``aclose()`` the asynchronous one. A backend that holds
+    no asynchronous resource sets ``holds_async_resources = False`` so shutdown does not need to await it;
+    the default is ``True``.
     """
+
+    holds_async_resources: bool = True
 
     @property
     def settings(self) -> BaseSettings: ...

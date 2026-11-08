@@ -44,7 +44,7 @@ Not every module needs every file. Minimum viable module: `__init__.py` + `manif
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `title` | `str` | Yes | — | Human-friendly display name |
-| `version` | `str` | Yes | — | Module version string |
+| `version` | `str` | No | `"unknown"` | Module version string |
 | `description` | `str \| None` | No | `None` | Short description |
 | `depends_on` | `list[str]` | No | `[]` | Import paths of dependencies |
 | `commands` | `str \| None` | No | `None` | Relative Typer app import path (e.g. `commands:app`) |
@@ -196,7 +196,7 @@ except UserError as e:
 |------|------------|----------|
 | `on_load` | During `install()`, after module is added | Early initialization, dependency checks |
 | `ready` | After ALL modules are installed | Configure services, start background tasks |
-| `on_shutdown` | During `shutdown()`, in REVERSE order | Cleanup, close connections |
+| `on_shutdown` | During `shutdown()` / `ashutdown()`, in REVERSE order | Cleanup, close connections |
 
 ### Available Named Parameters
 
@@ -235,10 +235,30 @@ def on_shutdown(*, registry, app) -> None:
 ### Rules
 
 - Use keyword-only signatures (`def on_load(*, registry, app)`) — Bedrock always passes keyword arguments
-- Declare only the parameters you need; the registry injects only what it finds in the signature
+- Declare at least one supported parameter or `**kwargs`; the registry injects the declared supported parameters, or all four for `**kwargs`
 - Hooks are called by the registry — do NOT import or call them manually
 - `ready` is the most common hook for service initialization
 - `on_shutdown` runs in REVERSE install order (last installed = first shutdown)
+- Hooks and signal receivers may be plain functions or `async def`; a hook that returns an awaitable is awaited. See `Async lifecycle` below
+
+### Lifecycle failures and retries
+
+`install()` is failure-atomic: it removes modules introduced by the operation and calls `on_shutdown` in reverse order for those that completed `on_load`. Pre-existing modules remain installed. The installation phase of `populate()` is atomic across all its paths. Cleanup failures raise `ModuleStartupRollbackError`, with the original failure followed by cleanup failures in `failures`; clean rollback re-raises the original error. Registration side effects outside the module registry are not automatically undone, so hooks must clean up their own resources.
+
+Each `AppConfig.lifecycle_state` progresses through `ModuleLifecycleState.LOADING`, `LOADED`, `READY`, and `SHUTDOWN` (a loaded module may shut down before becoming ready). If a ready hook fails, installed modules remain; retrying `mark_ready()` skips hooks that already succeeded. Shutdown attempts every remaining module in reverse order and raises an aggregated `ModuleLifecycleError` with `failures` entries identifying module, phase, and error. Failed shutdown hooks are retried; completed shutdowns are not. `AppConfig.lifecycle_state` is read-only; the registry changes it through `transition_to()`. `registry.ready` stays `True` when a module is installed afterwards, and that module stays `loaded` until `mark_ready()` runs again, so check `lifecycle_state` per module. Neither `mark_ready()` nor `shutdown()` may be called re-entrantly from hooks or signal receivers, and neither may be called from an `on_load` hook or `module_loaded` receiver while a module installs: raise an error there to abort and roll back the installation instead. `on_load` may install further modules one at a time (a concurrent sibling `ainstall()`, e.g. via `asyncio.gather`, raises `ModuleLifecycleError` before loading anything), but no hook or receiver may install a new module during `mark_ready()` or `shutdown()` (it raises `ModuleLifecycleError` and leaves the registry unchanged): install before `mark_ready()`, or `install()` then `mark_ready()` again.
+
+### Async lifecycle
+
+Each operation has an `a`-prefixed twin: `ainstall()`, `apopulate()`, `amark_ready()`, `ashutdown()`, and `bedrock.asetup()` / `bedrock.shutdown()` / `bedrock.ashutdown()` at process level. Both families run one implementation, so rollback, retry, idempotency and aggregate errors are identical.
+
+- Async entrypoints await async hooks on the running loop and run plain hooks in a worker thread, in dependency order and reverse order on shutdown.
+- Sync entrypoints call plain hooks directly and run async hooks on a private loop that stays open until every module has shut down (so a client opened in `on_load` closes on the same loop). They work only when no loop is running in the thread; otherwise they raise `ModuleAsyncRequiredError` naming the async entrypoint, with no nested loop and no unawaited coroutine. `mark_ready()` and `shutdown()` check for coroutine hooks first and change nothing.
+- Start and stop through the same family (`asetup()` + `ashutdown()` or `setup()` + `shutdown()`); loop-bound clients cannot move between loops.
+- Concurrent tasks and threads wait for the running operation. A hook calling back in is rejected as described above. Cancelling an async operation leaves every module valid; call `ashutdown()` again to resume, so keep hooks retry-safe. A sync hook or receiver already running in a worker thread cannot be stopped: cancellation waits for it to return (repeated cancels do not skip the wait) before rolling back or releasing the operation, and an awaitable it returns after cancellation is released, not awaited. Cancelling during install rollback does not abort cleanup: every introduced module is still unwound in reverse order, then `CancelledError` is raised (cleanup failures are logged and attached as notes). A cleanup hook that itself raises `CancelledError` or `KeyboardInterrupt` leaves its module and dependencies registered for `shutdown()`.
+- A module owning sync and async clients keeps `on_shutdown` a plain function that closes the sync client and returns the awaitable closing the async one (or declares `async def on_shutdown`).
+- The database is process infrastructure: `bedrock.shutdown()` / `await bedrock.ashutdown()` release initialized sync and async engines after every module hook, even if one failed, and do nothing if the database was never initialized.
+
+For named class extension points, register trusted classes or lazy paths in `on_load`; see `references/class-registry-guide.md`.
 
 ---
 
@@ -300,18 +320,7 @@ await user_created.asend(sender, user=new_user)
 
 ## Signals vs Hooks
 
-Bedrock has two cross-module communication mechanisms. Use the right one for the job:
-
-| Aspect | Signals | Hooks |
-|--------|---------|-------|
-| Pattern | Notification (fire-and-forget) | Call/response (returns values) |
-| Return values | Ignored | Collected and returned |
-| Ordering | Unspecified | Priority-sorted (lower runs first) |
-| Short-circuit | No | `firstresult=True` stops after first non-None |
-| Registration | `signal.connect(receiver)` | `@hookimpl` decorator or `ns.impl()` |
-| Best for | Lifecycle events, loose coupling | Extension points, middleware, authentication |
-
-**Rule of thumb**: If you need a return value to drive logic, use hooks. If you just want to notify listeners, use signals.
+See `SKILL.md` → "Choosing a Mechanism" for when to use a direct call, DI, `ClassRegistry`, `ProviderCatalog`, hooks, or signals, including failure semantics. For extension points where every implementation must succeed, see `references/hooks-guide.md` → "Extension Points That Must All Succeed".
 
 ---
 
@@ -475,7 +484,7 @@ if my_settings.DEBUG:
 
 | Hook | When Called |
 |------|------------|
-| `pre_install()` | Before migrations |
+| `pre_install()` | After migrations, before `install()` |
 | `install()` | After migrations |
 | `post_install()` | After install() |
 
@@ -486,18 +495,16 @@ from bedrock.database import db
 
 
 def pre_install() -> None:
-    """Run before database migrations."""
+    """Run after migrations, before install()."""
     print("Preparing installation...")
 
 
 def install() -> None:
     """Run after migrations — seed data, etc."""
     from .models import UserModel
-    with db.session as session:
+    with db.session_scope() as session:
         if not session.query(UserModel).first():
             session.add(UserModel(name="admin", email="admin@example.com", hashed_password="..."))
-            session.commit()
-
 
 def post_install() -> None:
     """Run after install — final checks."""
@@ -507,7 +514,7 @@ def post_install() -> None:
 ### Invocation
 
 ```bash
-bedrock manage install -A myproject.modules.users
+bedrock manage -A myproject.modules.users install
 ```
 
 ---
@@ -559,8 +566,8 @@ The `commands` field is a relative import path (`module:attribute`). The registr
 ### Invocation
 
 ```bash
-bedrock run --app myproject.modules.users create-user --name Alice --email alice@example.com
-bedrock run --app myproject.modules.users list-users
+bedrock run --app myproject.modules.users myproject.modules.users create-user Alice alice@example.com
+bedrock run --app myproject.modules.users myproject.modules.users list-users
 ```
 
 ---

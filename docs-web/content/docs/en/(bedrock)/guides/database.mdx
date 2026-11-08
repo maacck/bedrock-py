@@ -22,11 +22,11 @@ class Product(BedrockModel):
 # Initialize once at process start
 db.init()
 
-# Use the context-local session
-with db.session as session:
+# Use a transaction scope (and unbind the session on exit)
+with db.session_scope() as session:
     product = Product(name="Widget")
     session.add(product)
-    session.commit()
+    session.flush()
 
     # Query back
     all_products = session.query(Product).all()
@@ -47,12 +47,20 @@ Database settings use environment variables with the `DATABASE_` prefix. `DbSett
 | `DATABASE_HOST` | `str \| None` | `None` | Database host (required for non-SQLite) |
 | `DATABASE_PORT` | `int \| None` | `None` | Database port (required for non-SQLite) |
 | `DATABASE_USERNAME` | `str \| None` | `None` | Database username |
-| `DATABASE_PASSWORD` | `str \| None` | `None` | Database password |
-| `DATABASE_MAX_CONNECTIONS` | `int` | `10` | Maximum connection pool size |
+| `DATABASE_PASSWORD` | `SecretStr \| None` | `None` | Database password. Omitted from `repr` and validation errors. |
+| `DATABASE_ASYNC_DRIVER` | `str \| None` | `None` | Async DBAPI driver (`aiosqlite`, `asyncpg`, `psycopg`, `asyncmy`, `aiomysql`) |
+| `DATABASE_MAX_CONNECTIONS` | `int` | `10` | Per-process connection ceiling, including overflow |
 | `DATABASE_POOL_TIMEOUT` | `int` | `30` | Seconds to wait for a connection |
-| `DATABASE_POOL_SIZE` | `int` | `10` | Number of connections to maintain |
+| `DATABASE_POOL_SIZE` | `int` | `10` | Steady-state pool size. Must be at least 1. |
 | `DATABASE_POOL_RECYCLE` | `int` | `1800` | Seconds before recycling a connection |
+| `DATABASE_MIGRATION_LOCK_TIMEOUT` | `float` | `30` | Seconds to wait for the migration lock. `0` does not wait. |
 | `DATABASE_SCHEMA` | `str` | `"bedrock.db"` | Database name or file path |
+
+`MAX_CONNECTIONS` is the total number of connections one process may check out. PostgreSQL and MySQL engines receive `pool_size`, `pool_timeout`, `pool_recycle`, and `max_overflow = MAX_CONNECTIONS - POOL_SIZE`. `MAX_CONNECTIONS` must be greater than or equal to `POOL_SIZE`. A smaller value raises `DatabaseConfigurationError` and the message names both settings. `POOL_SIZE` below 1 also raises `DatabaseConfigurationError`, because SQLAlchemy treats a pool size of 0 as unlimited and would ignore the ceiling. SQLite engines ignore the pool settings.
+
+The defaults (`POOL_SIZE=10`, `MAX_CONNECTIONS=10`) cap a process at 10 connections. Those defaults previously left SQLAlchemy's implicit overflow of 10 in place, so the engine allowed 20. Raise `DATABASE_MAX_CONNECTIONS` above `DATABASE_POOL_SIZE` when a deployment needs that extra capacity.
+
+`PASSWORD` is a Pydantic `SecretStr`. A plain string is accepted and stored as a secret. `repr(settings)` and validation errors do not contain the password or the rendered URL. The URL is built with `sqlalchemy.engine.URL.create`, so `@`, `:`, `/`, and `%` in the username or password round-trip. Read the secret with `settings.PASSWORD.get_secret_value()` only where the connection is opened.
 
 ### SQLite
 
@@ -131,6 +139,12 @@ The `db` singleton is a `DatabaseManager` instance. It owns the engine, session 
 | `db.clear_session()` | `clear_session()` | Close and unbind the current context-local session. |
 | `db.session_scope()` | `contextmanager → Session` | Transactional scope with auto commit/rollback. Binds to context. |
 | `db.independent_session()` | `contextmanager → Session` | Isolated transaction that does not bind to context. |
+| `db.aengine` | `property → AsyncEngine` | Async engine for the URL resolved by `init()`, with only the driver swapped for `DATABASE_ASYNC_DRIVER`. |
+| `db.asession` | `property → AsyncSession` | Current context-local async session. Separate context variable from `db.session`. |
+| `db.asession_scope()` | `async context manager → AsyncSession` | Async transactional scope with the same commit, rollback, and nesting rules as `session_scope()`. |
+| `db.aindependent_session()` | `async context manager → AsyncSession` | Async transaction that does not bind `db.asession`. |
+| `db.close()` | `close()` | Dispose the sync engine. Leaves a built async engine usable. Safe to call twice. `init()` works again afterwards. |
+| `db.aclose()` | `async aclose()` | Dispose the async engine. Leaves the sync engine usable. Safe to call twice. |
 
 ### Error Handling
 
@@ -138,7 +152,7 @@ Accessing `db.engine`, `db.session`, or `db.settings` before calling `db.init()`
 
 ## Session Management
 
-Bedrock uses context-local sessions backed by a `ContextVar`. Each execution context (thread, async task, request) gets its own session automatically.
+Bedrock uses context-local sessions backed by a `ContextVar`. New async tasks inherit their creator's context, including any bound session; clear or establish separate bindings at task and request boundaries rather than sharing a session concurrently.
 
 ### How It Works
 
@@ -205,7 +219,7 @@ with db.session_scope() as session:
 
     # Write an audit log in a separate transaction
     with db.independent_session() as audit_session:
-        audit_log = AuditLog(action="order_created", entity_id=order.id)
+        audit_log = AuditLog(action="order_started")
         audit_session.add(audit_log)
         # Commits independently — does not affect the outer session
 
@@ -215,9 +229,40 @@ with db.session_scope() as session:
 
 **Use cases for `independent_session()`:**
 - Audit logging (must persist even if the main transaction rolls back)
-- Event publishing or outbox patterns
+- Event publishing with an independent transaction (a transactional outbox must instead share the main transaction)
 - Reads that must not see uncommitted data from the caller
 - Background tasks that need their own transaction lifecycle
+
+### Async Sessions
+
+Async services use the same scoping rules with an `a` prefix. Set `DATABASE_ASYNC_DRIVER` and install the extra that provides that driver:
+
+| Driver | Install |
+|--------|---------|
+| `aiosqlite` | `pip install 'bedrock-core[async-sqlite]'` |
+| `asyncpg` | `pip install 'bedrock-core[async-postgresql]'` |
+| `asyncmy` | `pip install 'bedrock-core[async-mysql]'` |
+| `psycopg`, `aiomysql` | Install the driver package itself (`pip install psycopg` / `pip install aiomysql`) |
+
+`db.asession_scope()` commits on a clean exit, rolls back on any exception, and refuses to nest when an async session is already bound. `db.aindependent_session()` does not bind `db.asession`. The async session uses its own context variable, so a sync session in the same task stays in place. A missing driver package raises `DatabaseConfigurationError` and names the extra to install.
+
+```python
+from bedrock.database import db, DbSettings
+
+db.init(settings=DbSettings(ASYNC_DRIVER="aiosqlite"))
+
+async with db.asession_scope() as session:
+    session.add(Product(name="Widget"))
+
+await db.aclose()
+db.close()
+```
+
+### Closing Engines
+
+Call `db.close()` for the synchronous engine and `await db.aclose()` for the asynchronous engine. If both were built, call both. Calling either method again does nothing further to that side. After `close()`, synchronous access raises `DatabaseNotConfiguredError` until `db.init()`, while an async engine that was already built still works. After `aclose()`, the synchronous engine still works, and the next async access builds a new async engine when synchronous configuration remains. These methods do not shut down the module registry. To stop a process, call `bedrock.shutdown()` (or `await bedrock.ashutdown()`): it stops every module and then calls `db.close()` and, if an async engine exists, `db.aclose()` once each, so both pools are released after every module hook, even when one failed. A never-initialized database is left alone. Inside a running event loop with an async engine, use `await bedrock.ashutdown()`; `bedrock.shutdown()` raises `ModuleAsyncRequiredError` before changing anything.
+
+`db.init()` disposes the previous synchronous engine. It does not synchronously dispose an async engine that has already opened a connection: that close runs outside the event loop and fails with `MissingGreenlet`. Await `db.aclose()` before `db.init()` when that async engine should be closed. An async engine that has not opened a connection is disposed during `init()`.
 
 ### Binding an External Session
 
@@ -309,7 +354,7 @@ session.commit()
 
 ### Default Values
 
-BedrockModel listens for the `init` event and applies column defaults before the constructor finishes. Callable defaults are invoked with the instance as an argument. This means default values are set consistently, even when you pass explicit kwargs.
+BedrockModel listens for the `init` event and applies column defaults before the constructor finishes. Callable defaults are invoked with the instance as an argument; explicitly supplied keyword arguments take precedence.
 
 ## Query Builder
 
@@ -414,6 +459,8 @@ result = search_filter_sort_paginate(
 )
 ```
 
+`limit` must be an integer from 1 to 1000, including when `show_all=True`; invalid values raise `InvalidQueryLimitError`.
+
 The `page_info` dictionary includes:
 
 | Key | Description |
@@ -422,6 +469,8 @@ The `page_info` dictionary includes:
 | `limit` | Items per page |
 | `offset` | Current offset |
 | `page` | Current page number |
+| `query` | Search string, or an empty string |
+| `filters` | Supplied filter specifications, or an empty list |
 | `has_more` | Whether more pages exist |
 | `paginated` | Whether pagination is active |
 
@@ -446,6 +495,7 @@ For the complete migration CLI reference, see [CLI Reference — Database Comman
 ### Programmatic Usage
 
 ```python
+from bedrock.module import apps
 from bedrock.database.migrations_manager import MigrationsManager
 
 migrations = MigrationsManager(
@@ -472,7 +522,23 @@ Each app's migrations directory is audited before operations. If a revision file
 
 ### First Install
 
-When an app has no existing revisions, `ensure_schema()` creates all tables from SQLAlchemy metadata and stamps the branch at head. This avoids running migration scripts for brand-new apps.
+When the app's branch has no applied database revision, `ensure_schema()` creates its tables from SQLAlchemy metadata and stamps the branch at head. This avoids running migration scripts for a first installation even when revision files exist.
+
+### Migration Lock
+
+`upgrade` and `downgrade`, including `ensure_schema()` and `uninstall()`, take a database lock so two processes do not migrate the same database together.
+
+| Dialect | Lock | Wait |
+|---------|------|------|
+| PostgreSQL | `pg_try_advisory_lock` | Polled until `DATABASE_MIGRATION_LOCK_TIMEOUT` (default 30 seconds) |
+| MySQL, MariaDB | `GET_LOCK` | Same timeout, rounded up to whole seconds |
+| SQLite | none | Run migrations from a single process |
+
+A timeout raises `MigrationError`. SQLite has no shared lock in this manager.
+
+### `bedrock db check`
+
+`bedrock db check <app>` prints the current and head revisions for the app and for every other installed app that already has migration scripts. It does not change the database and does not create the Alembic version table. The process exits with status 1 when any reported branch is `behind` or `unknown`. `unknown` includes a database that has never been migrated. Use the command as a deploy gate before serving traffic. See [CLI Reference — Database Commands](/docs/guides/cli#database-commands-bedrock-db).
 
 ## Model Observer
 
@@ -518,13 +584,13 @@ custom_observer = ModelObserver()
 
 @observes_model(Catalog, "on_insert", observer=custom_observer)
 def handle_insert(session, target, identifier):
-    # Only fires on the custom observer
+    # Custom observers register their own SQLAlchemy listener; callbacks are stored on the model
     pass
 ```
 
 ### Weak References
 
-Observer callbacks are stored as weak references. Bound methods use a `WeakMethod` wrapper to prevent memory leaks. If the object owning a bound method is garbage collected, the callback is silently skipped.
+Observer callbacks are stored as weak references; bound methods use a `WeakMethod` wrapper. Keep callbacks and their owning objects alive while registered: dead weak references are not safely skipped during dispatch.
 
 ## Architecture
 
@@ -548,7 +614,7 @@ bedrock/database/
 
 ## Anti-Patterns
 
-**Don't call `db.init()` more than once.** The engine and session factory are not idempotent in all paths. Initialize once at process start.
+**Avoid reinitializing `db` during active work.** `db.init()` supports replacement: it constructs the new synchronous engine first, then clears the current context's synchronous session and disposes the previous synchronous engine. If an async engine has already opened a connection, `await db.aclose()` before `init()` so those connections close on the event loop. Other contexts must manage their own sessions before replacement.
 
 **Don't access `db.session` before initialization.** This raises `DatabaseNotConfiguredError`. Always call `db.init()` first.
 

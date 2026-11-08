@@ -3,7 +3,7 @@ title: Metrics
 description: Application metrics with counter/gauge/timer, decorators, and pluggable providers — StatsD, Sentry, and Prometheus pushgateway, with hard isolation from business code
 ---
 
-Bedrock ships a first-party metrics subsystem: counter/gauge/timer handles with decorators, a hardcoded logger, and pluggable providers (StatsD, Sentry, Prometheus pushgateway). Instrumentation is synchronous and **never raises** — a failing provider cannot break business code. The whole subsystem lives under `bedrock.contrib.metric`.
+Bedrock ships a first-party metrics subsystem: counter/gauge/timer handles with decorators, a hardcoded logger, and pluggable providers (StatsD, Sentry, Prometheus pushgateway). Instrumentation is synchronous; ordinary provider exceptions are isolated from business code. The whole subsystem lives under `bedrock.contrib.metric`.
 
 ## Quick Start
 
@@ -84,7 +84,7 @@ from bedrock.contrib.metric import metrics
 
 # Decorator (sync or async)
 @metrics.timer("render.duration")
-def render(...):
+def render():
     ...
 
 # Context manager
@@ -98,7 +98,7 @@ timer.observe(1.24)
 
 ## Providers
 
-Providers are plain objects with `emit(event)` and `close()`. Register as many as you like — every event is broadcast to **all** of them. There is no `configure()` and no default provider: you add providers, you never select one.
+Providers are plain objects with `emit(event)` and `close()`. They may also define `flush()` (called before `close()`) and the coroutine functions `aflush()` and `aclose()` when they own an async client; registry shutdown flushes and closes every provider, awaiting the async methods before the metrics module counts as shut down. Register as many as you like — every event is broadcast to **all** of them. There is no `configure()` and no default provider: you add providers, you never select one.
 
 ```python
 from bedrock.contrib.metric import metrics, StatsDProvider, StatsDSettings
@@ -177,12 +177,12 @@ Provider failures also log at `WARNING`, rate-limited to the first occurrence an
 
 ## Isolation Guarantee
 
-Instrumentation never raises into business code:
+Provider `Exception` failures are isolated from business code:
 
 - `emit()` failures are caught (`except Exception`, never `BaseException`) and logged as rate-limited warnings — the caller and other providers are unaffected.
 - Failing providers are **not** auto-disabled; they keep receiving events (and keep warning at the 100-occurrence cadence).
 - Emission is synchronous — no background threads, no buffered queues. Providers run their I/O inline on the caller's thread (StatsD `sendto`, Prometheus pushgateway HTTP POST), so a slow or unreachable sink can block the caller. Dispatch has no recursion guard, so a custom provider must **not** emit into the same manager from inside its `emit()` (it would recurse).
-- Exceptions are raised only at configuration time, when constructing a provider (see [Exception Hierarchy](#exception-hierarchy)).
+- Provider configuration can raise exceptions (see [Exception Hierarchy](#exception-hierarchy)). Invalid metric values can also fail during conversion, and logging failures or `BaseException` subclasses are not covered by provider isolation.
 
 ## API Reference
 
@@ -196,7 +196,9 @@ The `metrics` singleton is a `MetricsManager` instance; module-level `register_p
 | `metrics.set_log_level()` | `set_log_level(level) → None` | Set the severity assigned to each metric log record (default `logging.INFO`) |
 | `register_provider()` | `register_provider(provider) → None` | Register a provider on the singleton; idempotent per instance |
 | `list_providers()` | `list_providers() → list[str]` | Registered provider class names, in registration order |
-| `metrics.close()` | `close() → None` | Release provider resources — explicit only; the framework never calls it |
+| `metrics.close()` | `close() → None` | Flush (`flush()`) and close the sync side of every provider and clear the list. Registry shutdown calls it through the module's `on_shutdown` hook |
+| `metrics.aclose()` | `async aclose() → None` | Await `aflush()` then `aclose()` on providers that define them |
+| `metrics.has_async_resources()` | `has_async_resources() → bool` | Whether `aclose()` still has a provider to release |
 
 ## Tags
 
@@ -228,13 +230,13 @@ from bedrock.contrib.metric import (
 )
 ```
 
-These are raised only at configuration time, when constructing a provider. Emission itself never raises.
+These exceptions describe provider configuration failures. Ordinary provider exceptions during emission are isolated; errors outside provider dispatch are not covered by that guarantee.
 
 ## Anti-Patterns
 
-**Don't wrap instrumentation in try/except.** Emits never raise — a try/except around `inc()` / `set()` / `observe()` is dead code.
+**Don't wrap instrumentation merely to catch provider `Exception` failures.** The manager isolates those failures; invalid values and logging errors are outside that guarantee.
 
-**Don't call `close()` in normal operation.** It is explicit by design and the framework never calls it; call it once at shutdown if you own long-lived provider resources (e.g. a StatsD socket).
+**Don't call `close()` in normal operation.** Registry shutdown calls it for you (through `bedrock.shutdown()` or `bedrock.ashutdown()`), so call it yourself only in a process that does not install the metrics module. Provider close failures are logged, never raised.
 
 **Don't look for an in-memory provider.** For local debugging, use the hardcoded logger instead — with logging configured at `DEBUG`, `metrics.set_log_level(logging.DEBUG)` prints every event.
 

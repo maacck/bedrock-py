@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from pydantic_settings import BaseSettings
 
-from ...common.registry import ClassRegistry, ClassRegistryError
 from ...logging import get_logger
+from ...provider import ProviderCatalog, ProviderError, ProviderNotFoundError, ProviderSpec
 from .base import CacheBackend
 from .coder import CacheCoder, Coder
-from .exc import BackendNotConfiguredError
+from .exc import BackendNotConfiguredError, CacheCloseError
+from .settings import CacheSettings
 
 logger = get_logger(__name__)
 
@@ -18,35 +21,78 @@ if TYPE_CHECKING:
     from .lock import CacheLock
     from .schema import CacheNamespace
 
-_BACKEND_REGISTRY = ClassRegistry[CacheBackend](
-    base_class=CacheBackend,
-    lazy_classes={
-        "memory": "bedrock.contrib.cache.backends.memory:InMemoryBackend",
-        "redis": "bedrock.contrib.cache.backends.redis:RedisBackend",
-    },
+_BUILTIN_SPECS: tuple[ProviderSpec, ...] = (
+    ProviderSpec("memory", "bedrock.contrib.cache.backends.memory:InMemoryBackend"),
+    ProviderSpec("redis", "bedrock.contrib.cache.backends.redis:RedisBackend", "bedrock-core[cache-redis]"),
 )
 
+_BACKEND_REGISTRY: ProviderCatalog[CacheBackend] = ProviderCatalog(protocol=CacheBackend, specs=_BUILTIN_SPECS)
 
-def register_backend(name: str, backend_cls: type[CacheBackend]) -> None:
-    """Register a cache backend with the global registry.
+
+@dataclass(eq=False)
+class _OpenBackend:
+    """A backend instance whose sync and async clients may still hold resources."""
+
+    backend: CacheBackend
+    sync_open: bool = True
+    async_open: bool = True
+
+    @property
+    def async_pending(self) -> bool:
+        """Return whether the async side still has something to close."""
+        return self.async_open and getattr(self.backend, "holds_async_resources", True)
+
+    @property
+    def finished(self) -> bool:
+        """Return whether both sides are closed."""
+        return not self.sync_open and not self.async_pending
+
+
+def register_backend(name: str, backend_cls: Callable[..., CacheBackend]) -> None:
+    """Register an imported cache backend class or factory for :meth:`CacheService.configure`.
+
+    The module defining ``backend_cls`` is already imported. To defer that import, and the optional SDK it
+    pulls in, use :func:`register_backend_lazy`.
 
     Args:
-        name: Unique backend identifier (e.g. ``"redis"``).
-        backend_cls: A concrete class that explicitly subclasses :class:`CacheBackend`.
-            Structural conformance alone is not enough.
+        name: Unique backend identifier.
+        backend_cls: A backend class, or a factory accepting ``settings=``, whose result structurally
+            implements :class:`CacheBackend`. Inheritance is not required; the result is checked by
+            :meth:`CacheService.configure`.
 
     Raises:
-        DuplicateRegistrationError: If ``name`` is already registered, including
-            the built-in ``"memory"`` and ``"redis"`` names.
-        InvalidRegisteredClassError: If ``backend_cls`` is not a concrete
-            subclass of :class:`CacheBackend`.
+        DuplicateRegistrationError: If ``name`` is already registered to anything else, including the
+            built-in ``"memory"`` and ``"redis"`` names (raised as :class:`bedrock.provider.ProviderConflictError`).
+            Registering the same object again is a no-op.
+        InvalidRegisteredClassError: If ``name`` is empty or ``backend_cls`` is not callable (raised as
+            :class:`bedrock.provider.InvalidProviderSpecError`).
     """
     _BACKEND_REGISTRY.register(name, backend_cls)
 
 
+def register_backend_lazy(name: str, path: str, *, install_requirement: str | None = None) -> None:
+    """Register a cache backend by ``module:attribute`` path without importing it.
+
+    The module is imported only when :meth:`CacheService.configure` selects ``name``.
+
+    Args:
+        name: Unique backend identifier.
+        path: Trusted path to a backend class or a factory accepting ``settings=``.
+        install_requirement: Requirement named in the configuration error when the import fails,
+            e.g. ``"acme-cache[redis]"``.
+
+    Raises:
+        DuplicateRegistrationError: If ``name`` is already registered to anything else (raised as
+            :class:`bedrock.provider.ProviderConflictError`). Registering an equal path again is a no-op.
+        InvalidRegisteredClassError: If the name, path, or requirement is malformed (raised as
+            :class:`bedrock.provider.InvalidProviderSpecError`).
+    """
+    _BACKEND_REGISTRY.register_lazy(name, path, install_requirement=install_requirement)
+
+
 def list_backends() -> list[str]:
-    """Return all registered backend names."""
-    return sorted(_BACKEND_REGISTRY.keys())
+    """Return all registered backend names in sorted order, without importing any backend."""
+    return _BACKEND_REGISTRY.names()
 
 
 class CacheService:
@@ -59,7 +105,7 @@ class CacheService:
 
         from bedrock.contrib.cache import cache
 
-        # Auto-configured with memory backend
+        # Auto-configured with the CACHE_BACKEND backend (memory when unset)
         cache.set("key", "value")
 
         # Or explicitly configure
@@ -70,53 +116,58 @@ class CacheService:
 
     def __init__(self) -> None:
         self._backend = None
+        self._open: list[_OpenBackend] = []
 
     def configure(
         self,
-        backend_name: str = "memory",
+        backend_name: str | None = None,
         settings: BaseSettings | None = None,
     ) -> CacheBackend:
         """Configure the cache service with a specific backend.
 
         Args:
-            backend_name: Backend identifier (``"memory"``, ``"redis"``).
-            settings: Optional settings instance. If ``None``, default settings are used.
+            backend_name: Registered backend identifier (``"memory"``, ``"redis"``, or a custom name). If
+                ``None``, the ``CACHE_BACKEND`` environment variable selects it, defaulting to ``"memory"``.
+            settings: Optional settings instance. If ``None``, the backend reads its own default settings.
 
         Returns:
             The newly configured backend instance.
 
         Raises:
-            BackendNotConfiguredError: If the backend name is unknown, or its class
-                cannot be loaded or is not a valid :class:`CacheBackend` subclass.
+            BackendNotConfiguredError: If the backend name is unknown, cannot be loaded (missing dependency
+                named by its install requirement), or does not implement :class:`CacheBackend`. The
+                provider error is the cause. Any other exception raised by the backend constructor
+                propagates unchanged.
         """
-        if not _BACKEND_REGISTRY.has(backend_name):
-            available = ", ".join(sorted(_BACKEND_REGISTRY.keys()))
-            raise BackendNotConfiguredError(
-                f"Unknown cache backend '{backend_name}'. Available: {available}. "
-                f"Install optional dependencies for additional backends."
-            )
-
+        source = ""
+        if backend_name is None:
+            backend_name = CacheSettings().backend
+            source = " (from CACHE_BACKEND)"
         try:
-            backend_cls = _BACKEND_REGISTRY.get(backend_name)
-        except ClassRegistryError as exc:
+            self._backend = _BACKEND_REGISTRY.create(backend_name, settings=settings)
+        except ProviderNotFoundError as exc:
+            available = ", ".join(_BACKEND_REGISTRY.names())
             raise BackendNotConfiguredError(
-                f"Failed to load cache backend '{backend_name}': {exc.detail} "
-                f"Install the required optional dependencies."
+                f"Unknown cache backend '{backend_name}'{source}. Available: {available}. "
+                f"Install optional dependencies for additional backends."
             ) from exc
-
-        self._backend = backend_cls(settings=settings)
+        except ProviderError as exc:
+            raise BackendNotConfiguredError(
+                f"Failed to load cache backend '{backend_name}'{source}: {exc.detail}"
+            ) from exc
+        self._open.append(_OpenBackend(self._backend))
         logger.info("Cache backend configured: {}", backend_name)
         return self._backend
 
     def get_backend(self) -> CacheBackend:
-        """Return the current backend, initializing lazily if needed."""
+        """Return the current backend, configuring the ``CACHE_BACKEND`` backend lazily if needed."""
         if self._backend is None:
-            self._backend = self.configure("memory")
+            self._backend = self.configure()
         return self._backend
 
     def list_backends(self) -> list[str]:
         """Return all registered backend names."""
-        return sorted(_BACKEND_REGISTRY.keys())
+        return list_backends()
 
     @staticmethod
     def _decode_value(
@@ -321,16 +372,75 @@ class CacheService:
         return await self.get_backend().adecr(key, delta)
 
     def close(self) -> None:
-        """Close backend connections."""
-        if self._backend is not None:
-            self._backend.close()
-            self._backend = None
+        """Close the synchronous side of every backend this service has created.
+
+        Backends that were replaced by :meth:`configure` are closed too, so no client is stranded.
+        A backend with async resources stays tracked until :meth:`aclose` releases them; see
+        :meth:`has_async_resources`. Every backend is attempted even when one fails; a backend whose
+        close failed stays current or tracked, so the next call attempts it again. The call is safe to repeat.
+
+        Raises:
+            CacheCloseError: After all attempts, if any backend failed to close.
+        """
+        self._track_current()
+        failed: list[tuple[_OpenBackend, Exception]] = []
+        for entry in list(self._open):
+            if not entry.sync_open:
+                continue
+            try:
+                entry.backend.close()
+            except Exception as exc:
+                failed.append((entry, exc))
+            else:
+                entry.sync_open = False
+        self._settle(failed, "sync")
 
     async def aclose(self) -> None:
-        """Close async backend connections."""
-        if self._backend is not None:
-            await self._backend.aclose()
+        """Close the asynchronous side of every backend this service has created.
+
+        Counterpart of :meth:`close` for async clients, such as the Redis asyncio client. Backends
+        that declare ``holds_async_resources = False`` are skipped. A backend whose sync side is still
+        open stays tracked until :meth:`close` releases it. The call is safe to repeat.
+
+        Raises:
+            CacheCloseError: After all attempts, if any backend failed to close.
+        """
+        self._track_current()
+        failed: list[tuple[_OpenBackend, Exception]] = []
+        for entry in list(self._open):
+            if not entry.async_pending:
+                continue
+            try:
+                await entry.backend.aclose()
+            except Exception as exc:
+                failed.append((entry, exc))
+            else:
+                entry.async_open = False
+        self._settle(failed, "async")
+
+    def has_async_resources(self) -> bool:
+        """Return whether :meth:`aclose` still has a backend to release.
+
+        Lifecycle hooks use this to decide whether shutdown needs to await anything.
+        """
+        self._track_current()
+        return any(entry.async_pending for entry in self._open)
+
+    def _track_current(self) -> None:
+        """Make sure a backend assigned without :meth:`configure` is tracked for closing."""
+        if self._backend is not None and all(entry.backend is not self._backend for entry in self._open):
+            self._open.append(_OpenBackend(self._backend))
+
+    def _settle(self, failed: list[tuple[_OpenBackend, Exception]], side: str) -> None:
+        """Forget finished backends, drop the current one unless its close failed, and report failures."""
+        self._open = [entry for entry in self._open if not entry.finished]
+        if self._backend is not None and all(entry.backend is not self._backend for entry, _ in failed):
             self._backend = None
+        if failed:
+            errors = [exc for _, exc in failed]
+            raise CacheCloseError(
+                f"Failed to close {len(errors)} cache backend(s) ({side}): " + "; ".join(str(exc) for exc in errors)
+            ) from ExceptionGroup("cache close failures", errors)
 
     def namespace(self, prefix: str) -> CacheNamespace:
         """Create a typed cache namespace bound to this service."""

@@ -5,8 +5,7 @@ description: 标准 Bedrock 模块结构
 
 ## 标准模块结构
 
-第一阶段围绕应用级的 `my_app/` 目录构建。
-当一个模块包含 `manifest.yaml` 文件时，它就是可加载的。
+模块是根目录包含 `manifest.yaml` 的可导入 Python package。
 
 ```files
 bedrock_app/
@@ -16,6 +15,7 @@ bedrock_app/
 ├── manifest.yaml
 ├── models.py
 ├── entities.py
+├── schemas.py
 ├── service.py
 ├── exc.py
 └── bootstrap.py
@@ -29,6 +29,7 @@ bedrock_app/
 | `manifest.yaml` | 是 | 模块声明与元数据 |
 | `models.py` | 否 | 数据模型与持久化 |
 | `entities.py` | 否 | 业务实体 |
+| `schemas.py` | 否 | API 输入/输出 schema（请求/响应 DTO） |
 | `service.py` | 否 | 业务逻辑层 |
 | `exc.py` | 否 | 模块专用异常 |
 | `bootstrap.py` | 否 | 生命周期 hooks |
@@ -37,7 +38,7 @@ bedrock_app/
 
 ## 模块清单
 
-Bedrock 正在统一采用 `manifest.yaml`。
+Bedrock 从 `manifest.yaml` 加载模块元数据。
 
 ```yaml
 title: My Bedrock App
@@ -74,13 +75,30 @@ commands: "commands:app"
 
 ### `entities.py`
 
-用于请求/响应校验和业务数据传输的 Pydantic models。它们不同于 ORM models —— 不包含持久化逻辑。
+业务领域实体使用的 Pydantic models，表示在 service 层内流转的数据，不绑定特定 API 契约。不需要单独的响应 schema 时，也可以直接使用实体作为输出。
+
+```python
+from pydantic import BaseModel
+
+
+class Product(BaseModel):
+    """Business entity representing a product."""
+
+    id: int
+    name: str
+    sku: str
+    price: int
+```
+
+### `schemas.py`
+
+API 输入/输出契约使用的 Pydantic models。当请求校验或响应序列化需要不同于业务实体的结构时使用；简单模块可以直接使用实体。
 
 ```python
 from pydantic import BaseModel, Field
 
 
-class ProductCreate(BaseModel):
+class ProductCreateRequest(BaseModel):
     """Input schema for creating a product."""
 
     name: str = Field(..., min_length=1, max_length=100)
@@ -104,14 +122,14 @@ class ProductResponse(BaseModel):
 ```python
 from bedrock.database import db
 
-from .entities import ProductCreate, ProductResponse
+from .schemas import ProductCreateRequest, ProductResponse
 from .models import Product
 
 
 class InventoryService:
     """Inventory business operations."""
 
-    def create_product(self, data: ProductCreate) -> ProductResponse:
+    def create_product(self, data: ProductCreateRequest) -> ProductResponse:
         """Create a new product in the inventory."""
         product = Product(name=data.name, sku=data.sku, price=data.price)
         db.session.add(product)
@@ -152,7 +170,7 @@ class DuplicateSkuError(BedrockExc):
 
 ### `bootstrap.py`
 
-由 registry 在特定阶段调用的生命周期 hooks。Hooks 使用关键字参数签名 — registry 会检查每个 hook 的参数并按名称自动注入。
+Registry 在特定阶段调用生命周期 hooks，并以关键字参数按名称注入受支持的参数。
 
 ```python
 from bedrock.module.registry import ModuleRegistry
@@ -242,7 +260,7 @@ def hook_name(*, registry, app, container, hooks) -> None: ...
 
 更完整的 API 说明请见[依赖注入](/docs/guides/di)与[Hook 系统](/docs/guides/hooks)。
 
-只需声明你需要的参数即可 — registry 只会注入签名中声明的参数。
+至少声明一个受支持的参数，或使用 `**kwargs` 接收全部四个参数。不支持的必需参数和必需的位置专用参数会被拒绝。`registry.get()` 和 `registry.all()` 要求注册表已就绪；模块钩子中可使用 `is_installed()` 或 `list_installed()`。
 
 ### 调用顺序
 
@@ -268,20 +286,56 @@ shutdown()
 | Hook | 阶段 | 说明 |
 |------|-------|-------------|
 | `on_load` | 安装 | 模块刚被加载。注册 signal receivers、校验配置、初始化模块状态。 |
-| `ready` | 就绪 | 所有模块都已加载。可以安全访问其他模块并执行跨模块初始化。 |
+| `ready` | 就绪 | 所有请求的模块都已加载，但其他模块的 `ready` 钩子可能尚未运行，且要求注册表就绪的查询不可用。 |
 | `on_shutdown` | 关闭 | 优雅拆除。关闭连接、刷新缓冲区、释放资源。 |
 
 ### 失败语义
 
 生命周期步骤失败时，registry 会保持状态一致：启动可以重试，关闭会尽力释放所有资源。
 
-- **安装具备失败原子性。** `install()`（或 `populate()` 的安装阶段）失败时，本次调用引入的所有模块都会从 registry 和安装顺序中移除；调用之前已安装的模块不会被移除。已完成 `on_load` 的新模块会尽力回滚：按安装顺序的逆序调用其 `on_shutdown` 并触发 `module_shutdown`。如果回滚也失败，则抛出 `ModuleStartupRollbackError`（`ModuleLifecycleError` 的子类），其 `failures` 先是原始失败，随后是回滚失败。
+- **安装具备失败原子性。** `install()`（或 `populate()` 的安装阶段）失败时，本次调用引入的所有模块都会从 registry 和安装顺序中移除；调用之前已安装的模块不会被移除。已完成 `on_load` 的新模块会按安装逆序尽力回滚：只有 `on_shutdown` 钩子成功后才触发 `module_shutdown`。如果回滚失败，则抛出 `ModuleStartupRollbackError`（`ModuleLifecycleError` 的子类），其 `failures` 先是原始失败，随后是回滚失败。钩子可以继续安装其他模块，但必须逐个进行：同一钩子发起的另一个安装仍在运行时再发起安装（例如 `asyncio.gather(registry.ainstall("a"), registry.ainstall("b"))`），会在加载任何内容之前抛出 `ModuleLifecycleError`，因为失败的兄弟安装回滚时也会把它移除。请依次 `await` 每个安装。
 - **回滚期间不能扩展注册表。** 清理钩子和信号接收器不得在回滚期间通过 `install()` 或 `populate()` 引入新模块。此类调用会在加载新模块之前抛出 `ModuleLifecycleError`；未捕获的错误会计入回滚失败。
-- **就绪状态按模块记录。** 每个模块依次经历 `loading → loaded → ready → shutdown`（`ModuleLifecycleState`）。某个 `ready` 钩子失败后，已就绪的模块保持就绪；再次调用 `mark_ready()`（或用相同路径调用 `populate()`）会跳过它们并继续，只有所有模块就绪后才会触发 `registry_ready`。
-- **关闭会尝试每个模块。** `shutdown()` 按逆序对尚未完成关闭的每个模块调用 `on_shutdown`，即使中途失败也会继续，最后抛出一个 `ModuleLifecycleError`，其 `failures` 列出所有失败模块及其原始原因，且不会触发 `registry_shutdown`。已完成关闭的模块不会再次关闭，因此重复调用 `shutdown()` 是安全的；钩子失败的模块会被重试。
+- **就绪状态按模块记录。** 模块经历 `loading → loaded → ready → shutdown`，但已加载的模块也可以在就绪前关闭。`AppConfig.lifecycle_state` 是只读的（对其赋值会抛出 `AttributeError`，传给构造函数会抛出 `ValidationError`），只有 registry 会通过 `AppConfig.transition_to()` 修改它，该方法会拒绝非法转换。registry 就绪之后才安装的模块会保持 `loaded`，直到再次调用 `mark_ready()`，而 `registry.ready` 仍为 `True`；因此请检查模块自身的 `lifecycle_state`，不要把 `registry.ready` 理解为“所有已安装模块都已就绪”。`ready` 钩子失败后，已就绪的模块保持就绪；重试 `mark_ready()`（或用相同路径调用 `populate()`）会跳过它们。`module_ready` 接收器失败时模块已就绪，因此不会重试该模块的钩子或信号。
+- **关闭会尝试每个模块。** `shutdown()` 按安装逆序尝试每个尚未完成的模块，并将钩子和 `module_shutdown` 接收器的失败汇总为 `ModuleLifecycleError`；该次调用不会触发 `registry_shutdown`。失败的钩子会重试，但失败的 `module_shutdown` 接收器不会：模块已标记为关闭。其余模块完成后，下次调用可触发 `registry_shutdown`。
 - **注册表通知可以重试。** `registry_ready` 或 `registry_shutdown` 接收器抛出异常后，再次调用 `mark_ready()` 或 `shutdown()` 会重新发送通知，但不会重复已完成的模块钩子。就绪通知失败会将 `registry.ready` 重置为 `False`，因此也可以重试 `bedrock.setup()`。就绪接收器内部仍可查询注册表。重试会重新发送整个信号，之前成功的接收器可能再次执行，必须能够安全重试。
 - **`mark_ready()` 和 `shutdown()` 不可重入。** 在其中一个运行期间，从钩子或信号接收器再次调用任一方法会抛出 `ModuleLifecycleError`，而不会重复执行钩子。请在钩子之外触发停止（例如设置标志位），不要在 `on_shutdown` / `ready` 中调用 `shutdown()`。
-- **失败带有归因。** `failures` 中的每一项都标明模块和步骤（`on_load`、`manifest`、`ready`、`on_shutdown`、`module_loaded` 等），错误的 `__cause__` 是包含全部失败的 `ExceptionGroup`。
+- **模块安装期间会拒绝 `shutdown()` 和 `mark_ready()`。** `on_load` 钩子、`module_loaded` 接收器或回滚钩子调用其中任一方法，都会抛出 `ModuleLifecycleError`（"Cannot call shutdown() while install() is running"）。此时 registry 只安装了一部分，因此该调用会被直接拒绝，既不会执行，也不会推迟到安装结束后再执行。若要中止安装，请在钩子中抛出异常：安装会回滚，已加载的模块都会被清理。`on_load` 钩子和 `module_loaded` 接收器仍可调用 `install()` 安装其他模块。
+- **`mark_ready()` 或 `shutdown()` 运行期间不能安装新模块。** 在 `ready` 或 `on_shutdown` 钩子，或 `module_ready`、`registry_ready`、`module_shutdown`、`registry_shutdown` 接收器中，对尚未安装的模块调用 `install()`（或 `populate()`），会在加载任何内容之前抛出 `ModuleLifecycleError`，registry 保持不变。就绪流程面向固定的模块集合，中途安装的模块会处于 `loaded` 状态，而 registry 已经报告 `ready`。请在 `mark_ready()` 之前安装模块，或先调用 `install()` 再次调用 `mark_ready()`，后者只会让新模块就绪。重复安装已安装的模块始终是空操作。
+- **汇总的失败带有归因。** 汇总错误的 `failures` 中各项标明模块和步骤，其 `__cause__` 是 `ExceptionGroup`。其他错误（包括 `module_ready` 接收器错误）可能直接传播。
+
+### 异步生命周期
+
+每个生命周期操作都有同步入口和带 `a` 前缀的异步入口。两者运行同一份实现，因此上文的失败语义对两者同样成立。
+
+| 同步 | 异步 | 进程级 |
+|------|------|--------|
+| `install()` | `ainstall()` | |
+| `populate()` | `apopulate()` | `bedrock.setup()` / `await bedrock.asetup()` |
+| `mark_ready()` | `amark_ready()` | |
+| `shutdown()` | `ashutdown()` | `bedrock.shutdown()` / `await bedrock.ashutdown()` |
+
+钩子和信号接收器名称不变，可以是普通函数或 `async def`。普通函数若返回可等待对象，也会被等待：
+
+```python
+async def on_load(*, registry, app) -> None:
+    app_state.client = await open_client()
+
+
+async def on_shutdown(*, registry, app) -> None:
+    await app_state.client.aclose()
+```
+
+- **异步入口**在运行中的事件循环上等待异步钩子，并在工作线程中运行普通钩子（与 `hooks.acall`、`Signal.asend` 一致）。同步与异步混合的依赖图按依赖顺序启动，按逆序关闭。
+- **同步入口**直接调用普通钩子。异步钩子运行在一个私有事件循环上，该循环会保持打开，直到所有模块都已关闭，因此由 `on_load` 打开的客户端会在同一个循环上被 `on_shutdown` 关闭。仅当调用线程没有运行中的事件循环时才可使用。
+- **在运行中的事件循环里**，需要运行异步工作的同步入口会抛出 `ModuleAsyncRequiredError`（`ModuleLifecycleError` 的子类），并指明应使用的异步入口；它不会启动嵌套事件循环，也不会留下未被等待的协程。`mark_ready()` 和 `shutdown()` 会在运行任何钩子之前检查协程钩子，因此不会改变状态；`install()` 与其他安装失败一样回滚。钩子全部是普通函数的 registry，仍可在事件循环内使用同步入口。
+- **全程使用同一族入口。**异步客户端绑定到打开它的事件循环，因此请用同一族入口启动和停止（`asetup()` 配 `ashutdown()`，或 `setup()` 配 `shutdown()`）。对绑定事件循环的客户端，混用不受支持。
+- **操作在 `await` 之间保持串行。**守卫不持有线程锁。无关的任务和线程会等待正在运行的操作；来自钩子、接收器，或它们启动的任务、`to_thread` 工作线程的调用会按上文被拒绝。在持有运行中操作的线程上，来自另一个任务的同步调用会直接抛出异常而不是死锁。异步操作被取消时，`CancelledError` 会继续传播，所有模块保持有效状态，被中断的安装仍会回滚，再次调用 `amark_ready()` 或 `ashutdown()` 会从尚未完成的模块继续，因此钩子必须能够安全地重复执行。已在工作线程中开始运行的阻塞同步钩子或接收器无法被强制停止，所以取消只会在它返回之后才抛出：取消可能需要等待仍在执行的钩子，重复取消不会缩短等待，回滚、下一次操作以及操作的释放都不会与仍在运行的工作线程重叠。取消之后由普通钩子返回的可等待对象会被释放而不会被等待。协程钩子则会被直接取消。失败或被取消的安装所做的回滚是例外：回滚期间再次取消不会中止清理钩子，也不会跳过任何模块。所有新引入的模块仍会按相反顺序被清理，期间操作保持被占用，然后才抛出 `CancelledError`，并把触发回滚的安装错误作为它的 `__cause__`；清理失败会被记录日志，并作为备注附加到 `CancelledError` 上。如果清理钩子本身抛出 `CancelledError` 或 `KeyboardInterrupt`，回滚会停止，该模块及其依赖的模块会以当前状态保留在注册表中，之后可由 `shutdown()` 完成清理。保证在抛出 `ModuleAsyncRequiredError` 之前不做任何改动的预检只覆盖协程钩子，不覆盖会返回可等待对象的普通钩子。
+
+#### 关闭进程级基础设施
+
+数据库是进程级基础设施，而不是模块。`bedrock.shutdown()` 和 `bedrock.ashutdown()` 会先停止所有模块，再释放已初始化的数据库：同步引擎用 `db.close()`，异步引擎用 `db.aclose()`，只处理实际存在的引擎。即使某个模块钩子失败也会如此，数据库的失败会加入同一个汇总错误。如果从未使用过数据库，则不会初始化或重建任何内容。存在异步引擎时，在运行中的事件循环里调用 `bedrock.shutdown()` 会在改变任何状态之前抛出 `ModuleAsyncRequiredError`，请使用 `await bedrock.ashutdown()`。被取消的 `ashutdown()` 不会释放数据库，请再次调用。
+
+同时拥有同步和异步客户端的模块需要释放两者。请让 `on_shutdown` 保持为普通函数：关闭同步客户端，并返回关闭异步客户端的可等待对象，这样只有异步关闭完成后才算关闭完成。`bedrock.contrib.cache` 和 `bedrock.contrib.metric` 就是这样做的。
 
 ### Signals
 
@@ -297,7 +351,7 @@ shutdown()
 
 ## 最小模块示例
 
-一个完整、可直接复制粘贴的模块示例，包含所有必需文件：
+一个完整、可直接复制粘贴的模块示例，包含所有必需文件。此例只使用 `entities.py`；需要专门的 API 输入/输出契约时可添加 `schemas.py`。
 
 ```files
 my_module/
@@ -375,7 +429,7 @@ def on_load(*, registry: ModuleRegistry, app: AppConfig) -> None:
 
 
 def ready(*, registry: ModuleRegistry, app: AppConfig) -> None:
-    """All modules ready — safe for cross-module work."""
+    """All modules loaded — perform cross-module setup."""
     pass
 
 
@@ -399,10 +453,19 @@ print(module.manifest.title)  # "My Module"
 
 ## 加载器流程
 
-运行时加载器规划为以下几个阶段：
+Registry 安装显式指定的导入路径，不扫描模块根目录：
 
-1. **discover** — 扫描模块根目录并收集 manifests
-2. **validate** — 检查 schema、重复项、缺失依赖和循环依赖
-3. **order** — 计算一个确定性的、遵循依赖关系的加载顺序
-4. **import** — 通过声明的 package paths 惰性导入模块
-5. **initialize** — 运行轻量级生命周期 hooks
+1. 导入每个请求的 package，校验 manifest，并导入可选的 `bootstrap` 和 `models` 模块。
+2. 按 manifest 顺序递归安装依赖，并检测循环依赖。
+3. 注册每个模块，调用 `on_load`，然后触发 `module_loaded`。
+4. `populate()` 随后调用 `mark_ready()`，执行就绪钩子并触发就绪信号。
+
+安装回滚会移除 registry 条目并调用已加载模块的关闭钩子，但不会自动撤销任意副作用，例如 DI 或 hook 注册。
+
+## 代码应该放在哪里？
+
+- 涉及 `Request`、`Response` 或 HTTP 状态码 → **API 层**（routes/controllers）
+- 导入 `sqlalchemy` → **数据层**（`models.py`）
+- 用 `pydantic` 定义输入/输出结构 → **Schemas**（`schemas.py`）或 **Entities**（`entities.py`）
+- 包含条件逻辑、计算或编排 → **逻辑层**（`service.py`）
+- 在启动时运行 → **生命周期 hooks**（`bootstrap.py`）

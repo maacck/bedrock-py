@@ -168,13 +168,15 @@ SQLAlchemy persistence owned by this module.
 
 #### `bootstrap.py`
 
-Process lifecycle integration. The runtime recognizes these synchronous hooks:
+Process lifecycle integration. The runtime recognizes these hooks. Each may be a plain function or an `async def`:
 
 ```python
 def on_load(*, registry, app) -> None: ...
 def ready(*, registry, app) -> None: ...
-def on_shutdown(*, registry, app) -> None: ...
+def on_shutdown(*, registry, app) -> None: ...  # or: async def on_shutdown(...)
 ```
+
+The registry calls a hook and awaits whatever it returns when that is awaitable. Each operation has a sync entrypoint and an `a`-prefixed async twin (`install`/`ainstall`, `populate`/`apopulate`, `mark_ready`/`amark_ready`, `shutdown`/`ashutdown`), plus `bedrock.setup`/`asetup` and `bedrock.shutdown`/`ashutdown` at the process level. Both run one shared implementation. Async entrypoints await async hooks on the running loop and run plain hooks in a worker thread. Sync entrypoints call plain hooks directly and run async hooks on a private loop that stays open until every module has shut down, but only when no event loop is running in the calling thread; inside a running loop they raise `ModuleAsyncRequiredError` naming the async entrypoint. Start up and shut down through the same entrypoint family, because an async client is bound to the loop that opened it.
 
 Supported injected names are `registry`, `app`, `container`, and `hooks`. A hook may declare any supported subset, or `**kwargs` to receive all injected values. Parameters must be keyword-compatible.
 
@@ -184,7 +186,9 @@ Hook responsibilities:
 - `ready`: start work that requires the complete dependency graph.
 - `on_shutdown`: release owned resources; shutdown runs in reverse install order and attempts every module even if another module's hook fails. A failed `on_load` rolls the whole install back, and a module whose shutdown completed is never shut down again.
 
-Do not put request handling, seed data, migrations, or ordinary business workflows in bootstrap hooks. Current runtime hooks are synchronous; do not declare `async def` hooks until the runtime contract explicitly supports awaiting them.
+Hooks and the lifecycle signal receivers must not call back into lifecycle operations: `shutdown()` and `mark_ready()` are rejected while another lifecycle operation (an installation, `mark_ready()`, or `shutdown()`) is running, and a new module cannot be installed during `mark_ready()` or `shutdown()`. `on_load` may install further modules; raise an error to abort an installation.
+
+Do not put request handling, seed data, migrations, or ordinary business workflows in bootstrap hooks. A module that owns both a sync and an async client releases both: keep `on_shutdown` a plain function that closes the sync client and returns the awaitable that closes the async one (or make it `async def`), so shutdown completes only after the async close does. The database is process infrastructure, not a module: `bedrock.shutdown()` / `bedrock.ashutdown()` release initialized sync and async engines after every module hook.
 
 #### `installation.py`
 

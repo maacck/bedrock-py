@@ -83,6 +83,7 @@ config = container.resolve("app.config")
 ```
 
 If a key has not been registered, `resolve()` raises `ServiceNotFoundError`.
+Factories are called without arguments; wire their dependencies explicitly. Registering the same key twice raises `DuplicateServiceError`.
 
 ## Scoped Services
 
@@ -213,6 +214,7 @@ def send_welcome(user_email: str, *, mailer: Mailer) -> None:
 ```
 
 Explicit keyword arguments always win over injected values.
+Pass injected parameters by keyword when overriding them: positional arguments are not detected by the decorator.
 
 To inject from an isolated container, use the container-bound decorator:
 
@@ -254,6 +256,7 @@ def on_load(*, container) -> None:
 
 Bootstrap hooks may request `container` by name. See
 [`Module Anatomy`](/docs/guides/module-anatomy) for the full lifecycle shape.
+Installation rollback does not automatically remove registrations made by a bootstrap hook. Make cleanup explicit where retries can encounter an existing registration.
 
 ## Testing Utilities
 

@@ -1,0 +1,144 @@
+---
+title: Providers
+description: Named providers registered explicitly or lazily, created and validated on demand
+---
+
+`bedrock.provider.ProviderCatalog[P]` maps names to providers of one capability. A provider is a class or factory function whose result implements a protocol `P`. Register imported providers explicitly, or register lazy `module:attribute` paths that are imported only when selected. `create(name, **kwargs)` builds and validates an instance. `resolve(name)` returns the class or factory so the application can construct it.
+
+## Choosing between ClassRegistry and providers
+
+| Need | Use |
+| --- | --- |
+| Look up a **class** by name and use the class itself (classmethods, type dispatch) | [`ClassRegistry`](./class-registry) |
+| Every implementation must explicitly inherit your base, checked at registration | [`ClassRegistry`](./class-registry) |
+| Select a provider by name and get an **instance**, validated against a protocol | `ProviderCatalog.create` |
+| Construct the provider yourself (credentials loaded by the application, positional arguments, classmethods) | `ProviderCatalog.resolve` |
+| Factory functions, structural implementations, or optional SDKs with install hints | `ProviderCatalog` |
+
+Both support lazy paths. Only `ProviderCatalog` accepts factory functions, accepts implementations that do not inherit the protocol, and names an install requirement when an import fails.
+
+## Explicit registration
+
+```python
+from typing import Protocol, runtime_checkable
+
+from bedrock.provider import ProviderCatalog
+
+
+@runtime_checkable
+class Notifier(Protocol):
+    def send(self, to: str, text: str) -> str: ...
+
+
+class ConsoleNotifier:
+    def __init__(self, prefix: str = "") -> None:
+        self.prefix = prefix
+
+    def send(self, to: str, text: str) -> str:
+        return f"{self.prefix}{to}: {text}"
+
+
+notifiers = ProviderCatalog[Notifier](protocol=Notifier)
+notifiers.register("console", ConsoleNotifier)
+
+notifier = notifiers.create("console", prefix="[dev] ")
+assert notifier.send("ops", "deployed") == "[dev] ops: deployed"
+```
+
+`ConsoleNotifier` does not inherit `Notifier`; it only has to implement it. The registered object is kept as-is, including classes and functions defined inside other functions. Registering an object means its module is already imported.
+
+## Lazy registration
+
+Keep the protocol in a lightweight `base.py` and each provider in its own module. Declare built-in providers on the catalog and let other modules add theirs from `bootstrap.py:on_load`:
+
+```python
+# myapp/notify/service.py
+from bedrock.provider import ProviderCatalog, ProviderSpec
+
+from .base import Notifier
+
+notifiers = ProviderCatalog[Notifier](
+    protocol=Notifier,
+    specs=(
+        ProviderSpec("sms", "myapp.notify.providers.sms:SmsNotifier", install_requirement="myapp[sms]"),
+    ),
+)
+```
+
+```python
+# myapp/notify/bootstrap.py
+from .service import notifiers
+
+
+def on_load(*, app) -> None:
+    """Declare providers without importing them."""
+    notifiers.register_lazy("email", "myapp.notify.providers.email:create_email_notifier")
+```
+
+Registration checks path syntax only. Nothing is imported until `resolve()` or `create()` selects the name; `has()` and `names()` never import. Keep parent package `__init__.py` files free of provider imports, because Python runs them when importing a child module. Do not register from import-time decorators or `__init_subclass__`.
+
+When a lazy provider cannot be imported, the error names its `install_requirement`, for example `Install 'myapp[sms]'.`
+
+## create or resolve
+
+`create(name, **kwargs)` calls the factory with the keyword arguments you pass and checks the result with `isinstance(result, P)`. The catalog never reads configuration, so application-owned settings are passed in:
+
+```python
+credentials = await credential_repo.aget(tenant_id)
+notifier = notifiers.create("sms", api_key=credentials.api_key)
+```
+
+Each call builds a new instance. The caller owns it, including closing any client it holds.
+
+`resolve(name)` returns the registered class or factory without calling it. Use it when you need the class itself, positional arguments, or your own construction logic:
+
+```python
+sms_notifier_cls = notifiers.resolve("sms")
+notifier = sms_notifier_cls.from_dsn(settings.sms_dsn)
+```
+
+`resolve()` does not validate. An object constructed from it is not checked against `P` unless you check it.
+
+## Interface
+
+| Operation | Result |
+| --- | --- |
+| `ProviderCatalog[P](protocol=P, specs=())` | A catalog bound to `P`, seeded with lazy `ProviderSpec`s |
+| `register(name, factory)` | Record an imported class or factory |
+| `register_lazy(name, path, *, install_requirement=None)` | Record a path without importing it |
+| `has(name)` | Check registration, not importability |
+| `names()` | Return the registered names, sorted |
+| `resolve(name)` | Return the class or factory, importing a lazy path on first use |
+| `create(name, **kwargs)` | Call the factory and return a validated instance |
+| `ProviderSpec(name, path, install_requirement=None)` | Immutable lazy registration record |
+
+Names are case-sensitive non-empty strings. Entries are append-only: there is no replacement or removal. Use a fresh catalog for test isolation.
+
+Registering the same thing again is a no-op: the same object in explicit mode, or an equal path and install requirement in lazy mode. Anything else under an existing name raises `ProviderConflictError`. An explicit registration and a lazy one under the same name always conflict, even if the path names the same object, because the catalog cannot compare them without importing.
+
+## Validation
+
+- `protocol` must work with `isinstance`: a class, or a Protocol decorated with `@runtime_checkable`.
+- `create()` checks the result with `isinstance`. For a Protocol this only proves that the members exist. It does not check signatures or whether a method is async. Use static type checking and shared contract tests for behavior.
+- `issubclass` cannot check a class against a Protocol that has properties or other non-method members, and a factory function is not a class. That is why validation happens on the created instance.
+- A lazy path cannot be type-checked before it is imported.
+
+## Loading, concurrency and failures
+
+Resolved lazy factories are cached; instances never are. A failed import is not cached, so a later call tries again. Registration and cache publication are thread-safe. Imports and factory calls run outside the catalog lock. First-time imports are synchronous and can block an event loop; resolve configured providers from `ready()` before serving async traffic when that matters.
+
+The catalog is process-local. Registering in one worker does not affect other workers.
+
+All errors are exported from `bedrock.provider`, inherit `ProviderError` / `BedrockExc`, and carry a human-readable `detail`:
+
+| Error | Meaning |
+| --- | --- |
+| `InvalidProviderSpecError` | Empty name, malformed path, empty install requirement, or non-callable factory. Also an `InvalidRegisteredClassError` |
+| `ProviderConflictError` | A different provider already uses the name. Also a `DuplicateRegistrationError` |
+| `ProviderNotFoundError` | The name is not registered; the message lists available names |
+| `ProviderLoadError` | A lazy path could not be imported or resolved, or the factory raised `ImportError`; `__cause__` keeps the original exception |
+| `InvalidProviderError` | `create()` produced an object that is not an instance of `P` |
+
+Any other exception raised by a factory propagates unchanged.
+
+Import paths are executable configuration. Accept them only from trusted code or deployment configuration, never from request parameters. Requests may select names that are already registered.

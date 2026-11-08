@@ -11,7 +11,8 @@ Entry point: `bedrock.setup()` bootstraps the `ModuleRegistry` singleton (`apps`
 ```
 src/bedrock/
 ├── cli/           # Typer commands: run, app, db, manage
-├── common/        # ClassRegistry, DictManager (dynamic class lookup)
+├── common/        # ClassRegistry (typed named class lookup)
+├── provider/      # ProviderCatalog, ProviderSpec (named providers, explicit or lazy)
 ├── contrib/       # First-party modules: cache (active), celery_tasks (skeletal)
 ├── database/      # SQLAlchemy 2.0 layer: base model, manager, session factory, migrations
 ├── module/        # Core runtime: registry, manifest parser, entities, lifecycle signals
@@ -43,7 +44,7 @@ src/bedrock/
 - **Async prefix**: async methods use `a` prefix: `aget`, `aset`, `adelete`, `aclear`, `asend`.
 - **Exception pattern**: subclass `BedrockExc`, set a `detail` class attribute, accept optional `msg` override in `__init__`.
 - **Settings**: extend `BaseSettings` directly. Use `env_prefix` in `model_config`. Wrap module-level singletons with `SettingsProxy` for deferred init.
-- **Manifests**: YAML files at package root. Parsed by `ModuleManifest` (Pydantic model). Required fields: `title`, `version`.
+- **Manifests**: YAML files at package root. Parsed by `ModuleManifest` (Pydantic model). `title` is required; specify `version` explicitly even though it defaults to `"unknown"`.
 - **Bootstrap hooks**: optional `bootstrap.py` in module packages. Hook names: `on_load`, `ready`, `on_shutdown`. Called by registry, not imported manually.
 - **Contrib modules**: live under `contrib/`, own their `manifest.yaml`, follow same lifecycle as business modules.
 - **Entities**: extend `BedrockEntity` (Pydantic `BaseModel` with `arbitrary_types_allowed`).
@@ -58,5 +59,5 @@ src/bedrock/
 - Do not put HTTP-specific types (Request, Response) in service or entity layers. Keep them at adapter boundaries.
 - Do not subclass `BedrockExc` without setting a `detail` string. Error messages depend on it.
 - Do not instantiate settings eagerly at module level without `SettingsProxy` if the environment may not be ready at import time.
-- Do not hardcode cache backend names. Use `register_backend()` and the `ClassRegistry` pattern.
+- Do not hardcode cache or storage backend names. Register them with `register_backend()` / `register_backend_lazy()`, which use `bedrock.provider.ProviderCatalog`.
 - Do not import `contrib` modules from core code. Core must not depend on contrib.

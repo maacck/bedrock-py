@@ -293,11 +293,16 @@ def _bootstrap_migrations_manager():
     from bedrock.database.migrations_manager import MigrationsManager
     from bedrock.module import apps
 
-    database_url = DbSettings().SQLALCHEMY_DATABASE_URI
+    settings = DbSettings()
+    database_url = settings.SQLALCHEMY_DATABASE_URI
 
     if db._database_url is not None:
         database_url = db._database_url
-    return MigrationsManager(registry=apps, database_url=database_url)
+    return MigrationsManager(
+        registry=apps,
+        database_url=database_url,
+        lock_timeout=settings.MIGRATION_LOCK_TIMEOUT,
+    )
 
 
 def _resolve_playbook_path(package_dir: Path, relative_path: str | None) -> Path:

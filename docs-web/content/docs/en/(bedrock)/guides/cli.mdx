@@ -207,6 +207,8 @@ bedrock db upgrade myapp.users abc123def456
 
 **Important:** Only the specified app's branch is upgraded. Other branches are untouched.
 
+Upgrade and downgrade take a migration lock. PostgreSQL uses an advisory lock, MySQL and MariaDB use `GET_LOCK`, and the wait is `DATABASE_MIGRATION_LOCK_TIMEOUT` seconds (default 30). SQLite migrations are not locked; run them from one process. A timeout fails the command.
+
 ---
 
 ### `bedrock db downgrade`
@@ -273,6 +275,36 @@ Current revision: abc123def456
 
 ---
 
+### `bedrock db check`
+
+Report whether each loaded migration branch is at head. The command reads the database and does not change it.
+
+```bash
+bedrock db check <app_import_path>
+```
+
+The table lists the branch, the applied revision, the script head, and a state:
+
+| State | Meaning | Exit code |
+|-------|---------|-----------|
+| `at-head` | Applied revisions match the branch head | Contributes to exit 0 |
+| `behind` | An older revision from the branch is applied | Exit 1 |
+| `unknown` | Nothing is applied, the branch has no scripts, or the applied revision is not in the branch | Exit 1 |
+
+The process exits 0 only when every reported branch is `at-head`.
+
+**Example:**
+
+```bash
+$ bedrock db check myapp.users
+
+Branch        Current       Head          State
+myapp.users   abc123def456  abc123def456  at-head
+✓ All migration branches are at head.
+```
+
+---
+
 ### `bedrock db history`
 
 Show migration history for an app.
@@ -325,15 +357,17 @@ Commands for managing the application lifecycle.
 Install the current Bedrock application.
 
 ```bash
-bedrock manage install [OPTIONS]
+bedrock manage [-A ROOT_MODULE] install [OPTIONS]
 ```
 
 **Options:**
 
 | Option | Short | Description |
 |--------|-------|-------------|
-| `--app` | `-A` | Install specific module (default: all loaded) |
+| `--app` | | Install a specific loaded module (default: all loaded) |
 | `--skip-migrations` | | Skip database migrations |
+
+The parent `manage` command's `-A ROOT_MODULE` option selects the root module to load; alternatively set `BEDROCK_APP`.
 
 **What it does for each module:**
 
@@ -349,7 +383,7 @@ bedrock manage install [OPTIONS]
 bedrock manage install
 
 # Install specific module
-bedrock manage install -A myapp.users
+bedrock manage install --app myapp.users
 
 # Skip migrations
 bedrock manage install --skip-migrations
@@ -373,14 +407,14 @@ Running post-install hook for myapp.users...
 Execute module-specific CLI commands.
 
 ```bash
-bedrock run --app <module> <command> [ARGS]
+bedrock run --app <root_module> <module> <command> [ARGS]
 ```
 
 **Options:**
 
 | Option | Short | Description |
 |--------|-------|-------------|
-| `--app` | `-a` | Module to load (or set `APP` env var) |
+| `--app` | `-a` | Module to load (or set `BEDROCK_APP` env var) |
 
 ### How Module Commands Work
 
@@ -415,14 +449,14 @@ commands: commands:app
 
 ```bash
 # Run module command
-bedrock run --app myapp.users create-user --name Alice --email alice@example.com
+bedrock run --app myapp.users myapp.users create-user --name Alice --email alice@example.com
 
 # List available commands
-bedrock run --app myapp.users --help
+bedrock run --app myapp.users myapp.users --help
 
-# Use APP environment variable
-export APP=myapp.users
-bedrock run create-user --name Bob --email bob@example.com
+# Use BEDROCK_APP environment variable
+export BEDROCK_APP=myapp.users
+bedrock run myapp.users create-user --name Bob --email bob@example.com
 ```
 
 ---
@@ -431,8 +465,8 @@ bedrock run create-user --name Bob --email bob@example.com
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `APP` | Default app for `run` and `manage` commands | None |
-| `DATABASE_URL` | Database connection string | Required for `db` commands |
+| `BEDROCK_APP` | Default root app for `run` and `manage` commands | None |
+| `DATABASE_SCHEMA` | Database name or SQLite file path | `bedrock.db` |
 
 ---
 

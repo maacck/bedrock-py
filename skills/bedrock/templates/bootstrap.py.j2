@@ -19,14 +19,14 @@ def on_load(*, registry: ModuleRegistry, app: AppConfig) -> None:
 
 
 def ready(*, registry: ModuleRegistry, app: AppConfig) -> None:
-    """Called after all modules have been loaded and the application is ready.
+    """Called after all modules have been loaded, before registry readiness.
 
     Use for cross-module setup that depends on other modules being available.
     """
 
 
 def on_shutdown(*, registry: ModuleRegistry, app: AppConfig) -> None:
-    """Called during application shutdown (reverse dependency order).
+    """Called during shutdown or installation rollback, in reverse install order.
 
     Use for cleanup: closing connections, flushing buffers, releasing resources.
     """

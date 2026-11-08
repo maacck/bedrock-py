@@ -13,18 +13,30 @@ It is responsible for:
   restrict autogenerate to only the tables owned by the target app.
 
 All public operations (``revision``, ``upgrade``, ``downgrade``, ``heads``,
-``current``) accept an *app_import_path* and translate it into the correct
-Alembic branch-aware invocation.
+``current``, ``check``) accept an *app_import_path* and translate it into the
+correct Alembic branch-aware invocation.
+
+``upgrade`` and ``downgrade`` acquire a dialect lock so replicas do not apply
+the same branch at once. PostgreSQL uses an advisory lock and MySQL uses
+``GET_LOCK``. SQLite has no shared lock in this manager and must be migrated
+from a single process.
 """
 
+import math
 import os
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from alembic.util.exc import CommandError
+from sqlalchemy import create_engine, text
+from sqlalchemy.engine.url import make_url
 
 from ..exc import BedrockExc
 from ..logging import get_logger
@@ -38,7 +50,45 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 _BEDROCK_MARKER = "bedrock_managed"
 
+# Stable signed key that fits in PostgreSQL's bigint advisory-lock argument.
+_POSTGRES_MIGRATION_LOCK_KEY = 0x424544524F434B
+_MYSQL_MIGRATION_LOCK_NAME = "bedrock_migrations"
+
 log = get_logger(__name__)
+
+
+class _LockResult(Protocol):
+    """Result shape used by the migration lock statements."""
+
+    def scalar(self) -> object:
+        """Return the first column of the first row."""
+
+
+class _LockConnection(Protocol):
+    """Connection shape used to acquire and release a migration lock."""
+
+    def execute(self, statement: object, parameters: dict[str, object] | None = None) -> _LockResult:
+        """Execute one lock statement."""
+
+    def commit(self) -> None:
+        """Finish the transaction that carried the lock statement."""
+
+
+@dataclass(frozen=True)
+class BranchRevisionStatus:
+    """Current and head revisions for one Alembic branch.
+
+    Attributes:
+        branch: Branch label, equal to the app import path.
+        current: Applied revision ids. Empty when the branch has not been applied.
+        head: Head revision ids from the migration scripts.
+        state: ``at-head``, ``behind``, or ``unknown``.
+    """
+
+    branch: str
+    current: tuple[str, ...]
+    head: tuple[str, ...]
+    state: str
 
 
 class MigrationError(BedrockExc):
@@ -98,6 +148,9 @@ class MigrationsManager:
     it is rebuilt on every call so that it always reflects the current state of
     the registry (e.g. after hot-installing a new app).
 
+    Upgrade and downgrade take a process-wide database lock on PostgreSQL and
+    MySQL. SQLite migrations are not locked; run them from one process only.
+
     Args:
         registry: A fully populated module registry.
         database_url: SQLAlchemy-compatible database URL.
@@ -105,6 +158,9 @@ class MigrationsManager:
             ``env.py``, ``script.py.mako``, and optionally a ``versions/``
             sub-directory for the shared root migrations (if any).  Defaults
             to the ``migrations/`` package bundled with ``bedrock.database``.
+        lock_timeout: Seconds to wait for the migration lock before failing.
+            ``0`` tries once and does not wait. MySQL ``GET_LOCK`` receives
+            this value rounded up to the next whole second.
     """
 
     def __init__(
@@ -112,10 +168,16 @@ class MigrationsManager:
         registry: "ModuleRegistry",
         database_url: str,
         script_location: str | None = None,
+        lock_timeout: float = 30,
     ) -> None:
+        if lock_timeout < 0:
+            raise MigrationError(
+                f"Migration lock timeout must be greater than or equal to 0 (lock_timeout={lock_timeout})."
+            )
         self._registry = registry
         self._database_url = database_url
         self._script_location = script_location or str(Path(__file__).parent / "migrations")
+        self._lock_timeout = lock_timeout
 
     # ------------------------------------------------------------------
     # Public API
@@ -213,22 +275,23 @@ class MigrationsManager:
         cfg = self._build_config(app_import_path)
         branch_label = app_import_path
 
-        current_revs = self._get_current_revisions(cfg, branch_label)
+        with self._migration_lock():
+            current_revs = self._get_current_revisions(cfg, branch_label)
 
-        if not current_revs:
-            # Branch has never been applied — create tables and stamp.
-            self._create_tables_and_stamp(cfg, app)
-            return "created"
+            if not current_revs:
+                # Branch has never been applied — create tables and stamp.
+                self._create_tables_and_stamp(cfg, app)
+                return "created"
 
-        if self._is_at_head(cfg, branch_label, current_revs):
-            return "up-to-date"
+            if self._is_at_head(cfg, branch_label, current_revs):
+                return "up-to-date"
 
-        # Behind head — run upgrade.
-        try:
-            command.upgrade(cfg, f"{branch_label}@head")
-        except CommandError as exc:
-            raise MigrationError(str(exc), app_import_path) from exc
-        return "upgraded"
+            # Behind head — run upgrade.
+            try:
+                command.upgrade(cfg, f"{branch_label}@head")
+            except CommandError as exc:
+                raise MigrationError(str(exc), app_import_path) from exc
+            return "upgraded"
 
     def _get_current_revisions(self, cfg: Config, branch_label: str) -> set[str]:
         """Return the set of revision IDs currently applied for *branch_label*.
@@ -397,7 +460,8 @@ class MigrationsManager:
             alembic_target = target
 
         try:
-            command.upgrade(cfg, alembic_target)
+            with self._migration_lock():
+                command.upgrade(cfg, alembic_target)
         except CommandError as exc:
             raise MigrationError(str(exc), app_import_path) from exc
 
@@ -417,7 +481,8 @@ class MigrationsManager:
         cfg = self._build_config(app_import_path)
 
         try:
-            command.downgrade(cfg, target)
+            with self._migration_lock():
+                command.downgrade(cfg, target)
         except CommandError as exc:
             raise MigrationError(str(exc), app_import_path) from exc
 
@@ -440,6 +505,42 @@ class MigrationsManager:
         self._get_app(app_import_path)
         cfg = self._build_config(app_import_path)
         command.current(cfg, verbose=True)
+
+    def check(self, app_import_path: str) -> list[BranchRevisionStatus]:
+        """Report each branch's current and head revisions without mutating the database.
+
+        The requested app is always reported. Other installed apps that already
+        contain migration scripts are reported as well, so one check covers
+        every branch loaded with that app.
+
+        ``unknown`` means the branch has no scripts, nothing has been applied,
+        or the applied revision is not part of the branch. ``behind`` means an
+        older revision from the branch is applied. ``at-head`` means the applied
+        revisions are exactly the script heads. This method does not acquire the
+        migration lock and does not create the Alembic version table.
+
+        Args:
+            app_import_path: Import path of the app that selects the registry root.
+
+        Returns:
+            One :class:`BranchRevisionStatus` per reported branch. The requested
+            app is first.
+
+        Raises:
+            MigrationError: If the app is not installed or has no models.
+        """
+
+        self._get_app(app_import_path)
+        cfg = self._build_config(app_import_path)
+        statuses = [self._branch_status(cfg, app_import_path)]
+        for app in self._registry.all():
+            if app.name == app_import_path:
+                continue
+            migrations_dir = app.package_dir / "migrations"
+            if not migrations_dir.is_dir() or not any(migrations_dir.glob("*.py")):
+                continue
+            statuses.append(self._branch_status(cfg, app.name))
+        return statuses
 
     def get_history(self, app_import_path: str) -> list[dict[str, str]]:
         """Return the revision history for *app_import_path* as structured data.
@@ -517,15 +618,169 @@ class MigrationsManager:
         cfg = self._build_config(app_import_path)
         branch_label = app_import_path
 
-        current_revs = self._get_current_revisions(cfg, branch_label)
-        if not current_revs:
-            # Nothing applied — already clean.
-            return
+        with self._migration_lock():
+            current_revs = self._get_current_revisions(cfg, branch_label)
+            if not current_revs:
+                # Nothing applied — already clean.
+                return
+
+            try:
+                command.downgrade(cfg, f"{branch_label}@base")
+            except CommandError as exc:
+                raise MigrationError(str(exc), app_import_path) from exc
+
+    def _branch_status(self, cfg: Config, branch: str) -> BranchRevisionStatus:
+        """Compare the applied revisions of *branch* with its script head.
+
+        Args:
+            cfg: Alembic config whose version locations include the branch.
+            branch: Branch label, equal to an app import path.
+
+        Returns:
+            The read-only revision status. Database errors and a missing version
+            table are reported as ``unknown`` rather than raised.
+        """
+
+        script = ScriptDirectory.from_config(cfg)
+        try:
+            head_revs = tuple(revision.revision for revision in script.get_revisions(f"{branch}@head"))
+        except CommandError:
+            return BranchRevisionStatus(branch=branch, current=(), head=(), state="unknown")
+
+        if not head_revs:
+            return BranchRevisionStatus(branch=branch, current=(), head=(), state="unknown")
 
         try:
-            command.downgrade(cfg, f"{branch_label}@base")
-        except CommandError as exc:
-            raise MigrationError(str(exc), app_import_path) from exc
+            branch_ids = {
+                revision.revision for revision in script.iterate_revisions(f"{branch}@head", f"{branch}@base")
+            }
+        except CommandError:
+            return BranchRevisionStatus(branch=branch, current=(), head=head_revs, state="unknown")
+
+        current = tuple(sorted(self._get_current_revisions(cfg, branch)))
+        current_ids = set(current)
+        if not current_ids or not current_ids <= branch_ids:
+            state = "unknown"
+        elif current_ids == set(head_revs):
+            state = "at-head"
+        else:
+            state = "behind"
+        return BranchRevisionStatus(branch=branch, current=current, head=head_revs, state=state)
+
+    @contextmanager
+    def _migration_lock(self) -> Iterator[None]:
+        """Hold the dialect migration lock for one upgrade or downgrade.
+
+        PostgreSQL takes ``pg_try_advisory_lock`` until :attr:`_lock_timeout`
+        elapses. MySQL takes ``GET_LOCK`` with that timeout rounded up to whole
+        seconds. SQLite yields immediately and does not serialize migrations;
+        run SQLite upgrades from a single process.
+
+        The lock is held on a dedicated connection that is committed after
+        acquisition, so the session-level lock stays while Alembic uses its own
+        connection. Failure to acquire the lock raises :class:`MigrationError`.
+
+        Yields:
+            Control to the locked operation.
+
+        Raises:
+            MigrationError: If the lock is not acquired before the timeout, or
+                the dialect has no lock implementation.
+        """
+
+        dialect = make_url(self._database_url).get_backend_name()
+        if dialect == "sqlite":
+            yield
+            return
+
+        engine = create_engine(self._database_url)
+        try:
+            with engine.connect() as connection:
+                self._acquire_dialect_lock(connection, dialect)
+                try:
+                    yield
+                finally:
+                    try:
+                        self._release_dialect_lock(connection, dialect)
+                    except Exception:
+                        log.debug("Failed to release the migration lock", exc_info=True)
+        finally:
+            engine.dispose()
+
+    def _acquire_dialect_lock(self, connection: _LockConnection, dialect: str) -> None:
+        """Acquire the migration lock for *dialect* on *connection*.
+
+        Args:
+            connection: Open SQLAlchemy connection. It must support ``execute``
+                and ``commit``.
+            dialect: Backend name from the configured URL.
+
+        Raises:
+            MigrationError: If the dialect is unsupported or the wait times out.
+        """
+
+        if dialect == "postgresql":
+            self._acquire_postgresql_lock(connection)
+            return
+        if dialect in {"mysql", "mariadb"}:
+            self._acquire_mysql_lock(connection)
+            return
+        raise MigrationError(
+            f"Cannot lock migrations for database dialect '{dialect}'. "
+            "Supported lock dialects are PostgreSQL and MySQL; SQLite runs unlocked."
+        )
+
+    def _release_dialect_lock(self, connection: _LockConnection, dialect: str) -> None:
+        """Release the migration lock acquired for *dialect*."""
+
+        if dialect == "postgresql":
+            connection.execute(
+                text("SELECT pg_advisory_unlock(:key)"),
+                {"key": _POSTGRES_MIGRATION_LOCK_KEY},
+            )
+            connection.commit()
+            return
+        if dialect in {"mysql", "mariadb"}:
+            connection.execute(
+                text("SELECT RELEASE_LOCK(:name)"),
+                {"name": _MYSQL_MIGRATION_LOCK_NAME},
+            )
+            connection.commit()
+
+    def _acquire_postgresql_lock(self, connection: _LockConnection) -> None:
+        """Poll ``pg_try_advisory_lock`` until the timeout.
+
+        ``lock_timeout`` does not apply to PostgreSQL advisory locks, so the
+        wait is implemented here.
+        """
+
+        deadline = time.monotonic() + self._lock_timeout
+        while True:
+            acquired = connection.execute(
+                text("SELECT pg_try_advisory_lock(:key)"),
+                {"key": _POSTGRES_MIGRATION_LOCK_KEY},
+            ).scalar()
+            connection.commit()
+            if acquired:
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise MigrationError(
+                    f"Timed out after {self._lock_timeout:g}s waiting for the PostgreSQL migration lock."
+                )
+            time.sleep(min(0.05, remaining))
+
+    def _acquire_mysql_lock(self, connection: _LockConnection) -> None:
+        """Take ``GET_LOCK`` and raise when MySQL reports a timeout."""
+
+        timeout_seconds = 0 if self._lock_timeout <= 0 else max(1, math.ceil(self._lock_timeout))
+        result = connection.execute(
+            text("SELECT GET_LOCK(:name, :timeout)"),
+            {"name": _MYSQL_MIGRATION_LOCK_NAME, "timeout": timeout_seconds},
+        ).scalar()
+        connection.commit()
+        if result is None or int(result) != 1:
+            raise MigrationError(f"Timed out after {self._lock_timeout:g}s waiting for the MySQL migration lock.")
 
     def _get_app(self, app_import_path: str) -> "AppConfig":
         """Return the :class:`~bedrock.module.entities.AppConfig` for *app_import_path*
@@ -693,4 +948,4 @@ class MigrationsManager:
                 )
 
 
-__all__ = ["BranchOwnershipError", "MigrationError", "MigrationsManager"]
+__all__ = ["BranchOwnershipError", "BranchRevisionStatus", "MigrationError", "MigrationsManager"]

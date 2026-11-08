@@ -17,8 +17,12 @@ The activation mechanism that creates a Provider from capability-specific config
 _Avoid_: Backend constructor, provider class loader
 
 **Provider Catalog**:
-The collection of available Provider Specs. A Catalog describes availability and never owns active Provider instances.
-_Avoid_: ProviderRegistry, BackendRegistry, ClassRegistry
+The collection of available Provider Specs. A Catalog describes availability and never owns active Provider instances. Implemented by `bedrock.provider.ProviderCatalog`.
+_Avoid_: ProviderRegistry, BackendRegistry
+
+**ClassRegistry**:
+`bedrock.common.registry.ClassRegistry` is a named lookup of **classes** that must explicitly inherit a base. Use it when callers need the class itself; use a Provider Catalog for Providers.
+_Avoid_: Using ClassRegistry as a Provider Catalog
 
 **Active Provider**:
 A Provider instance currently owned and used by a capability.

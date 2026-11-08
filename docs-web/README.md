@@ -15,6 +15,10 @@ yarn dev
 
 Open http://localhost:3000 with your browser to see the result.
 
+`dev`, `build`, and `types:check` first run `scripts/sync-changelog.mjs`, which copies the repository
+`CHANGELOG.md` into the git-ignored `.generated/` directory. Turbopack cannot read files outside the
+project root, and the changelog page includes that copy.
+
 ## Explore
 
 In the project, you can see:

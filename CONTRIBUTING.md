@@ -11,6 +11,7 @@ Thank you for your interest in contributing to Bedrock! This document provides g
 - [Code Style](#code-style)
 - [Testing](#testing)
 - [Pull Request Process](#pull-request-process)
+- [Releasing](#releasing)
 - [Reporting Issues](#reporting-issues)
 
 ## Code of Conduct
@@ -47,7 +48,7 @@ This project follows a standard code of conduct. By participating, you are expec
 
 3. Verify the installation:
    ```bash
-   uv run bedrock -v
+   uv run bedrock --help
    ```
 
 4. Install pre-commit hooks:
@@ -184,9 +185,10 @@ class TestFeature:
 1. **Before Submitting**:
    - Ensure all tests pass
    - Run linting and formatting checks
-   - Update documentation if needed
    - Add tests for new functionality
-   - Update CHANGELOG.md for user-facing changes
+   - For public signature or behavior changes, update `CHANGELOG.md` (`[Unreleased]`), the affected Web Doc
+     pages in both `docs-web/content/docs/en/` and `zh/`, and the agent skills under `skills/` in the same PR
+     (see [`AGENTS.md` → Change Alignment](AGENTS.md#change-alignment))
 
 2. **PR Description**:
    - Fill out the PR template completely
@@ -202,6 +204,48 @@ class TestFeature:
 4. **After Merge**:
    - Delete your feature branch
    - Pull the latest changes from `dev`
+
+## Releasing
+
+Pushing a `vX.Y.Z` tag runs `.github/workflows/release.yml`: it checks the tag against the `bedrock-core`
+version, publishes to PyPI, and uses the matching `CHANGELOG.md` section as the GitHub release notes.
+
+### 1. Alignment Check
+
+List what changed since the last release:
+
+```bash
+PREV=$(git tag --sort=-v:refname | head -n 1)
+git log --oneline "$PREV"..HEAD
+git diff --stat "$PREV"..HEAD -- packages/*/src
+```
+
+For every user-visible change in that range:
+
+- [ ] `CHANGELOG.md` `[Unreleased]` has an entry; breaking changes state the migration.
+- [ ] Web Doc pages in `docs-web/content/docs/en/` and `zh/` describe the current signatures and behavior.
+- [ ] `skills/bedrock/` and `skills/bedrock-cli/` (`SKILL.md`, references, templates) match the code.
+- [ ] Contrib playbooks (`contrib/*/playbook/`) match their package.
+- [ ] No doc, skill, or playbook mentions a removed or renamed symbol (grep each one).
+
+Then verify:
+
+```bash
+# en/zh page parity: no output expected
+diff <(cd docs-web/content/docs/en && find . -type f | sort) <(cd docs-web/content/docs/zh && find . -type f | sort)
+uv run pytest packages/bedrock/tests/
+cd docs-web && npm run build
+```
+
+### 2. Bump and Tag
+
+1. Rename `## [Unreleased]` to `## [X.Y.Z] - YYYY-MM-DD` in `CHANGELOG.md`.
+2. Set `version` in `pyproject.toml`, `packages/bedrock/pyproject.toml`, and
+   `packages/bedrock-cli/pyproject.toml`, then run `uv lock`.
+3. Raise `bedrock-core>=` in `packages/bedrock-cli/src/bedrock_cli/templates/workspace/pyproject.toml.j2`
+   when generated projects need this release.
+4. Add a new minor line to the supported versions in `SECURITY.md`.
+5. Commit as `chore(release): prepare vX.Y.Z`, merge to `main`, then tag that commit on `main` and push the tag.
 
 ## Reporting Issues
 

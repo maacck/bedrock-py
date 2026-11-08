@@ -30,14 +30,24 @@ The cache service uses a dynamic backend registry. The in-memory backend is avai
 
 ### Backend Selection
 
+Set `CACHE_BACKEND` to a registered backend name; it defaults to `memory`. The cache module's `ready` hook calls `cache.configure()`, and the first operation in a script that never configured the cache does the same, so both pick up `CACHE_BACKEND`. Each backend reads its own settings from its prefix (`CACHE_MEMORY_`, `CACHE_REDIS_`):
+
+```bash
+CACHE_BACKEND=redis
+CACHE_REDIS_URL=redis://localhost:6379/0
+CACHE_REDIS_KEY_PREFIX=myapp:
+```
+
+An unknown name fails startup with `BackendNotConfiguredError`, whose message says the name came from `CACHE_BACKEND`. A custom backend registered in an `on_load` hook can be selected this way, because `ready` runs after every module was loaded.
+
+Pass a name to choose in code instead; an explicit name ignores `CACHE_BACKEND`:
+
 ```python
 from bedrock.contrib.cache import cache
 
-# In-memory backend (default, auto-configured on first use)
+cache.configure()         # backend named by CACHE_BACKEND (memory when unset)
 cache.configure("memory")
-
-# Redis backend (requires: uv add bedrock-core[cache-redis])
-cache.configure("redis")
+cache.configure("redis")  # requires: uv add bedrock-core[cache-redis]
 ```
 
 ### Custom Settings
@@ -45,18 +55,19 @@ cache.configure("redis")
 Pass a settings instance to override defaults:
 
 ```python
-from bedrock.contrib.cache import cache, RedisCacheSettings
+from bedrock.contrib.cache import cache
+from bedrock.contrib.cache.backends.redis import RedisCacheSettings
 
 settings = RedisCacheSettings(
-    REDIS_URL="redis://localhost:6379/1",
-    REDIS_PREFIX="myapp",
+    url="redis://localhost:6379/1",
+    key_prefix="myapp:",
 )
 cache.configure("redis", settings=settings)
 ```
 
 ### Registering Custom Backends
 
-Custom backends must explicitly inherit `CacheBackend`, directly or through an existing backend, and implement its complete contract. Register extensions from `bootstrap.py:on_load`:
+A custom backend implements the `CacheBackend` protocol, either by inheriting it (directly or through an existing backend) or structurally. Register extensions from `bootstrap.py:on_load`:
 
 ```python
 from bedrock.contrib.cache import register_backend
@@ -67,12 +78,25 @@ class MyCustomBackend(InMemoryBackend):
     """Project-specific implementation inheriting the complete memory backend."""
 
 
-def on_load() -> None:
+def on_load(*, app) -> None:
     """Register the project backend once during module loading."""
     register_backend("custom", MyCustomBackend)
 ```
 
-Select it with `cache.configure("custom")` after registration. Duplicate names, including built-ins, raise `DuplicateRegistrationError`; invalid classes raise `InvalidRegisteredClassError`. Both come from `bedrock.common.registry`. Configuration wraps lazy resolution failures in `BackendNotConfiguredError`, preserving the original exception chain. For application-owned lazy catalogs, use [ClassRegistry](./class-registry).
+Select it with `cache.configure("custom")` after registration. `register_backend()` also accepts a factory that takes `settings=`. `configure()` checks that the created object has every `CacheBackend` member (names only, not signatures), so cover a custom backend with your own contract tests.
+
+To keep a backend module and its SDK out of memory until it is selected, register a path instead:
+
+```python
+from bedrock.contrib.cache import register_backend_lazy
+
+
+def on_load(*, app) -> None:
+    """Register the backend by path; nothing is imported until cache.configure("acme") runs."""
+    register_backend_lazy("acme", "acme_cache.backend:AcmeBackend", install_requirement="acme-cache[redis]")
+```
+
+Registering the same object or path again under its name does nothing. A different backend under a taken name, including the built-ins `memory` and `redis`, raises `DuplicateRegistrationError`; an empty name, malformed path, or non-callable raises `InvalidRegisteredClassError`. Both come from `bedrock.common.registry`. `configure()` raises `BackendNotConfiguredError` when the name is unknown, the module or its SDK cannot be imported (the message names the install requirement, e.g. `bedrock-core[cache-redis]`), or the created object does not implement `CacheBackend`; the [provider](./provider) error is the cause. Other exceptions from the backend constructor propagate unchanged.
 
 ## CacheService API Reference
 
@@ -84,8 +108,8 @@ The `cache` singleton is a `CacheService` instance. All access goes through this
 |--------|-----------|-------------|
 | `cache.get()` | `get(key, default=None, type_=None, coder=None) → Any` | Retrieve a cached value |
 | `cache.aget()` | `aget(key, default=None, type_=None, coder=None) → Any` | Async variant of `get` |
-| `cache.set()` | `set(key, value, ex=None, ea=None, coder=None) → None` | Store a value |
-| `cache.aset()` | `aset(key, value, ex=None, ea=None, coder=None) → None` | Async variant of `set` |
+| `cache.set()` | `set(key, value, ex=None, px=None, ea=None, coder=None) → None` | Store a value |
+| `cache.aset()` | `aset(key, value, ex=None, px=None, ea=None, coder=None) → None` | Async variant of `set` |
 | `cache.delete()` | `delete(key) → bool` | Remove a key |
 | `cache.adelete()` | `adelete(key) → bool` | Async variant of `delete` |
 | `cache.exists()` | `exists(key) → bool` | Check if key exists |
@@ -99,8 +123,10 @@ The `cache` singleton is a `CacheService` instance. All access goes through this
 |--------|-----------|-------------|
 | `cache.get_many()` | `get_many(keys) → dict[str, Any]` | Retrieve multiple keys |
 | `cache.aget_many()` | `aget_many(keys) → dict[str, Any]` | Async variant |
-| `cache.set_many()` | `set_many(mapping, ex=None, ea=None, coder=None) → None` | Store multiple pairs |
-| `cache.aset_many()` | `aset_many(mapping, ex=None, ea=None, coder=None) → None` | Async variant |
+| `cache.set_many()` | `set_many(mapping, ex=None, px=None, ea=None, coder=None) → None` | Store multiple pairs |
+| `cache.aset_many()` | `aset_many(mapping, ex=None, px=None, ea=None, coder=None) → None` | Async variant |
+
+`get_many()` and `aget_many()` omit missing keys and always use the default decoder; use individual `get()` calls for custom coders.
 
 ### Numeric Operations
 
@@ -127,7 +153,7 @@ The `cache` singleton is a `CacheService` instance. All access goes through this
 
 ## TTL and Expiration
 
-Cache entries can have time-to-live (TTL) set in two ways:
+Cache entries can have time-to-live (TTL) set in three ways:
 
 ### Relative Expiration (`ex`)
 
@@ -150,7 +176,7 @@ cache.set("session:abc", data, ea=time.time() + 3600)
 ```
 
 <Callout type="warning">
-`ex`, `px`, and `ea` are mutually exclusive. `px` sets a relative expiration in milliseconds. If all are `None`, the entry never expires.
+Use only one of `ex`, `px`, and `ea`: `px` sets a relative expiration in milliseconds. If all are `None`, the entry never expires. The in-memory backend gives `ex` precedence over `px` and `ea` when multiple values are supplied; do not rely on backend-specific behavior.
 </Callout>
 
 ## Coders
@@ -196,7 +222,7 @@ result = cache.get("data:key", coder=MsgPackCoder)
 ```
 
 <Callout type="warning">
-Pass either `type_` or `coder`, not both. Passing both raises `ValueError`.
+Pass either `type_` or `coder` to reads, not both. Passing both for a cached value raises `ValueError`.
 </Callout>
 
 ## Namespaces
@@ -262,15 +288,16 @@ user = user_slot.get_or_load(lambda: User(name="Alice", email="alice@example.com
 |--------|-----------|-------------|
 | `slot.get()` | `get(default=None, **params) → T` | Read the cached value |
 | `slot.aget()` | `aget(default=None, **params) → T` | Async variant |
-| `slot.get_or_load()` | `get_or_load(loader, **params) → T` | Read, or load and store on a miss |
-| `slot.aget_or_load()` | `aget_or_load(loader, **params) → T` | Async variant |
-| `slot.set()` | `set(value, ex=None, ea=None, **params) → None` | Write a value |
-| `slot.aset()` | `aset(value, ex=None, ea=None, **params) → None` | Async variant |
+| `slot.get_or_load()` | `get_or_load(loader, *, ex=None, px=None, ea=None, **params) → T` | Read, or load and store on a miss |
+| `slot.aget_or_load()` | `aget_or_load(loader, *, ex=None, px=None, ea=None, **params) → T` | Async variant |
+| `slot.set()` | `set(value, *, ex=None, px=None, ea=None, **params) → None` | Write a value |
+| `slot.aset()` | `aset(value, *, ex=None, px=None, ea=None, **params) → None` | Async variant |
 | `slot.delete()` | `delete(**params) → bool` | Delete the cached value |
 | `slot.adelete()` | `adelete(**params) → bool` | Async variant |
 | `slot.exists()` | `exists(**params) → bool` | Check if value exists |
 | `slot.aexists()` | `aexists(**params) → bool` | Async variant |
 | `slot.get_with_ttl()` | `get_with_ttl(**params) → tuple[T, int \| None]` | Get value with TTL |
+| `slot.aget_with_ttl()` | `aget_with_ttl(**params) → tuple[T, int \| None]` | Async variant |
 | `slot.build_key()` | `build_key(**params) → str` | Render the fully qualified key |
 
 <Callout type="info">
@@ -344,6 +371,7 @@ cache.configure("memory")
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `CACHE_MEMORY_MAX_SIZE` | `10000` | Maximum number of entries |
+| `CACHE_MEMORY_DEFAULT_TTL` | `300` | Settings value; cache writes do not apply it automatically |
 
 ### RedisBackend
 
@@ -355,9 +383,11 @@ cache.configure("redis")
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `REDIS_URL` | `"redis://localhost:6379"` | Redis connection URL |
+| `CACHE_REDIS_URL` | `"redis://localhost:6379/0"` | Redis connection URL |
+| `CACHE_REDIS_DB` | `0` | Redis database number |
+| `CACHE_REDIS_PASSWORD` | `None` | Redis password |
 | `CACHE_REDIS_KEY_PREFIX` | `""` | Default key namespace. `clear()`/`aclear()` require this **or** an explicit `prefix=` argument |
-| `REDIS_MAX_CONNECTIONS` | `10` | Connection pool size |
+| `CACHE_REDIS_MAX_CONNECTIONS` | `50` | Maximum connections per pool |
 
 <Callout type="warning">
 Redis `clear()` and `aclear()` never flush the Redis database. They scan and delete only keys under a prefix. Pass an explicit `prefix=` argument, or configure `CACHE_REDIS_KEY_PREFIX` to a dedicated non-empty namespace. Clearing fails only when **both** the configured prefix and the explicit argument are empty. Applications that relied on unprefixed `flushdb()` must choose a dedicated prefix.
@@ -373,6 +403,7 @@ CacheError
 ├── CacheSerializationError   — Serialization/deserialization failure
 ├── BackendNotConfiguredError — Backend not available
 ├── CacheClearRequiresPrefixError — Redis clear has neither configured nor explicit prefix
+├── CacheCloseError           — close()/aclose() failed for one or more backends
 └── CacheLockError
     ├── CacheLockAcquisitionError — Lock acquisition failure
     └── CacheLockOwnershipError   — Lock ownership violation
@@ -384,6 +415,8 @@ from bedrock.contrib.cache import (
     CacheConnectionError,
     CacheSerializationError,
     BackendNotConfiguredError,
+    CacheClearRequiresPrefixError,
+    CacheCloseError,
     CacheLockError,
     CacheLockAcquisitionError,
     CacheLockOwnershipError,
@@ -392,15 +425,15 @@ from bedrock.contrib.cache import (
 
 ## Anti-Patterns
 
-**Don't call `configure()` more than once.** The backend is initialized once. Calling `configure()` again replaces the previous backend without cleanup.
+**Don't reconfigure in a hot path.** Calling `configure()` again keeps the replaced backend open, with its connections, until `close()` / `aclose()` or registry shutdown closes it. Prefer `CACHE_BACKEND`; when code must switch backends, call `close()` / `aclose()` first.
 
 **Don't use the in-memory backend for distributed locks.** `InMemoryBackend` is process-local. Locks only coordinate within a single process. Use `RedisBackend` for cross-process coordination.
 
-**Don't forget TTL for temporary data.** Without `ex` or `ea`, entries persist until explicitly deleted or the process restarts. Always set TTL for session data, tokens, and temporary state.
+**Don't forget TTL for temporary data.** Without `ex`, `px`, or `ea`, entries persist until explicitly deleted or the process restarts. Always set TTL for session data, tokens, and temporary state.
 
 **Don't use `bedrock.cache` as import path.** The canonical import is `from bedrock.contrib.cache import cache`. There is no re-export at the `bedrock` package level.
 
-**Don't mix `type_` and `coder` parameters.** Passing both to `get()` or `set()` raises `ValueError`. Choose one serialization strategy per call.
+**Don't mix `type_` and `coder` on reads.** Passing both to a read of a cached value raises `ValueError`. Choose one serialization strategy per call.
 
 **Don't hardcode cache keys.** Use namespaces and slots to organize keys. Raw string concatenation leads to key collisions and makes cache invalidation difficult.
 

@@ -5,6 +5,8 @@ description: Typed, named implementation classes with explicit registration and 
 
 `bedrock.common.registry.ClassRegistry[T]` maps names to concrete subclasses of a caller-owned base class. It returns **classes**, not instances. Use it when several implementations must coexist and callers select one by name. DI remains responsible for dependency instances and lifetimes.
 
+Use [`bedrock.provider`](./provider) instead when callers need validated provider **instances**, factory functions, structural implementations, or install hints for optional dependencies.
+
 ## Direct registration
 
 ```python
@@ -53,7 +55,7 @@ Register paths from `bootstrap.py:on_load`:
 from .service import codecs
 
 
-def on_load() -> None:
+def on_load(*, app) -> None:
     """Declare implementations without importing them."""
     codecs.register_lazy("utf8", "myapp.encoding.providers.utf8:Utf8Codec")
 ```
@@ -113,7 +115,7 @@ All errors below are exported from `bedrock.common.registry`, inherit `ClassRegi
 | `ClassLoadError` | Module import or attribute lookup failed; `__cause__` preserves the original exception |
 | `InvalidRegisteredClassError` | The base is not a class, or an implementation violates the class contract |
 
-Do not interpret every `ClassLoadError` as a missing SDK: extension code may have raised another exception. Cache and Storage translate resolution failures to their existing configuration errors and retain the registry error as the cause.
+Do not interpret every `ClassLoadError` as a missing SDK: extension code may have raised another exception. Cache and Storage backends are registered through [`bedrock.provider`](./provider), not `ClassRegistry`.
 
 Import paths are executable configuration. Accept them only from trusted code or deployment configuration, never directly from request parameters. Requests may select authorized, already-registered names. Inheritance validation happens after import and is not a security sandbox.
 
@@ -126,4 +128,4 @@ This is a breaking contract change:
 3. Replace `None` checks and `KeyError` handling around `get()` with the registry exceptions above.
 4. Remove mutations through `instances`, `update`, `remove`, and `all`; use explicit registration and `keys()`. Duplicate registration is no longer silently ignored.
 5. `DictManager` is removed. Migrate its class-loading callers to `ClassRegistry` rather than retaining an unvalidated loading path.
-6. Custom Cache and Storage backends must explicitly inherit `CacheBackend` / `StorageBackend`, including implementations that previously relied only on structural conformance. Their `register_backend()` helpers reject duplicate names, including built-ins.
+6. Custom Cache and Storage backends no longer register through `ClassRegistry`. Their `register_backend()` and `register_backend_lazy()` helpers use [`bedrock.provider`](./provider): inheriting `CacheBackend` / `StorageBackend` is optional, and registering the same object again is a no-op.

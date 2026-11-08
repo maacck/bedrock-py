@@ -3,7 +3,7 @@ title: 指标
 description: 应用指标 — 计数器/仪表/计时器、装饰器与可插拔 Provider（StatsD、Sentry、Prometheus pushgateway），与业务代码硬隔离
 ---
 
-Bedrock 内置了一套官方指标子系统：计数器/仪表/计时器句柄与装饰器、硬编码日志器，以及可插拔 Provider（StatsD、Sentry、Prometheus pushgateway）。埋点全部同步执行且**永不抛异常**——出错的 Provider 无法破坏业务代码。整个子系统位于 `bedrock.contrib.metric` 下。
+Bedrock 内置了一套官方指标子系统：计数器/仪表/计时器句柄与装饰器、硬编码日志器，以及可插拔 Provider（StatsD、Sentry、Prometheus pushgateway）。埋点同步执行；Provider 的普通异常与业务代码隔离。整个子系统位于 `bedrock.contrib.metric` 下。
 
 ## 快速开始
 
@@ -84,7 +84,7 @@ from bedrock.contrib.metric import metrics
 
 # Decorator (sync or async)
 @metrics.timer("render.duration")
-def render(...):
+def render():
     ...
 
 # Context manager
@@ -98,7 +98,7 @@ timer.observe(1.24)
 
 ## Provider
 
-Provider 是带有 `emit(event)` 与 `close()` 的普通对象。想注册多少就注册多少——每个事件都会广播给**所有** Provider。不存在 `configure()`，也没有默认 Provider：Provider 是添加的，而不是选择的。
+Provider 是带有 `emit(event)` 与 `close()` 的普通对象。拥有异步客户端的 Provider 还可以定义 `flush()`（在 `close()` 之前调用）以及协程函数 `aflush()`、`aclose()`；registry 关闭时会对每个 Provider 执行 flush 和 close，并在 metrics 模块被视为已关闭之前等待异步方法完成。想注册多少就注册多少——每个事件都会广播给**所有** Provider。不存在 `configure()`，也没有默认 Provider：Provider 是添加的，而不是选择的。
 
 ```python
 from bedrock.contrib.metric import metrics, StatsDProvider, StatsDSettings
@@ -177,12 +177,12 @@ Provider 失败时也会以 `WARNING` 记日志，按（provider, metric）对�
 
 ## 隔离保证
 
-埋点永远不会向业务代码抛异常：
+Provider 的 `Exception` 异常与业务代码隔离：
 
 - `emit()` 失败会被捕获（`except Exception`，绝不捕获 `BaseException`），并记录为限频警告——调用方与其他 Provider 不受影响。
 - 出错的 Provider **不会被自动禁用**；它们继续接收事件（并继续按每 100 次的节奏告警）。
 - 发射是同步的——没有后台线程、缓冲队列。Provider 会在调用方线程内联执行其 I/O（StatsD `sendto`、Prometheus pushgateway HTTP POST），因此缓慢或不可达的接收端可能会阻塞调用方。派发没有递归保护，因此自定义 Provider **不得**在其 `emit()` 内部向同一个管理器发射（否则会递归）。
-- 异常只会在配置阶段、构造 Provider 时抛出（见[异常层级](#异常层级)）。
+- Provider 配置可能抛出异常（见[异常层级](#异常层级)）。无效指标值在转换时也可能失败；日志异常和 `BaseException` 子类不在 Provider 隔离保证内。
 
 ## API 参考
 
@@ -196,7 +196,9 @@ Provider 失败时也会以 `WARNING` 记日志，按（provider, metric）对�
 | `metrics.set_log_level()` | `set_log_level(level) → None` | 设置分配给每条指标日志记录的严重级别（默认 `logging.INFO`） |
 | `register_provider()` | `register_provider(provider) → None` | 在单例上注册 Provider；按实例幂等 |
 | `list_providers()` | `list_providers() → list[str]` | 已注册 Provider 的类名，按注册顺序 |
-| `metrics.close()` | `close() → None` | 释放 Provider 资源——仅显式调用；框架永远不会调用它 |
+| `metrics.close()` | `close() → None` | 对每个 Provider 调用 `flush()`（如果定义了）并关闭其同步部分，然后清空列表。registry 关闭时由模块的 `on_shutdown` 钩子调用 |
+| `metrics.aclose()` | `async aclose() → None` | 对定义了 `aflush()`、`aclose()` 的 Provider 依次等待二者 |
+| `metrics.has_async_resources()` | `has_async_resources() → bool` | `aclose()` 是否还有 Provider 需要释放 |
 
 ## 标签
 
@@ -228,13 +230,13 @@ from bedrock.contrib.metric import (
 )
 ```
 
-这些异常只在配置阶段、构造 Provider 时抛出。发射本身永不抛异常。
+这些异常描述 Provider 配置失败。发射时 Provider 的普通异常会被隔离；Provider 派发之外的错误不在此保证内。
 
 ## 反模式
 
-**不要用 try/except 包裹埋点。** 发射永不抛异常——`inc()` / `set()` / `observe()` 外面的 try/except 是死代码。
+**不要仅为捕获 Provider 的 `Exception` 异常而包裹埋点。** 管理器会隔离这些异常；无效值和日志错误不在此保证内。
 
-**不要在正常运行时调用 `close()`。** 它按设计只应显式调用，框架永远不会调用；如果拥有长期存活的 Provider 资源（例如 StatsD socket），请在关停时调用一次。
+**不要在正常运行时调用 `close()`。** registry 关闭时会替你调用（通过 `bedrock.shutdown()` 或 `bedrock.ashutdown()`），因此只有在不安装 metrics 模块的进程里才需要自己调用。Provider 关闭失败只会记录日志，不会抛出。
 
 **不要寻找内存 Provider。** 本地调试请改用硬编码日志器——在 logging 配置为 `DEBUG` 的情况下，`metrics.set_log_level(logging.DEBUG)` 会打印每个事件。
 

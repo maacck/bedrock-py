@@ -22,8 +22,7 @@
 - [ ] All new and existing tests pass (`uv run pytest`)
 - [ ] Lint passes (`uv run ruff check .`)
 - [ ] Format passes (`uv run ruff format --check .`)
-- [ ] I have updated the documentation (if applicable)
-- [ ] I have updated the changelog (if applicable)
+- [ ] Public signature or behavior change: `CHANGELOG.md` (`[Unreleased]`), Web Doc (en + zh), and `skills/` updated in this PR (if applicable)
 
 ## Testing
 

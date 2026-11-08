@@ -93,18 +93,36 @@ And a basic `main.py` to bootstrap the runtime:
 ```python
 import bedrock
 
-bedrock.setup()
+bedrock.setup("my_app.my_module")
 
 apps = bedrock.apps
-print(f"Registry ready with {len(apps.modules)} module(s) loaded")
+print(f"Registry ready with {len(apps.all())} module(s) loaded")
+
+bedrock.shutdown()
 ```
+
+In an async process, use `await bedrock.asetup(...)` and `await bedrock.ashutdown()` instead; see [Async Lifecycle](/docs/guides/module-anatomy#async-lifecycle).
+
+## Logging
+
+`import bedrock` and `bedrock.setup()` do not configure logging, and they do not remove loguru sinks you already registered. Call `configure_logging()` from the process entry point when you want Bedrock's stderr sink or `LOG_FILE` rotation:
+
+```python
+import bedrock
+from bedrock.logging import configure_logging
+
+configure_logging()
+bedrock.setup("my_app.my_module")
+```
+
+`LOG_LEVEL`, `LOG_FORMAT`, `LOG_FILE`, `LOG_ROTATION`, `LOG_RETENTION`, `LOG_COMPRESSION`, and `LOG_SERIALIZE` are read when `configure_logging()` runs. Calling it again replaces only the sink Bedrock installed. The `bedrock` CLI calls `configure_cli_logging()`, which also removes Loguru's preconfigured stderr handler so CLI logs are written once and `LOG_*` controls that stream. Other handlers stay.
 
 ## Verify Installation
 
 After installing, verify that Bedrock is working correctly:
 
 ```bash
-bedrock -v
+bedrock --help
 ```
 
 Check available CLI commands:
