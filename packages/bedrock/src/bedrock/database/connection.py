@@ -14,7 +14,6 @@ from .config import DatabaseConfigurationError, DbSettings
 _ASYNC_DRIVER_EXTRAS: dict[str, tuple[str, str]] = {
     "aiosqlite": ("aiosqlite", "async-sqlite"),
     "asyncpg": ("asyncpg", "async-postgresql"),
-
     "asyncmy": ("asyncmy", "async-mysql"),
 }
 
