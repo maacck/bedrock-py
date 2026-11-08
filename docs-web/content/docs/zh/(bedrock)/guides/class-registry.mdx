@@ -5,6 +5,8 @@ description: 通过显式注册和延迟导入管理带名称的类型化实现�
 
 `bedrock.common.registry.ClassRegistry[T]` 将名称映射到调用方拥有的基类的具体子类。它返回的是**类**，而不是实例。当多个实现需要共存、调用方按名称选择实现时使用它。依赖实例及其生命周期仍由 DI 负责。
 
+如果调用方需要经过校验的 provider **实例**、factory 函数、只按结构实现协议的类，或可选依赖的安装提示，请改用 [`bedrock.provider`](./provider)。
+
 ## 直接注册
 
 ```python

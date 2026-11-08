@@ -425,7 +425,7 @@ await order_placed.asend(app, order_id="ORD-001")
 
 ## Signals vs Hooks
 
-See `SKILL.md` → "Choosing a Mechanism" for the full decision table (direct call, DI, `ClassRegistry`, hooks, signals) and failure semantics. The contrast in code:
+See `SKILL.md` → "Choosing a Mechanism" for the full decision table (direct call, DI, `ClassRegistry`, `ProviderCatalog`, hooks, signals) and failure semantics. The contrast in code:
 
 ```python
 # SIGNAL: notification only

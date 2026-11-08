@@ -89,6 +89,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`bedrock db check <app>`** prints each loaded branch's current and head revisions
   without changing the database. It exits with status 1 when any branch is behind head
   or the revision is unknown, including a database that has never been migrated.
+- **`bedrock.provider`** — `ProviderCatalog[P]` maps names to providers of one capability. Register an
+  imported class or factory with `register()`, or a `module:attribute` path with `register_lazy()` (or
+  `ProviderSpec` entries passed as `specs=`); lazy paths are imported only when selected. `create(name,
+  **kwargs)` calls the factory and validates the result with `isinstance` against a class or
+  `@runtime_checkable` Protocol, so implementations need not inherit it. `resolve(name)` returns the class or
+  factory for application-side construction, without validation. Re-registering the same target is a no-op;
+  a different target under a used name raises `ProviderConflictError`. Load failures raise `ProviderLoadError`
+  naming the spec's `install_requirement` and keeping the original exception as `__cause__`. Cache and storage
+  still use `ClassRegistry`. Provider guide (en/zh) and the `provider-guide.md` skill reference describe when
+  to use `ClassRegistry` instead.
 
 ### Fixed
 

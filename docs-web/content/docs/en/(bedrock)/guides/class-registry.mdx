@@ -5,6 +5,8 @@ description: Typed, named implementation classes with explicit registration and 
 
 `bedrock.common.registry.ClassRegistry[T]` maps names to concrete subclasses of a caller-owned base class. It returns **classes**, not instances. Use it when several implementations must coexist and callers select one by name. DI remains responsible for dependency instances and lifetimes.
 
+Use [`bedrock.provider`](./provider) instead when callers need validated provider **instances**, factory functions, structural implementations, or install hints for optional dependencies.
+
 ## Direct registration
 
 ```python

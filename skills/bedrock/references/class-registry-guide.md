@@ -1,6 +1,6 @@
 # Class Registry Guide
 
-Use `ClassRegistry[T]` when multiple named implementation classes coexist and callers select one by name. It returns classes; use DI for dependency instances and lifetimes.
+Use `ClassRegistry[T]` when multiple named implementation classes coexist and callers select one by name. It returns classes; use DI for dependency instances and lifetimes. When callers need validated provider instances, factory functions, structural implementations, or install hints for optional dependencies, use `bedrock.provider.ProviderCatalog` instead (`references/provider-guide.md`).
 
 ## Registration and lookup
 

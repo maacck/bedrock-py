@@ -12,6 +12,7 @@
     "storage",
     "signals",
     "di",
+    "provider",
     "class-registry",
     "hooks"
   ],

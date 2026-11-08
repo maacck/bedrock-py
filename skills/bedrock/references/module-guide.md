@@ -320,7 +320,7 @@ await user_created.asend(sender, user=new_user)
 
 ## Signals vs Hooks
 
-See `SKILL.md` → "Choosing a Mechanism" for when to use a direct call, DI, `ClassRegistry`, hooks, or signals, including failure semantics. For extension points where every implementation must succeed, see `references/hooks-guide.md` → "Extension Points That Must All Succeed".
+See `SKILL.md` → "Choosing a Mechanism" for when to use a direct call, DI, `ClassRegistry`, `ProviderCatalog`, hooks, or signals, including failure semantics. For extension points where every implementation must succeed, see `references/hooks-guide.md` → "Extension Points That Must All Succeed".
 
 ---
 

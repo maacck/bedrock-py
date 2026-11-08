@@ -12,6 +12,7 @@ Entry point: `bedrock.setup()` bootstraps the `ModuleRegistry` singleton (`apps`
 src/bedrock/
 ├── cli/           # Typer commands: run, app, db, manage
 ├── common/        # ClassRegistry (typed named class lookup)
+├── provider/      # ProviderCatalog, ProviderSpec (named providers, explicit or lazy)
 ├── contrib/       # First-party modules: cache (active), celery_tasks (skeletal)
 ├── database/      # SQLAlchemy 2.0 layer: base model, manager, session factory, migrations
 ├── module/        # Core runtime: registry, manifest parser, entities, lifecycle signals

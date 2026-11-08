@@ -325,7 +325,7 @@ Namespace reset removes implementations associated with registered specs; orphan
 
 ## Signals vs Hooks
 
-See `SKILL.md` → "Choosing a Mechanism" for the decision table covering direct calls, DI, `ClassRegistry`, hooks, and signals, including failure semantics.
+See `SKILL.md` → "Choosing a Mechanism" for the decision table covering direct calls, DI, `ClassRegistry`, `ProviderCatalog`, hooks, and signals, including failure semantics.
 
 ---
 

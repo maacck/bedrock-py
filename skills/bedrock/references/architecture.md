@@ -108,7 +108,7 @@ Structured call/response protocol for multi-implementation extension points. Sig
 
 The hook registry is injected into bootstrap hooks that declare a `hooks` parameter.
 
-For selecting a concrete implementation class by name, use `ClassRegistry` rather than a hook or DI instance registration; see `references/class-registry-guide.md`.
+For selecting a concrete implementation class by name, use `ClassRegistry` rather than a hook or DI instance registration; see `references/class-registry-guide.md`. For named providers that must be created as validated instances or loaded lazily with install hints, use `bedrock.provider.ProviderCatalog`; see `references/provider-guide.md`.
 
 ---
 

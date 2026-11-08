@@ -23,12 +23,14 @@ Bedrock is a modular Python framework for building applications with manifest-dr
 | Settings | `settings` | `from bedrock.settings import settings` |
 
 Named implementation classes: `from bedrock.common.registry import ClassRegistry` (a class, not a singleton).
+Named providers (instances or factories, lazy paths, install hints): `from bedrock.provider import ProviderCatalog` (a class, not a singleton).
 
 ## When to Read References
 
 - **Creating or modifying a module** → Read `references/module-guide.md`
 - **Using dependency injection** → Read `references/di-guide.md`
 - **Selecting named implementation classes** → Read `references/class-registry-guide.md`
+- **Selecting named providers / lazy optional implementations** → Read `references/provider-guide.md`
 - **Using the hook system** → Read `references/hooks-guide.md`
 - **Using database features** → Read `references/database-guide.md`
 - **Using CLI commands** → Read `references/cli-guide.md`
@@ -418,7 +420,7 @@ codecs.register("utf8", Utf8Codec)
 codec = codecs.get("utf8")()
 ```
 
-Register extensions explicitly in `bootstrap.py:on_load`. See `references/class-registry-guide.md` for lazy registration and errors.
+Register extensions explicitly in `bootstrap.py:on_load`. See `references/class-registry-guide.md` for lazy registration and errors. When callers need validated instances, factory functions, structural implementations, or install hints for optional SDKs, use `bedrock.provider.ProviderCatalog` instead; see `references/provider-guide.md`.
 
 ### 13. Choosing a Mechanism
 
@@ -428,7 +430,8 @@ Pick the first row that fits:
 |------|-----|
 | Call a module already declared in `depends_on` | Direct import of its `service.py`; no mechanism |
 | Share one instance, swap it in tests, or control its lifetime (`SINGLETON` / `SCOPED` / `TRANSIENT`) | DI `container` |
-| Select one implementation **class** by name (backend, provider, codec) | `ClassRegistry` |
+| Select one implementation **class** by name and use the class itself (codec, type dispatch) | `ClassRegistry` |
+| Select one **provider** by name and get a validated instance or its factory (gateway, exporter, optional SDK) | `ProviderCatalog` (`bedrock.provider`) |
 | Owner defines an extension point; other modules contribute behavior; the caller uses results, ordering, or first match | Hooks (`HookNamespace`) |
 | Announce that something happened; the sender must not depend on listeners or their results | Signals |
 
