@@ -18,11 +18,6 @@ description: 安装 bedrock-fastapi，用 FastAPI 通过 HTTP 提供 Bedrock 模
   <Tab value="pip"><CodeBlock code={'pip install bedrock-fastapi fastapi uvicorn'} lang={'bash'} /></Tab>
 </Tabs>
 
-<Callout type="info">
-  `bedrock-fastapi` 尚未发布到 PyPI。首次发布之前，请从 GitHub 安装：
-  `uv add "bedrock-fastapi @ git+https://github.com/maacck/bedrock-py#subdirectory=integrations/fastapi"`。
-</Callout>
-
 `bedrock-fastapi` 需要 Python 3.12+，会安装 `bedrock-core` 和 Starlette。FastAPI 本身以及 Uvicorn 等 ASGI 服务器属于应用自己的依赖。要使用异步数据库 session，还需安装对应数据库的驱动，例如 `bedrock-core[async-sqlite]` 或 `bedrock-core[async-postgresql]`。
 
 ## 项目结构

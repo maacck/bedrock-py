@@ -264,7 +264,7 @@ that touch `integrations/` or `packages/bedrock/`, so a core change that breaks 
 3. Set `version` in `integrations/<framework>/pyproject.toml`. If the release needs newer core behavior, raise
    its `bedrock-core>=` requirement to a published core version. Run `uv lock`.
 4. Commit as `chore(release): prepare bedrock-<framework> vX.Y.Z` and merge to `main`.
-5. Tag that commit `bedrock-<framework>-vX.Y.Z` (for example `bedrock-fastapi-v0.3.1`) and push the tag.
+5. Tag that commit `bedrock-<framework>-vX.Y.Z` (for example `bedrock-fastapi-v0.1.0`) and push the tag.
    `.github/workflows/integrations-release.yml` checks the tag against the package version, publishes that
    package to PyPI, and creates a GitHub release from the matching `CHANGELOG.md` section without marking it
    as the latest release.

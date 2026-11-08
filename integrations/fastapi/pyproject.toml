@@ -1,6 +1,6 @@
 [project]
 name = "bedrock-fastapi"
-version = "0.3.1"
+version = "0.1.0"
 description = "FastAPI integration for Bedrock: request DI scopes, request-bound database sessions, and BedrockExc responses."
 readme = "README.md"
 license = "MIT"

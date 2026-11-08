@@ -1,6 +1,6 @@
 name: Integrations Release
 
-# Release one integration: push a tag named `<package>-vX.Y.Z`, e.g. `bedrock-fastapi-v0.3.1`.
+# Release one integration: push a tag named `<package>-vX.Y.Z`, e.g. `bedrock-fastapi-v0.1.0`.
 # Core releases use plain `vX.Y.Z` tags and `release.yml`.
 on:
   push:

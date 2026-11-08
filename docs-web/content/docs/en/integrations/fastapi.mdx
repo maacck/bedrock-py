@@ -18,11 +18,6 @@ description: Install bedrock-fastapi and serve Bedrock modules over HTTP with Fa
   <Tab value="pip"><CodeBlock code={'pip install bedrock-fastapi fastapi uvicorn'} lang={'bash'} /></Tab>
 </Tabs>
 
-<Callout type="info">
-  `bedrock-fastapi` is not on PyPI yet. Until its first release, install it from GitHub:
-  `uv add "bedrock-fastapi @ git+https://github.com/maacck/bedrock-py#subdirectory=integrations/fastapi"`.
-</Callout>
-
 `bedrock-fastapi` requires Python 3.12+ and installs `bedrock-core` and Starlette. FastAPI itself and an ASGI server such as Uvicorn are your application's dependencies. To use async database sessions, also install the driver for your database, for example `bedrock-core[async-sqlite]` or `bedrock-core[async-postgresql]`.
 
 ## Project layout
