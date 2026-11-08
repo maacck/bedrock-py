@@ -8,18 +8,16 @@ from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from typing import Any
 
+from .._loop import discard_awaitable, loop_is_running, runtime_loop
 from ._runtime import (
     CallEffect,
     Effect,
     HookEffect,
-    LoopAdapter,
     OperationGate,
     SignalEffect,
     Steps,
-    discard_awaitable,
     drain,
     is_protected,
-    loop_is_running,
     run_in_worker,
 )
 from .entities import AppConfig, ModuleLifecycleState
@@ -88,13 +86,14 @@ class ModuleRegistry:
     * Async entrypoints await async hooks and receivers on the running loop and
       run synchronous hooks and receivers in a worker thread (``asyncio.to_thread``),
       like ``hooks.acall`` and ``Signal.asend``.
-    * Sync entrypoints call synchronous hooks directly and adapt async work on a
-      persistent private event loop, but only when the calling thread has no running
-      loop. The loop stays open until every module has shut down, so an async client
-      opened by one hook is closed by another on the same loop. Inside a running loop
-      they raise ``ModuleAsyncRequiredError`` naming the async entrypoint, without
-      nesting loops or leaving a coroutine unawaited. Registries whose hooks are all
-      synchronous keep working from sync entrypoints inside a running loop.
+    * Sync entrypoints call synchronous hooks directly and run async work on the
+      process-wide runtime loop that ``bedrock.run_async()`` also uses, but only when
+      the calling thread has no running loop. The registry never closes that loop;
+      ``bedrock.shutdown()`` does, so an async client opened by one hook is closed by
+      another on the same loop. Inside a running loop they raise
+      ``ModuleAsyncRequiredError`` naming the async entrypoint, without nesting loops
+      or leaving a coroutine unawaited. Registries whose hooks are all synchronous keep
+      working from sync entrypoints inside a running loop.
     * Start up and shut down a registry through the same entrypoint family. Async
       clients are bound to the loop that opened them.
 
@@ -166,7 +165,6 @@ class ModuleRegistry:
         self._ready = False
         self._shut_down = False
         self._gate = OperationGate()
-        self._adapter = LoopAdapter()
         self._loading = False
         self._rolling_back = False
 
@@ -433,11 +431,7 @@ class ModuleRegistry:
                 self._preflight_async_hooks(name)
             return self._drive_sync(steps())
         finally:
-            try:
-                if lease.outermost:
-                    self._close_adapter_if_idle()
-            finally:
-                self._gate.leave(lease)
+            self._gate.leave(lease)
 
     async def _run_async(
         self,
@@ -450,11 +444,7 @@ class ModuleRegistry:
         try:
             return await self._drive_async(steps())
         finally:
-            try:
-                if lease.outermost and self._adapter.is_open and self._is_idle():
-                    await run_in_worker(self._adapter.close)
-            finally:
-                self._gate.leave(lease)
+            self._gate.leave(lease)
 
     def _drive_sync(self, steps: Steps[Any]) -> Any:
         """Execute the effects of ``steps`` synchronously and return its result."""
@@ -511,7 +501,7 @@ class ModuleRegistry:
             return effect.fn()
         if loop_is_running():
             raise self._async_required("An asynchronous cleanup step")
-        return self._adapter.run(effect.factory())
+        return runtime_loop.run(effect.factory())
 
     async def _perform_async(self, effect: Effect) -> Any:
         if isinstance(effect, HookEffect):
@@ -558,14 +548,6 @@ class ModuleRegistry:
 
     def _modules(self) -> list[AppConfig]:
         return [self._app_configs[name] for name in self._install_order]
-
-    def _is_idle(self) -> bool:
-        return all(app.lifecycle_state is ModuleLifecycleState.SHUTDOWN for app in self._app_configs.values())
-
-    def _close_adapter_if_idle(self) -> None:
-        """Close the sync adapter loop once no module that could own a client on it is still alive."""
-        if self._adapter.is_open and self._is_idle():
-            self._adapter.close()
 
     # ------------------------------------------------------------------
     # Operations (written once; executed by the sync or async driver)
@@ -917,7 +899,7 @@ class ModuleRegistry:
                 if loop_is_running():
                     discard_awaitable(result)
                     raise self._async_required(subject)
-                self._adapter.run(result)
+                runtime_loop.run(result)
         except ModuleAsyncRequiredError:
             raise
         except Exception as exc:
@@ -959,7 +941,7 @@ class ModuleRegistry:
         return offloaded
 
     def _adapt_receiver_sync(self, receiver: Callable[..., Any]) -> Callable[..., Any]:
-        """Adapt an async signal receiver for ``Signal.send`` on the persistent adapter loop.
+        """Adapt an async signal receiver for ``Signal.send`` on the process-wide runtime loop.
 
         This is the ``_async_wrapper`` the signal API already provides; the default wrapper would run each
         receiver on a throwaway loop. In a running loop the receiver is not called at all.
@@ -969,7 +951,7 @@ class ModuleRegistry:
             if loop_is_running():
                 name = getattr(receiver, "__qualname__", repr(receiver))
                 raise self._async_required(f"Signal receiver '{name}'")
-            return self._adapter.run(receiver(*args, **kwargs))
+            return runtime_loop.run(receiver(*args, **kwargs))
 
         return adapted
 

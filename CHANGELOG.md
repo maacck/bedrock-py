@@ -24,6 +24,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     is rolled back afterwards; `commit()` in service code (including `db.session_scope()`) commits a
     savepoint. `rollback_session()` and `arollback_session()` provide the same isolation as context
     managers, the async one for use in an async fixture. SQLite is supported.
+- **Lifecycle**: `bedrock.run_async(awaitable)` runs async code from synchronous code (Celery tasks, CLI
+  commands, scripts) on Bedrock's process-wide runtime loop, the loop synchronous `bedrock.setup()` runs async
+  hooks on. Clients opened by `on_load` hooks and the async database engine stay usable across calls, unlike
+  with `asyncio.run()`. The calling thread drives the loop and blocks; calls from several threads run one at a
+  time. It works without `setup()`, and raises `RuntimeError` inside a running event loop, after `asetup()` on
+  a loop that is still open, and from a thread that a coroutine on the runtime loop is waiting for.
+
+### Changed
+
+- **Lifecycle**: the event loop that synchronous registry entrypoints run async hooks on is now process-wide
+  instead of one per `ModuleRegistry`. A registry no longer closes it when its last module shuts down;
+  `bedrock.shutdown()` closes it after every module and the database are released (and `ashutdown()` closes it
+  if synchronous code used it). Code that calls `registry.shutdown()` without `bedrock.shutdown()` leaves the
+  loop open until the next `bedrock.shutdown()` or interpreter exit; call `bedrock.shutdown()` to release it.
 
 ## [0.3.1] - 2026-11-08
 

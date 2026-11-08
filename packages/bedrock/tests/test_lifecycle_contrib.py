@@ -189,7 +189,6 @@ class TestCacheModuleHooks:
 
         assert fake_log == ["close", "aclose:start", "aclose:done"]
         assert registry._app_configs["bedrock.contrib.cache"].lifecycle_state is ModuleLifecycleState.SHUTDOWN
-        assert not registry._adapter.is_open
 
     @pytest.mark.asyncio
     async def test_async_shutdown_awaits_the_async_close(self, clean_cache: CacheService, fake_log: list[str]) -> None:
@@ -355,7 +354,6 @@ class TestMetricsModuleHooks:
 
         assert log == ["flush", "close", "aflush:start", "aflush:done", "aclose:start", "aclose:done"]
         assert registry._app_configs["bedrock.contrib.metric"].lifecycle_state is ModuleLifecycleState.SHUTDOWN
-        assert not registry._adapter.is_open
 
     @pytest.mark.asyncio
     async def test_async_shutdown_awaits_the_provider(self, clean_metrics: MetricsManager) -> None:

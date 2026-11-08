@@ -5,15 +5,22 @@ release infrastructure that is process-owned rather than module-owned, such as t
 consistently: the async pair when the process runs an event loop, the sync pair otherwise.
 """
 
+import asyncio
 import sys
+from collections.abc import Awaitable
 from typing import TYPE_CHECKING
 
+from ._loop import discard_awaitable, loop_is_running, runtime_loop
 from .module import ModuleAsyncRequiredError, apps
-from .module._runtime import AwaitEffect, CallEffect, loop_is_running
+from .module._runtime import AwaitEffect, CallEffect, run_in_worker
 from .module.registry import Finalizer
 
 if TYPE_CHECKING:
     from .database import DatabaseManager
+
+
+_async_setup_loop: asyncio.AbstractEventLoop | None = None
+"""The running loop :func:`asetup` set the registry up on, until a shutdown; ``run_async()`` refuses to bypass it."""
 
 
 def _resolve_app(app: str | None) -> str:
@@ -44,9 +51,9 @@ def setup(app: str | None = None) -> None:
     This function is idempotent: if the registry is already ready it returns
     immediately without re-populating.
 
-    Synchronous and asynchronous hooks both work here. Asynchronous hooks run on a persistent
-    private event loop that stays open until :func:`shutdown`, so use this entrypoint only in
-    a thread without a running event loop and stop the process with :func:`shutdown`. In a
+    Synchronous and asynchronous hooks both work here. Asynchronous hooks run on the process-wide
+    runtime loop that :func:`run_async` also uses and :func:`shutdown` closes, so use this entrypoint
+    only in a thread without a running event loop and stop the process with :func:`shutdown`. In a
     running loop use :func:`asetup`.
 
     It does not configure logging. Importing Bedrock leaves existing loguru
@@ -117,9 +124,11 @@ async def asetup(app: str | None = None) -> None:
             finally:
                 await bedrock.ashutdown()
     """
+    global _async_setup_loop
     if apps.ready:
         return
     await apps.apopulate([_resolve_app(app)])
+    _async_setup_loop = asyncio.get_running_loop()
 
 
 def shutdown() -> None:
@@ -133,9 +142,11 @@ def shutdown() -> None:
     :class:`~bedrock.module.ModuleLifecycleError`. When the database was never initialized this does
     nothing for it, and cleanup never initializes or rebuilds anything.
 
-    Releasing an asynchronous engine runs on the registry's persistent adapter loop. An engine whose
+    Releasing an asynchronous engine runs on the runtime loop (see :func:`run_async`). An engine whose
     connections were opened on a different loop may fail to close from here; stop such a process with
-    :func:`ashutdown` on the loop that opened them.
+    :func:`ashutdown` on the loop that opened them. Once everything is released, the runtime loop is closed:
+    work still pending on it is cancelled, and the next :func:`run_async` or :func:`setup` starts a new one.
+    When a step fails the loop stays open, so a retried shutdown closes clients on the loop that opened them.
 
     Repeated calls are harmless. Call it from a thread without a running event loop.
 
@@ -144,12 +155,15 @@ def shutdown() -> None:
         ModuleAsyncRequiredError: If an asynchronous engine or hook has to be released inside a running
             event loop. Raised before anything is shut down.
     """
+    global _async_setup_loop
     if loop_is_running() and _db_manager_has_async_engine():
         raise ModuleAsyncRequiredError(
             "The database has an initialized async engine, which cannot be released from shutdown() inside a "
             "running event loop. Use await bedrock.ashutdown() instead."
         )
     apps._shutdown_with_cleanups(_database_finalizers)
+    _async_setup_loop = None
+    runtime_loop.close()
 
 
 async def ashutdown() -> None:
@@ -157,12 +171,63 @@ async def ashutdown() -> None:
 
     Same contract as :func:`shutdown`. The coroutine completes only after every module hook and both
     database engines are released, and it leaves no task running. The synchronous ``db.close()`` runs inline
-    on the event loop thread.
+    on the event loop thread. If synchronous code used the runtime loop, it is closed in a worker thread.
 
     Raises:
         ModuleLifecycleError: After all attempts, if any module or database step failed.
     """
+    global _async_setup_loop
     await apps._ashutdown_with_cleanups(_database_finalizers)
+    _async_setup_loop = None
+    if runtime_loop.is_open:
+        await run_in_worker(runtime_loop.close)
+
+
+def run_async[T](awaitable: Awaitable[T]) -> T:
+    """Run *awaitable* to completion on Bedrock's runtime loop and return its result.
+
+    Use it to call async code from synchronous code, such as a Celery task, a CLI command, or a script. The
+    runtime loop is the loop synchronous :func:`setup` runs async hooks on, so async clients opened by
+    ``on_load`` hooks, and the async database engine once built, stay usable across calls. ``asyncio.run()``
+    instead creates and closes a loop per call, stranding such clients.
+
+    The calling thread drives the loop and blocks until the awaitable finishes; there is no background thread.
+    Calls from several threads run one at a time. It works without :func:`setup`. :func:`shutdown` closes the
+    loop, and the next call starts a new one.
+
+    Args:
+        awaitable: The coroutine or other awaitable to run.
+
+    Returns:
+        The awaitable's result. An exception it raises propagates.
+
+    Raises:
+        RuntimeError: When called from a thread that is running an event loop (await the awaitable there), when
+            Bedrock was set up with :func:`asetup` on an event loop that is still open (its hooks' clients live on
+            that loop), or from a thread that work on the runtime loop is waiting for. The awaitable is closed
+            without running.
+
+    Example — a Celery task calling an async service::
+
+        @app.task
+        def restock(sku: str, quantity: int) -> int:
+            return bedrock.run_async(
+                inventory_service.arestock(sku, quantity)
+            )
+    """
+    if loop_is_running():
+        discard_awaitable(awaitable)
+        raise RuntimeError(
+            "bedrock.run_async() cannot be called from a running event loop. Await the awaitable instead."
+        )
+    setup_loop = _async_setup_loop
+    if setup_loop is not None and not setup_loop.is_closed():
+        discard_awaitable(awaitable)
+        raise RuntimeError(
+            "Bedrock was set up with asetup() on another event loop, which owns the async clients its hooks "
+            "opened. Await the work on that loop instead of calling bedrock.run_async()."
+        )
+    return runtime_loop.run(awaitable)
 
 
 def _database_manager() -> "DatabaseManager | None":
@@ -191,4 +256,4 @@ def _database_finalizers() -> list[Finalizer]:
     return steps
 
 
-__all__ = ["ashutdown", "asetup", "setup", "shutdown"]
+__all__ = ["ashutdown", "asetup", "run_async", "setup", "shutdown"]

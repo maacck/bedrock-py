@@ -4,9 +4,9 @@ Private to ``bedrock.module``. A registry operation is written once, as a genera
 hook, send a signal, run a cleanup step). A sync driver and an async driver execute those effects, so the state
 machine, rollback, idempotency and aggregate-error behavior exist in exactly one place.
 
-This module also owns the two pieces of runtime state that must not depend on a thread lock being held across an
-``await``: the operation gate that admits one registry operation at a time, and the persistent event loop that
-synchronous entrypoints use to adapt asynchronous hooks.
+This module also owns the operation gate that admits one registry operation at a time; it must not depend on a
+thread lock being held across an ``await``. The event loop that synchronous entrypoints use to run asynchronous hooks
+is process-wide and lives in ``bedrock._loop``.
 """
 
 from __future__ import annotations
@@ -15,7 +15,6 @@ import asyncio
 import inspect
 import logging
 import threading
-import weakref
 from collections.abc import Awaitable, Callable, Generator, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
@@ -73,26 +72,6 @@ def is_protected(effect: Any) -> bool:
 
 Effect = HookEffect | SignalEffect | CallEffect | AwaitEffect
 Steps = Generator[Effect, Any, T]
-
-
-def loop_is_running() -> bool:
-    """Return whether the calling thread is running an asyncio event loop."""
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return False
-    return True
-
-
-def discard_awaitable(awaitable: Any) -> None:
-    """Release an awaitable that will not be awaited so no coroutine is left unawaited."""
-    close = getattr(awaitable, "close", None)
-    if callable(close):
-        close()
-        return
-    cancel = getattr(awaitable, "cancel", None)
-    if callable(cancel):
-        cancel()
 
 
 async def drain(future: asyncio.Future[Any]) -> asyncio.CancelledError | None:
@@ -159,76 +138,6 @@ async def run_in_worker[**P, R](fn: Callable[P, R], /, *args: P.args, **kwargs: 
     else:
         await _dispose_unawaited(worker.result())
     raise cancelled
-
-
-async def _await[T](awaitable: Awaitable[T]) -> T:
-    return await awaitable
-
-
-def _close_loop(loop: asyncio.AbstractEventLoop) -> None:
-    """Cancel leftover tasks, finalize async generators and the default executor, then close ``loop``."""
-    if loop.is_closed():
-        return
-    if loop_is_running():
-        loop.close()
-        return
-    try:
-        leftover = asyncio.all_tasks(loop)
-        for task in leftover:
-            task.cancel()
-        if leftover:
-            loop.run_until_complete(asyncio.gather(*leftover, return_exceptions=True))
-        loop.run_until_complete(loop.shutdown_asyncgens())
-        loop.run_until_complete(loop.shutdown_default_executor())
-    finally:
-        loop.close()
-
-
-class LoopAdapter:
-    """Persistent event loop that lets synchronous entrypoints run asynchronous hooks.
-
-    One adapter belongs to one registry. The loop is created when the first awaitable has to run and stays open
-    for as long as the registry has a module that has not shut down, so an async client opened by a startup hook
-    is closed by the shutdown hook on the same loop. ``asyncio.run`` per call would close the loop between hooks
-    and strand such clients on a closed loop. A registry that is dropped without being shut down closes its loop
-    when the adapter is garbage collected.
-    """
-
-    def __init__(self) -> None:
-        self._loop: asyncio.AbstractEventLoop | None = None
-        self._finalizer: weakref.finalize | None = None
-
-    @property
-    def is_open(self) -> bool:
-        """Return whether an adapter loop currently exists."""
-        return self._loop is not None and not self._loop.is_closed()
-
-    def run(self, awaitable: Awaitable[T]) -> T:
-        """Run ``awaitable`` to completion on the adapter loop.
-
-        Args:
-            awaitable: Anything awaitable, such as a coroutine returned by a hook.
-
-        Returns:
-            The awaitable's result.
-        """
-        loop = self._loop
-        if loop is None or loop.is_closed():
-            loop = self._loop = asyncio.new_event_loop()
-            self._finalizer = weakref.finalize(self, _close_loop, loop)
-        return loop.run_until_complete(_await(awaitable))
-
-    def close(self) -> None:
-        """Close the adapter loop; see :func:`_close_loop`.
-
-        Must not be called from a thread that is running another event loop.
-        """
-        loop, self._loop = self._loop, None
-        finalizer, self._finalizer = self._finalizer, None
-        if finalizer is not None:
-            finalizer.detach()
-        if loop is not None:
-            _close_loop(loop)
 
 
 @dataclass(eq=False)
