@@ -142,8 +142,8 @@ def run_migrations_offline() -> None:
     if _include_name is not None:
         context_kwargs["include_name"] = _include_name
 
+    context.configure(**context_kwargs)
     with context.begin_transaction():
-        context.configure(**context_kwargs)
         context.run_migrations()
 
 
@@ -159,10 +159,7 @@ def run_migrations_online() -> None:
         poolclass=pool.NullPool,
     )
 
-    context_kwargs = {
-        "connection": connectable.connect(),
-        "target_metadata": target_metadata,
-    }
+    context_kwargs: dict = {"target_metadata": target_metadata}
     if _include_name is not None:
         context_kwargs["include_name"] = _include_name
 

@@ -71,7 +71,7 @@ class BedrockModel(DeclarativeBase, CrudMixin):
     @property
     def verbose_name(self) -> str:
         """Return the class name as a human-readable label."""
-        return self.__name__
+        return type(self).__name__
 
     def dict(self) -> dict[str, Any]:
         """Return a dictionary mapping column names to their current values.

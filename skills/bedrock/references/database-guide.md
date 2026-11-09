@@ -13,7 +13,7 @@ Complete guide to database operations in Bedrock applications.
 7. [Relationships](#relationships)
 8. [Common Patterns](#common-patterns)
 9. [Configuration](#configuration)
-10. [Model Observer](#model-observer)
+10. [Model Events](#model-events)
 11. [DatabaseManager API](#databasemanager-api)
 
 ---
@@ -695,70 +695,25 @@ db.init(url="postgresql+psycopg2://admin:secret@localhost:5432/myapp")
 
 ---
 
-## Model Observer
+## Model Events
 
-The observer system hooks into SQLAlchemy's `before_flush` event to invoke callbacks when models are inserted, updated, or deleted.
-
-### Event Identifiers
-
-| Identifier | Fires When |
-|------------|------------|
-| `on_insert` | A new instance is pending in the session at flush |
-| `on_update` | An existing instance is dirty at flush |
-| `on_delete` | An instance is marked for deletion at flush |
-
-### Registering Observers
-
-Use the `@observes_model` decorator:
+Bedrock has no observer wrapper. Use SQLAlchemy events directly and choose the phase:
 
 ```python
-from bedrock.database import BedrockModel
-from bedrock.database.observer import observes_model, observer
-from sqlalchemy import Column, Integer, String
+from sqlalchemy import event
+from sqlalchemy.orm import Session
 
-class Catalog(BedrockModel):
-    __tablename__ = "catalog"
-    id = Column(Integer, primary_key=True)
-    name = Column(String(100))
-    __observers__ = None  # Required by observes_model registration
+@event.listens_for(Catalog, "after_insert", propagate=True)  # id assigned; use `connection`, not the session
+def catalog_inserted(mapper, connection, target): ...
 
-@observes_model(Catalog, "on_insert", "on_delete")
-def log_catalog_changes(session, target, identifier):
-    print(f"Catalog {target.id} was {identifier}")
+@event.listens_for(Session, "before_flush")  # objects added here join the same flush
+def audit_catalog(session, flush_context, instances):
+    for obj in session.new:
+        if isinstance(obj, Catalog):
+            session.add(AuditLog(action="catalog_created"))
 ```
 
-The callback receives three arguments: the session, the model instance, and the event identifier string.
-
-Callbacks run before SQL is flushed; database-generated IDs may not yet be assigned on insert.
-
-### Callback Signature
-
-```
-callback(session, target, identifier) -> None
-```
-
-- `session`: The active SQLAlchemy session being flushed.
-- `target`: The model instance that triggered the event.
-- `identifier`: One of `"on_insert"`, `"on_update"`, or `"on_delete"`.
-
-### Custom Observer Instances
-
-Pass a custom `ModelObserver` via the `observer` keyword. Registrations are stored on the model class, not isolated per observer; multiple registered observer instances listen to the same session flush and can invoke the same callbacks more than once.
-
-```python
-from bedrock.database.observer import ModelObserver
-
-custom_observer = ModelObserver()
-
-@observes_model(Catalog, "on_insert", observer=custom_observer)
-def handle_insert(session, target, identifier):
-    # Registered through custom_observer
-    pass
-```
-
-### Weak References
-
-Observer callbacks are stored as weak references; keep a strong reference to callbacks and their owning objects for as long as they are registered. A collected function or bound-method owner is not silently skipped by the current implementation and can cause a flush-time error.
+`after_update` / `after_delete` and the `before_*` variants work the same way; `propagate=True` covers subclasses.
 
 ---
 

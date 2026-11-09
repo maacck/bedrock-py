@@ -190,6 +190,31 @@ class TestSearchFilterSortPaginate:
         assert [item.name for item in result["items"]] == ["charlie", "delta", "echo"]
         assert result["total"] == 3
 
+    def test_group_by_total_counts_groups(self, db_session):
+        """With group_by, total is the number of groups, and an empty result is 0 rather than None."""
+        grouped = search_filter_sort_paginate(
+            db_session=db_session,
+            model=InventoryItem,
+            filter_specs={"field": "is_active", "op": "eq", "value": True},
+            group_by="category",
+            count_pk="id",
+            limit=2,
+            return_raw=True,
+        )
+        empty = search_filter_sort_paginate(
+            db_session=db_session,
+            model=InventoryItem,
+            filter_specs={"field": "category", "op": "eq", "value": "none"},
+            group_by="category",
+            count_pk="id",
+        )
+
+        assert len(grouped["items"]) == 2
+        assert grouped["total"] == 3
+        assert grouped["page_info"]["has_more"] is True
+        assert empty["total"] == 0
+        assert empty["page_info"]["has_more"] is False
+
 
 class SearchableItem(BedrockModel):
     """Model with searchable columns configured via __searchable_columns__."""

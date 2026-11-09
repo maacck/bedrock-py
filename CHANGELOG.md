@@ -44,6 +44,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `with db.session_scope():` (the `db_session` fixture still rolls it back); sessions owned by another
   framework use `db.set_session()` with `db.clear_session()` in `finally`. Services that read
   `db.session` need no change.
+- **Database observer removed**: `bedrock.database.observer` (`observes_model`, `ModelObserver`,
+  `observer`) is deleted. It re-implemented SQLAlchemy's ORM events: registering on an ordinary
+  model raised `AttributeError`, callbacks ran once per `ModelObserver` instance, collected
+  callbacks failed the next flush, and `on_insert` ran before the primary key was assigned.
+  Migration: use SQLAlchemy events directly, `@event.listens_for(Model, "after_insert",
+  propagate=True)` (likewise `after_update` / `after_delete`) when the callback needs the id, or
+  `@event.listens_for(Session, "before_flush")` filtering `session.new` / `session.dirty` /
+  `session.deleted` by model when it adds objects to the same flush.
 
 ### Added
 
@@ -76,6 +84,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   errors), `ensure_schema()` and `uninstall()` raise `MigrationError` instead of treating the
   branch as never applied, which stamped head over pending migrations or reported an uninstall
   that did nothing. `check()` reports such branches as `unknown`.
+- **Database query builder**: with `group_by`, `total` in `search_filter_sort_paginate()` /
+  `asearch_filter_sort_paginate()` is the number of groups. It used to be the row count of the
+  first group, and an empty result made `has_more` raise `TypeError`.
+- **Migrations**: online migrations open one connection instead of two (the first was never
+  closed), and offline (`--sql`) runs configure the Alembic context before starting the
+  transaction instead of failing with "No context has been configured yet".
+- **Database**: `BedrockModel.verbose_name` returns the class name instead of raising
+  `AttributeError`.
 
 ## [0.3.1] - 2026-11-08
 

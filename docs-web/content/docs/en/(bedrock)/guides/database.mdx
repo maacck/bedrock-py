@@ -583,57 +583,28 @@ A timeout raises `MigrationError`. SQLite has no shared lock in this manager.
 
 `bedrock db check <app>` prints the current and head revisions for the app and for every other installed app that already has migration scripts. It does not change the database and does not create the Alembic version table. The process exits with status 1 when any reported branch is `behind` or `unknown`. `unknown` includes a database that has never been migrated. Use the command as a deploy gate before serving traffic. See [CLI Reference — Database Commands](/docs/guides/cli#database-commands-bedrock-db).
 
-## Model Observer
+## Model Events
 
-The observer system hooks into SQLAlchemy's `before_flush` event to invoke callbacks when models are inserted, updated, or deleted.
-
-### Event Identifiers
-
-| Identifier | Fires When |
-|------------|------------|
-| `on_insert` | A new instance is added to the session |
-| `on_update` | An existing instance is modified |
-| `on_delete` | An instance is marked for deletion |
-
-### Registering Observers
-
-Use the `@observes_model` decorator:
+Bedrock does not wrap ORM events. Register SQLAlchemy listeners directly and pick the phase you need:
 
 ```python
-from bedrock.database import BedrockModel
-from bedrock.database.observer import observes_model, observer
-from sqlalchemy import Column, Integer, String
+from sqlalchemy import event
+from sqlalchemy.orm import Session
 
-class Catalog(BedrockModel):
-    __tablename__ = "catalog"
-    id = Column(Integer, primary_key=True)
-    name = Column(String(100))
+# After the INSERT ran: the primary key is set. Use `connection` for extra SQL; do not modify the session.
+@event.listens_for(Catalog, "after_insert", propagate=True)
+def catalog_inserted(mapper, connection, target):
+    ...
 
-@observes_model(Catalog, "on_insert", "on_delete")
-def log_catalog_changes(session, target, identifier):
-    print(f"Catalog {target.id} was {identifier}")
+# Before the flush: objects added to the session here are flushed in the same transaction.
+@event.listens_for(Session, "before_flush")
+def audit_catalog(session, flush_context, instances):
+    for obj in session.new:
+        if isinstance(obj, Catalog):
+            session.add(AuditLog(action="catalog_created"))
 ```
 
-The callback receives three arguments: the session, the model instance, and the event identifier string.
-
-### Custom Observer Instances
-
-Pass a custom `ModelObserver` via the `observer` keyword:
-
-```python
-from bedrock.database.observer import ModelObserver
-
-custom_observer = ModelObserver()
-
-@observes_model(Catalog, "on_insert", observer=custom_observer)
-def handle_insert(session, target, identifier):
-    # Custom observers register their own SQLAlchemy listener; callbacks are stored on the model
-    pass
-```
-
-### Weak References
-
-Observer callbacks are stored as weak references; bound methods use a `WeakMethod` wrapper. Keep callbacks and their owning objects alive while registered: dead weak references are not safely skipped during dispatch.
+`after_update` / `after_delete` (and the `before_*` variants) work the same way. `propagate=True` also covers subclasses. See SQLAlchemy's [ORM events](https://docs.sqlalchemy.org/en/20/orm/events.html) for every hook and its restrictions.
 
 ## Architecture
 
@@ -649,7 +620,6 @@ bedrock/database/
 ├── manager.py             # DatabaseManager singleton (db)
 ├── migrations/            # Alembic env.py and script.py.mako
 ├── migrations_manager.py  # Per-module Alembic orchestration
-├── observer.py            # Model lifecycle observer
 ├── service.py             # search_filter_sort_paginate query builder
 ├── session_factory.py     # Context-local sessions via ContextVar
 └── utils.py               # Model registry helpers

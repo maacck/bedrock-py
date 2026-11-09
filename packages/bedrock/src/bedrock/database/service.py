@@ -123,7 +123,8 @@ def build_query(
         count_pk: Primary-key attribute name for the count query. Defaults
             to the model's first primary key; any other name raises
             :class:`~bedrock.exc.BadFilterFormatError`.
-        group_by: Column name or expression to group results by.
+        group_by: Column name or expression to group results by. The count
+            query then counts groups, not rows.
         auto_join_: When ``True``, automatically join related models
             required by filter field paths.
 
@@ -187,12 +188,13 @@ def build_query(
         else:
             group_by_clause = group_by
         query = query.group_by(group_by_clause)
-        count_query = count_query.group_by(group_by_clause)
 
     if limit > 0 and not show_all:
         query = query.offset(offset).limit(limit)
 
     count_query = count_query.where(and_(*filters))
+    if group_by is not None:
+        count_query = sa_select(sa_func.count()).select_from(count_query.group_by(group_by_clause).subquery())
     query = query.where(and_(*filters))
     return query, count_query, filters
 

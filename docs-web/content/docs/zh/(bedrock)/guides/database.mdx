@@ -583,57 +583,28 @@ history = migrations.get_history("myapp.users")
 
 `bedrock db check <app>` 会打印该应用，以及已经带有迁移脚本的其他已安装应用的当前版本和 head 版本。它不修改数据库，也不会创建 Alembic 版本表。任一分支处于 `behind` 或 `unknown` 时，进程以状态码 1 退出。`unknown` 包含从未执行过迁移的数据库。可以把它用作对外提供流量之前的部署门禁。参见 [CLI 参考 — 数据库命令](/docs/guides/cli#database-commands-bedrock-db)。
 
-## 模型观察器
+## 模型事件
 
-观察器系统会挂接到 SQLAlchemy 的 `before_flush` 事件，在模型被插入、更新或删除时调用回调。
-
-### 事件标识符
-
-| 标识符 | 触发时机 |
-|------------|------------|
-| `on_insert` | 新实例被加入 session 时 |
-| `on_update` | 现有实例被修改时 |
-| `on_delete` | 实例被标记为删除时 |
-
-### 注册观察器
-
-使用 `@observes_model` 装饰器：
+Bedrock 不封装 ORM 事件。直接注册 SQLAlchemy 监听器，并按需要选择触发阶段：
 
 ```python
-from bedrock.database import BedrockModel
-from bedrock.database.observer import observes_model, observer
-from sqlalchemy import Column, Integer, String
+from sqlalchemy import event
+from sqlalchemy.orm import Session
 
-class Catalog(BedrockModel):
-    __tablename__ = "catalog"
-    id = Column(Integer, primary_key=True)
-    name = Column(String(100))
+# INSERT 执行之后：主键已经赋值。额外的 SQL 用 `connection` 执行，不要修改 session。
+@event.listens_for(Catalog, "after_insert", propagate=True)
+def catalog_inserted(mapper, connection, target):
+    ...
 
-@observes_model(Catalog, "on_insert", "on_delete")
-def log_catalog_changes(session, target, identifier):
-    print(f"Catalog {target.id} was {identifier}")
+# flush 之前：在这里加入 session 的对象会在同一个事务中一起 flush。
+@event.listens_for(Session, "before_flush")
+def audit_catalog(session, flush_context, instances):
+    for obj in session.new:
+        if isinstance(obj, Catalog):
+            session.add(AuditLog(action="catalog_created"))
 ```
 
-回调会接收三个参数：session、模型实例，以及事件标识符字符串。
-
-### 自定义观察器实例
-
-可通过 `observer` 关键字传入自定义 `ModelObserver`：
-
-```python
-from bedrock.database.observer import ModelObserver
-
-custom_observer = ModelObserver()
-
-@observes_model(Catalog, "on_insert", observer=custom_observer)
-def handle_insert(session, target, identifier):
-    # 自定义观察器注册自己的 SQLAlchemy 监听器；回调保存在模型上
-    pass
-```
-
-### 弱引用
-
-观察器回调以弱引用形式存储，绑定方法使用 `WeakMethod` 包装器。注册期间应保持回调及其所属对象存活：派发时不会安全跳过失效的弱引用。
+`after_update` / `after_delete`（以及对应的 `before_*`）用法相同。`propagate=True` 让子类也会触发。全部钩子及其限制见 SQLAlchemy 的 [ORM 事件文档](https://docs.sqlalchemy.org/en/20/orm/events.html)。
 
 ## 架构
 
@@ -649,7 +620,6 @@ bedrock/database/
 ├── manager.py             # DatabaseManager singleton (db)
 ├── migrations/            # Alembic env.py and script.py.mako
 ├── migrations_manager.py  # Per-module Alembic orchestration
-├── observer.py            # Model lifecycle observer
 ├── service.py             # search_filter_sort_paginate query builder
 ├── session_factory.py     # Context-local sessions via ContextVar
 └── utils.py               # Model registry helpers
