@@ -395,7 +395,14 @@ class TestMigrationTargets:
 
     @pytest.mark.parametrize(
         ("method", "target"),
-        [("downgrade", "sec02ba"), ("downgrade", "sec02_b@base"), ("upgrade", "heads"), ("upgrade", "sec02bb")],
+        [
+            ("downgrade", "sec02ba"),
+            ("downgrade", "sec02_b@base"),
+            ("upgrade", "heads"),
+            ("upgrade", "sec02bb"),
+            ("downgrade", "sec02_a@sec02ba"),
+            ("upgrade", "sec02_a@sec02bb"),
+        ],
     )
     def test_targets_outside_the_app_branch_are_rejected(
         self, two_apps: tuple[MigrationsManager, Path], method: str, target: str

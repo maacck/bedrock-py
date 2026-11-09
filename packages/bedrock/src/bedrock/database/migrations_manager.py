@@ -456,9 +456,9 @@ class MigrationsManager:
         """Qualify an upgrade or downgrade *target* so Alembic only moves *branch_label*.
 
         ``head``, ``base``, and relative steps (``+1``, ``-2``) become
-        ``<branch>@<target>``. A target already prefixed with ``<branch>@`` is kept.
-        Any other target must resolve to a revision of this branch; it is returned
-        as the full revision ID.
+        ``<branch>@<target>``. A ``<branch>@`` prefix is stripped and the rest is
+        checked like an unprefixed target. Any other target must resolve to a
+        revision of this branch; it is returned as the full revision ID.
 
         Args:
             cfg: Alembic config whose version locations include the branch.
@@ -474,8 +474,9 @@ class MigrationsManager:
         """
         if target in {"head", "base"} or re.fullmatch(r"[+-]\d+", target):
             return f"{branch_label}@{target}"
-        if target.startswith(f"{branch_label}@"):
-            return target
+        prefix = f"{branch_label}@"
+        if target.startswith(prefix):
+            return self._branch_target(cfg, branch_label, target.removeprefix(prefix))
         script = ScriptDirectory.from_config(cfg)
         try:
             revision = script.get_revision(target)
