@@ -203,7 +203,8 @@ def test_teardown_releases_async_engine_used_on_runtime_loop(tmp_path: Path) -> 
         # Pooled connections belonged to the closed runtime loop; the next runtime builds a fresh engine.
         assert engine.sync_engine.pool.checkedin() == 0
         assert not db.has_async_engine
-        assert db.session.execute(text("select 1")).scalar_one() == 1
+        with db.session_scope() as session:
+            assert session.execute(text("select 1")).scalar_one() == 1
         with isolated_runtime():
             assert bedrock.run_async(query()) == 1
     finally:
