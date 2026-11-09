@@ -335,6 +335,7 @@ from sqlalchemy import Column, String, Integer
 
 class Product(BedrockModel):
     __tablename__ = "products"
+    __filterable_fields__ = ["name", "price"]
 
     id = Column(Integer, primary_key=True)
     name = Column(String(100), nullable=False)
@@ -361,6 +362,27 @@ BedrockModel listens for the `init` event and applies column defaults before the
 ## Query Builder
 
 The `search_filter_sort_paginate` function builds queries with filtering, sorting, pagination, and automatic joins. It returns a dictionary with `items`, `total`, and `page_info`.
+
+### Filterable Fields
+
+`filter_specs`, `sort_key`, and `group_by` usually come from the client, so they may only reference fields the model exposes. Primary keys are always allowed; every other column, hybrid, association proxy, or relationship must be listed in `__filterable_fields__`:
+
+```python
+class Order(BedrockModel):
+    __tablename__ = "orders"
+    __filterable_fields__ = ["status", "customer"]  # "customer" is a relationship
+
+
+class Customer(BedrockModel):
+    __tablename__ = "customers"
+    __filterable_fields__ = ["name"]  # password_hash stays hidden
+```
+
+- Each hop of a dotted or colon path is checked against its own model: `customer.name` needs `customer` on `Order` and `name` on `Customer`.
+- `count_pk` must be a primary key.
+- Any other name raises `BadFilterFormatError` ("Field `x` is not filterable on Order"). Hidden and missing fields raise the same error, so clients cannot probe the schema.
+- If the application already validates field names before they reach the query builder, set `__filterable_fields__ = "__all__"` to turn the check off for that model. Related models reached through a path still apply their own `__filterable_fields__`, so set `"__all__"` on them too if needed. With `"__all__"`, guarding secret columns is the application's job.
+- `sqla_filters` and the `__searchable_columns__` used by `q` are written by your code and are not checked.
 
 ### Basic Usage
 
@@ -505,6 +527,8 @@ Filter across relationships using dot notation for joins or colon notation for `
 # Colon notation: uses any() for collections, has() for scalars
 {"field": "category:name", "op": "eq", "value": "Electronics"}
 ```
+
+Both paths require `category` in `Product.__filterable_fields__` and `name` in the related model's `__filterable_fields__` (see [Filterable Fields](#filterable-fields)).
 
 ## Migrations
 

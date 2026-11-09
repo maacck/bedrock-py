@@ -1,6 +1,6 @@
 """Declarative base model and CRUD mixin for SQLAlchemy ORM."""
 
-from typing import Any
+from typing import Any, Literal
 
 from sqlalchemy import event, inspect, or_, true
 from sqlalchemy.orm import DeclarativeBase, Session, object_session
@@ -54,10 +54,18 @@ class BedrockModel(DeclarativeBase, CrudMixin):
     * ``__search_op__`` — SQLAlchemy-compatible operator string applied to
       each searchable column (default: ``"ilike"``).  The query term is
       wrapped in ``%…%`` for pattern operators (``ilike``, ``like``).
+    * ``__filterable_fields__`` — names that ``filter_specs``, ``sort_key``,
+      and ``group_by`` may reference: columns, hybrids, association proxies,
+      and relationships (each hop of a dotted path is checked against its own
+      model). Primary keys are always allowed. Default: empty, so only
+      primary keys are filterable. ``"__all__"`` turns the check off for this
+      model when the application validates field names before querying;
+      related models reached through it keep their own setting.
     """
 
     __abstract__ = True
     __searchable_columns__: list[str] = []
+    __filterable_fields__: list[str] | Literal["__all__"] = []
     __search_op__: str = "ilike"
 
     @property

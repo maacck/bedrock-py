@@ -335,6 +335,7 @@ from sqlalchemy import Column, String, Integer
 
 class Product(BedrockModel):
     __tablename__ = "products"
+    __filterable_fields__ = ["name", "price"]
 
     id = Column(Integer, primary_key=True)
     name = Column(String(100), nullable=False)
@@ -361,6 +362,27 @@ BedrockModel 会监听 `init` 事件，并在构造函数结束前应用列默�
 ## 查询构建器
 
 `search_filter_sort_paginate` 函数可构建带有过滤、排序、分页和自动 join 的查询。它返回一个包含 `items`、`total` 和 `page_info` 的字典。
+
+### 可过滤字段
+
+`filter_specs`、`sort_key` 和 `group_by` 通常来自客户端，因此只能引用模型公开的字段。主键始终可用；其他列、hybrid 属性、association proxy 和关系都必须列在 `__filterable_fields__` 中：
+
+```python
+class Order(BedrockModel):
+    __tablename__ = "orders"
+    __filterable_fields__ = ["status", "customer"]  # "customer" is a relationship
+
+
+class Customer(BedrockModel):
+    __tablename__ = "customers"
+    __filterable_fields__ = ["name"]  # password_hash stays hidden
+```
+
+- 点号或冒号路径的每一跳都按所在模型检查：`customer.name` 需要 `Order` 列出 `customer`，`Customer` 列出 `name`。
+- `count_pk` 必须是主键。
+- 其他名称会抛出 `BadFilterFormatError`（"Field `x` is not filterable on Order"）。隐藏字段和不存在的字段抛出相同的错误，客户端无法借此探测表结构。
+- 如果应用在调用查询构建器之前已经校验了字段名，可以设置 `__filterable_fields__ = "__all__"`，关闭该模型的检查。通过路径访问的关联模型仍按各自的 `__filterable_fields__` 检查，需要时也给它们设置 `"__all__"`。使用 `"__all__"` 后，保护敏感列由应用自己负责。
+- `sqla_filters` 和 `q` 使用的 `__searchable_columns__` 由你的代码编写，不受此检查。
 
 ### 基本用法
 
@@ -505,6 +527,8 @@ result = search_filter_sort_paginate(
 # Colon notation: uses any() for collections, has() for scalars
 {"field": "category:name", "op": "eq", "value": "Electronics"}
 ```
+
+两种写法都要求 `Product.__filterable_fields__` 包含 `category`，且关联模型的 `__filterable_fields__` 包含 `name`（参见[可过滤字段](#可过滤字段)）。
 
 ## 迁移
 

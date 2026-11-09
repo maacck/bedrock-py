@@ -251,6 +251,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 class UserModel(BedrockModel):
     __tablename__ = "users"
+    __filterable_fields__ = ["name", "email", "is_active"]  # client-filterable; PKs always are
 
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(100))
@@ -284,6 +285,8 @@ result = search_filter_sort_paginate(
 ```
 
 In `async def` services, use `await asearch_filter_sort_paginate(db_session=db.asession, ...)` from the same module: same arguments, same return value.
+
+Client-supplied `filter_specs`, `sort_key`, and `group_by` may only name primary keys and fields listed in the model's `__filterable_fields__` (each dotted-path hop is checked on its own model); `count_pk` must be a primary key. Anything else raises `BadFilterFormatError`. Never add secret columns (password hashes, tokens) to `__filterable_fields__`. Use `__filterable_fields__ = "__all__"` only when the adapter already validates field names; it opts out that model alone.
 
 **Filter operators**: `is_null`, `is_not_null`, `==`/`eq`, `!=`/`neq`, `>`/`gt`, `<`/`lt`, `>=`/`ge`, `<=`/`le`, `like`, `ilike`, `not_ilike`, `in`, `not_in`, `between`, `has`, `any`, `not_any`, `text_search`, `fuzzy_search`. `limit` must be an integer from 1 to 1000 inclusive, even with `show_all=True`.
 

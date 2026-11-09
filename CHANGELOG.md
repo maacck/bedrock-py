@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking changes
+
+- **Database query builder**: client-controlled field names are restricted to an allowlist.
+  `filter_specs`, `sort_key`, and string `group_by` in `search_filter_sort_paginate()`,
+  `asearch_filter_sort_paginate()`, and `build_query()` may only reference primary keys and the
+  names a model lists in the new `__filterable_fields__` class attribute (columns, hybrids,
+  association proxies, relationships). Each hop of a dotted or colon path is checked against its
+  own model. `count_pk` must be a primary key. Any other name raises `BadFilterFormatError`
+  ("Field `x` is not filterable on Model"), the same error for hidden and missing fields.
+  Previously every column of every reachable model was filterable, so a client could read secret
+  columns (for example `owner.password_hash`) by observing result counts or order.
+  Migration: add `__filterable_fields__ = [...]` to each model queried with client-supplied
+  filters, sorting, or grouping; for dotted paths, list the relationship on the parent model and
+  the target field on the related model. Models whose callers already validate field names can
+  set `__filterable_fields__ = "__all__"` to keep the previous behavior for that model; related
+  models reached through it keep their own setting. Raw `sqla_filters` and
+  `__searchable_columns__` for `q` are unaffected.
+
 ### Added
 
 - **Testing**: runtime-level pytest fixtures in `bedrock.testing` (enabled with

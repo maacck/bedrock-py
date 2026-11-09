@@ -30,6 +30,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 class UserModel(BedrockModel):
     __tablename__ = "users"
+    __filterable_fields__ = ["name", "email", "is_active"]  # client-filterable; PKs always are
 
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(100))
@@ -331,7 +332,7 @@ result = await asearch_filter_sort_paginate(
 | `options` | `list` | `None` | SQLAlchemy query options (e.g. `joinedload`) |
 | `additional_select` | `list \| None` | `None` | Extra selected expressions; use `return_raw=True` to access them |
 | `show_all` | `bool` | `False` | Disable pagination (return all results) |
-| `count_pk` | `str \| None` | `None` | Column to count; defaults to the first primary key |
+| `count_pk` | `str \| None` | `None` | Primary key to count; defaults to the first primary key. Other names raise `BadFilterFormatError` |
 | `return_raw` | `bool` | `False` | Return raw rows instead of scalars |
 | `group_by` | `str \| None` | `None` | Column or expression to GROUP BY |
 | `auto_join_` | `bool` | `True` | Auto-join relationships from filters |
@@ -345,6 +346,8 @@ result = await asearch_filter_sort_paginate(
 ## Filter Syntax
 
 Filters are JSON-serializable dicts passed as `filter_specs` to `search_filter_sort_paginate`. A single dict or a list is accepted; list entries are combined with AND. The default operator is `eq`. Filter trees are limited to depth 50 and deeper trees raise `FilterDepthExceededError`.
+
+`filter_specs`, `sort_key`, and string `group_by` may only reference primary keys and names listed in the model's `__filterable_fields__` (columns, hybrids, association proxies, relationships). Each hop of a dotted or colon path is checked on its own model. Other names raise `BadFilterFormatError` with the same message whether the field is hidden or missing. Never list secret columns. `__filterable_fields__ = "__all__"` disables the check for that model only (related models keep their own setting); use it only when the caller already validates field names.
 
 ### Basic Filter
 
@@ -469,6 +472,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 class DepartmentModel(BedrockModel):
     __tablename__ = "departments"
+    __filterable_fields__ = ["name"]
 
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(100))
@@ -479,6 +483,7 @@ class DepartmentModel(BedrockModel):
 
 class UserModel(BedrockModel):
     __tablename__ = "users"
+    __filterable_fields__ = ["name", "department"]  # "department.name" also needs "name" on DepartmentModel
 
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(100))

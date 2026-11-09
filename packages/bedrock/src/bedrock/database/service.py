@@ -19,9 +19,9 @@ from sqlalchemy.sql.elements import ColumnElement
 
 from bedrock.database.base import BedrockModel
 
-from ..exc import InvalidQueryLimitError
+from ..exc import BadFilterFormatError, InvalidQueryLimitError
 from ..logging import get_logger
-from .filters import Field, Filter, init_filters
+from .filters import Field, Filter, init_filters, primary_key_names
 
 logger = get_logger(__name__)
 
@@ -120,8 +120,9 @@ def build_query(
             and optional ``isouter`` flag).
         options: SQLAlchemy loader options (e.g. ``selectinload``).
         show_all: When ``True``, ignore *limit* and *page*.
-        count_pk: Primary-key column name for the count query. Defaults
-            to the model's first primary key.
+        count_pk: Primary-key attribute name for the count query. Defaults
+            to the model's first primary key; any other name raises
+            :class:`~bedrock.exc.BadFilterFormatError`.
         group_by: Column name or expression to group results by.
         auto_join_: When ``True``, automatically join related models
             required by filter field paths.
@@ -155,7 +156,13 @@ def build_query(
             else:
                 sort_by.append(sort_field.asc())
     query = select
-    count_query = sa_select(sa_func.count(getattr(model, count_pk if count_pk else model.get_primary_keys()[0])))
+    if count_pk is None:
+        count_pk = model.get_primary_keys()[0]
+    elif count_pk not in primary_key_names(model):
+        raise BadFilterFormatError(
+            f"Field `{count_pk}` is not filterable on {model.__name__} as `count_pk`; use a primary key."
+        )
+    count_query = sa_select(sa_func.count(getattr(model, count_pk)))
     for j in join_models:
         if isinstance(j, tuple):
             if len(j) > 2:

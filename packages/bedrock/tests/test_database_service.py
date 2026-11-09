@@ -21,6 +21,7 @@ class InventoryItem(Base):
     """Minimal model used to exercise filter_specs query behavior."""
 
     __tablename__ = "inventory_items"
+    __filterable_fields__ = ["name", "category", "quantity", "is_active", "created_at"]
 
     id = Column(Integer, primary_key=True)
     name = Column(String(100), nullable=False)
@@ -28,6 +29,51 @@ class InventoryItem(Base):
     quantity = Column(Integer, nullable=False)
     is_active = Column(Boolean, nullable=False)
     created_at = Column(DateTime, nullable=True)
+
+
+class Owner(Base):
+    """Related model whose secret column must stay out of client filters."""
+
+    __tablename__ = "owners"
+    __filterable_fields__ = ["name"]
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String(50), nullable=False)
+    password_hash = Column(String(100), nullable=False)
+
+
+class Order(Base):
+    """Model exposing one relationship and one column to client filters."""
+
+    __tablename__ = "orders"
+    __filterable_fields__ = ["owner", "total"]
+
+    id = Column(Integer, primary_key=True)
+    owner_id = Column(Integer, ForeignKey("owners.id"), nullable=False)
+    total = Column(Integer, nullable=False)
+    internal_note = Column(String(100), nullable=True)
+    owner = relationship(Owner, backref="orders")
+
+
+class Note(Base):
+    """Model that declares no ``__filterable_fields__``."""
+
+    __tablename__ = "notes"
+
+    id = Column(Integer, primary_key=True)
+    body = Column(String(100), nullable=False)
+
+
+class OpenOrder(Base):
+    """Model that opts out of the allowlist because its caller validates field names."""
+
+    __tablename__ = "open_orders"
+    __filterable_fields__ = "__all__"
+
+    id = Column(Integer, primary_key=True)
+    owner_id = Column(Integer, ForeignKey("owners.id"), nullable=False)
+    internal_note = Column(String(100), nullable=True)
+    owner = relationship(Owner)
 
 
 @pytest.fixture
@@ -150,6 +196,7 @@ class SearchableItem(BedrockModel):
 
     __tablename__ = "searchable_items"
     __searchable_columns__ = ["name", "category"]
+    __filterable_fields__ = ["name", "category", "quantity", "tags"]
     __search_op__ = "like"
 
     id = Column(Integer, primary_key=True)
@@ -374,6 +421,86 @@ class TestFilterInputValidation:
         )
 
         assert result["page_info"]["limit"] == MAX_QUERY_LIMIT
+
+
+class TestFilterableFields:
+    """Client-controlled field names only reach primary keys and ``__filterable_fields__``."""
+
+    def test_allowlisted_relationship_path_filters(self, db_session):
+        db_session.add(Order(owner=Owner(name="ann", password_hash="s3cr"), total=5))
+        db_session.commit()
+
+        result = search_filter_sort_paginate(
+            db_session=db_session,
+            model=Order,
+            filter_specs={"field": "owner.name", "op": "eq", "value": "ann"},
+            sort_key="total",
+            count_pk="id",
+        )
+
+        assert result["total"] == 1
+
+    @pytest.mark.parametrize(
+        ("model", "kwargs"),
+        [
+            (Order, {"filter_specs": {"field": "owner.password_hash", "op": "like", "value": "s%"}}),
+            (Order, {"filter_specs": {"field": "owner:password_hash", "op": "eq", "value": "s3cr"}}),
+            (Order, {"filter_specs": {"field": "internal_note", "op": "eq", "value": "x"}}),
+            (Order, {"sort_key": "internal_note"}),
+            (Order, {"group_by": "internal_note"}),
+            (Order, {"count_pk": "internal_note"}),
+            (Owner, {"filter_specs": {"field": "orders.total", "op": "eq", "value": 5}}),
+            (Note, {"filter_specs": {"field": "body", "op": "eq", "value": "x"}}),
+        ],
+    )
+    def test_fields_outside_allowlist_are_rejected(self, db_session, model, kwargs):
+        with pytest.raises(BadFilterFormatError, match="not filterable"):
+            search_filter_sort_paginate(db_session=db_session, model=model, **{"count_pk": "id", **kwargs})
+
+    def test_primary_key_is_filterable_without_declaration(self, db_session):
+        db_session.add(Note(body="hidden"))
+        db_session.commit()
+
+        result = search_filter_sort_paginate(
+            db_session=db_session,
+            model=Note,
+            filter_specs={"field": "id", "op": "eq", "value": 1},
+            count_pk="id",
+        )
+
+        assert result["total"] == 1
+
+    def test_missing_field_is_indistinguishable_from_hidden_field(self, db_session):
+        with pytest.raises(BadFilterFormatError, match="not filterable"):
+            search_filter_sort_paginate(
+                db_session=db_session,
+                model=Order,
+                filter_specs={"field": "no_such_column", "op": "eq", "value": "x"},
+                count_pk="id",
+            )
+
+    def test_all_opts_the_model_out_of_the_allowlist(self, db_session):
+        db_session.add(OpenOrder(owner=Owner(name="ann", password_hash="s3cr"), internal_note="rush"))
+        db_session.commit()
+
+        result = search_filter_sort_paginate(
+            db_session=db_session,
+            model=OpenOrder,
+            filter_specs={"field": "internal_note", "op": "eq", "value": "rush"},
+            sort_key="owner_id",
+            count_pk="id",
+        )
+
+        assert result["total"] == 1
+
+    def test_all_does_not_open_related_models(self, db_session):
+        with pytest.raises(BadFilterFormatError, match="not filterable on Owner"):
+            search_filter_sort_paginate(
+                db_session=db_session,
+                model=OpenOrder,
+                filter_specs={"field": "owner.password_hash", "op": "like", "value": "s%"},
+                count_pk="id",
+            )
 
 
 @pytest_asyncio.fixture
