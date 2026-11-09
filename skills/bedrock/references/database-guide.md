@@ -339,7 +339,7 @@ result = await asearch_filter_sort_paginate(
 | `model` | `Type[BedrockModel]` | **required** | Target model class |
 | `limit` | `int` | `10` | Results per page; integer from 1 through 1000, excluding booleans |
 | `page` | `int` | `1` | Page number (1-indexed) |
-| `sort_key` | `str \| list[tuple[str, str]] \| None` | `None` | Column name or list of column/direction pairs |
+| `sort_key` | `SortKey \| None` (`str \| list[tuple[str, str \| None]]`) | `None` | Column name or list of column/direction pairs |
 | `sort_dir` | `str \| None` | `None` | Direction for a string `sort_key`; `"desc"` descends, otherwise ascending |
 | `q` | `str \| None` | `None` | Search term passed to `model.text_search()` |
 | `filter_specs` | `dict \| list[dict] \| None` | `None` | Filter specification or list (see Filter Syntax) |
@@ -350,12 +350,12 @@ result = await asearch_filter_sort_paginate(
 | `show_all` | `bool` | `False` | Disable pagination (return all results) |
 | `count_pk` | `str \| None` | `None` | Primary key to count; defaults to the first primary key. Other names raise `BadFilterFormatError` |
 | `return_raw` | `bool` | `False` | Return raw rows instead of scalars |
-| `group_by` | `str \| None` | `None` | Column or expression to GROUP BY |
+| `group_by` | `GroupBy \| None` (`str \| ColumnElement`) | `None` | Column name (checked against `__filterable_fields__`) or SQL expression to GROUP BY; `total` then counts groups |
 | `auto_join_` | `bool` | `True` | Auto-join relationships from filters |
 
 `limit` is validated even with `show_all=True`; invalid values raise `bedrock.exc.InvalidQueryLimitError`. With `show_all=True`, pagination is disabled but `page_info.has_more` is still calculated from `offset` and `limit`.
 
-`q` searches the model's `__searchable_columns__` using `__search_op__` (default `ilike`); an empty searchable-column list produces a no-op filter. Counts reflect joined rows, not distinct model instances. With `group_by`, the count query is grouped and only its first scalar is returned.
+`q` searches the model's `__searchable_columns__` using `__search_op__` (default `ilike`); an empty searchable-column list produces a no-op filter. Counts reflect joined rows, not distinct model instances. With `group_by`, `total` is the number of groups (the grouped query is counted as a subquery), and `0` when nothing matches.
 
 ---
 
