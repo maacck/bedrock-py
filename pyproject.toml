@@ -54,3 +54,13 @@ quote-style = "double"
 indent-style = "space"
 docstring-code-format = true
 docstring-code-line-length = 60
+
+[tool.pytest.ini_options]
+# Bare `uv run pytest` at the root runs every workspace suite. Listing the suites makes each
+# `tests/conftest.py` an initial conftest, which pytest requires for `pytest_plugins`.
+testpaths = [
+    "packages/bedrock/tests",
+    "packages/bedrock-cli/tests",
+    "integrations/fastapi/tests",
+    "integrations/celery/tests",
+]

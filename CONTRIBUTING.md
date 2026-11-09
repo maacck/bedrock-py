@@ -140,7 +140,10 @@ uv run ruff check --fix .
 ### Running Tests
 
 ```bash
-# Run all tests
+# Run every workspace suite (testpaths in the root pyproject.toml)
+uv run pytest
+
+# Run the core tests
 uv run pytest packages/bedrock/tests/
 
 # Run with verbose output
