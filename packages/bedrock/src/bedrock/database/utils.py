@@ -17,7 +17,7 @@ def get_model_by_class_name(class_name: str) -> type[DeclarativeBase] | None:
         The matching model class, or ``None`` if no model is registered
         under that name.
     """
-    from bedrock.database.base import BedrockModel
+    from .base import BedrockModel
 
     class_registry = _get_class_registry(BedrockModel)
     return class_registry.get(class_name, None)
@@ -32,7 +32,7 @@ def get_class_by_table(tablename: str) -> type[DeclarativeBase] | None:
     Returns:
         The model class whose ``__tablename__`` matches, or ``None``.
     """
-    from bedrock.database.base import BedrockModel
+    from .base import BedrockModel
 
     for c in _get_class_registry(BedrockModel).values():
         if hasattr(c, "__tablename__") and c.__tablename__ == tablename:

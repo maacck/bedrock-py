@@ -23,8 +23,8 @@ Every feature design or implementation plan must answer all of the following. If
 | 2 | **Adapter at the edge.** HTTP, worker, and CLI types stay out of core, `service.py`, and `entities.py`. Web-related work ships as a separate package, not `bedrock-core`. | |
 | 3 | **Convention.** It follows [`docs/bedrock-anatomy.md`](docs/bedrock-anatomy.md). A new parallel pattern needs an explicit reason in the design. | |
 | 4 | **Deepen before widen.** It tightens an existing contract (lifecycle, provider/adapter, cache, storage, metrics, database, testing) before adding a sibling API or contrib. | |
-| 5 | **Real caller.** A new contrib, or a new option on an existing contrib contract, has a caller that needs it, or it is infrastructure several applications would otherwise rewrite. A foundational core capability (a domain-agnostic primitive that applications and contribs build on, such as a provider catalog) does not need a caller inside this repository: the design names the downstream use case, and the capability ships with tests and docs. Speculative contrib and speculative contract options are out of vision. | |
-| 6 | **Core stays domain-agnostic.** Shipping it does not require Bedrock to know about a particular application's domain. | |
+| 5 | **Core stays domain-agnostic.** Shipping it does not require Bedrock to know about a particular application's domain. | |
+| 6 | **No reinvented wheel.** It has clear product value: it removes work applications would otherwise repeat. It does not duplicate a capability that Bedrock, the standard library, or an existing dependency (SQLAlchemy, Pydantic, redis-py, …) already provides; a wrapper is justified only when it adds a Bedrock convention the raw API lacks (lifecycle, provider/adapter, settings, testing). Name the existing alternative and what the proposal adds over it. | |
 
 Record the check results in the design or plan (a short table is enough). A plan that skips `VISION.md` is incomplete.
 
@@ -64,7 +64,8 @@ bedrock --help
 uv run ruff check .
 uv run ruff format .
 
-# Tests (pytest, 4 test files in packages/bedrock/tests/)
+# Tests (pytest; testpaths in root pyproject.toml)
+uv run pytest                                     # every workspace suite
 uv run pytest packages/bedrock/tests/
 uv run pytest integrations/fastapi/tests/ integrations/celery/tests/
 
@@ -129,5 +130,5 @@ Completion: no surface references a removed or renamed API, and every code examp
 - Root `pyproject.toml` is workspace coordinator only, not application package
 - `bedrock-cli` is planned/future work—current CLI lives in `packages/bedrock/src/bedrock/cli/`
 - Ruff config: `[tool.ruff]` in root `pyproject.toml`
-- Pytest: dev dependency, 4 test files, no conftest.py
+- Pytest: `[tool.pytest.ini_options]` in root `pyproject.toml` lists each package's `tests/` as `testpaths`; `packages/bedrock/tests/conftest.py` enables the `bedrock.testing` plugin
 - No CI/CD pipelines, no Docker, no deployment scripts

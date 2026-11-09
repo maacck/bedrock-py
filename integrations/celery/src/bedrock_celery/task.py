@@ -20,8 +20,8 @@ class BedrockTask(Task):
     ``bedrock.run_async()``) inside ``db.asession_scope()``. Either way the task never commits on its behalf:
     services work in ``db.session`` / ``db.asession`` and commit, and whatever is still uncommitted when the task
     ends is rolled back. Because a session is bound, ``db.session_scope()`` / ``db.asession_scope()`` raise
-    ``RuntimeError`` inside a task; use ``db.independent_session()`` / ``db.aindependent_session()`` for side
-    transactions.
+    ``SessionAlreadyBoundError`` inside a task; use ``db.independent_session()`` / ``db.aindependent_session()``
+    for side transactions.
     """
 
     _runs_async: ClassVar[bool] = False

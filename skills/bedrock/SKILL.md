@@ -7,7 +7,7 @@ description: >
   debugging module lifecycle issues, writing bootstrap hooks, configuring database migrations,
   writing tests for Bedrock modules, or building applications on top of Bedrock. Trigger on: "python project dependencies contains 'bedrock-py'", "working on a Bedrock module", "writing a manifest.yaml", "using bedrock CLI commands", "testing a Bedrock module"
 metadata:
-  bedrock-core: "0.3.2"
+  bedrock-core: "0.3.3"
 ---
 
 # Bedrock Application Development
@@ -266,6 +266,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 class UserModel(BedrockModel):
     __tablename__ = "users"
+    __filterable_fields__ = ["name", "email", "is_active"]  # client-filterable; PKs always are
 
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(100))
@@ -297,6 +298,10 @@ result = search_filter_sort_paginate(
 )
 # Returns: {"items": [...], "total": N, "page_info": {"page": 1, "limit": 10, "has_more": True}}
 ```
+
+In `async def` services, use `await asearch_filter_sort_paginate(db_session=db.asession, ...)` from the same module: same arguments, same return value.
+
+Client-supplied `filter_specs`, `sort_key`, and `group_by` may only name primary keys and fields listed in the model's `__filterable_fields__` (each dotted-path hop is checked on its own model); `count_pk` must be a primary key. Anything else raises `BadFilterFormatError`. Never add secret columns (password hashes, tokens) to `__filterable_fields__`. Use `__filterable_fields__ = "__all__"` only when the adapter already validates field names; it opts out that model alone.
 
 **Filter operators**: `is_null`, `is_not_null`, `==`/`eq`, `!=`/`neq`, `>`/`gt`, `<`/`lt`, `>=`/`ge`, `<=`/`le`, `like`, `ilike`, `not_ilike`, `in`, `not_in`, `between`, `has`, `any`, `not_any`, `text_search`, `fuzzy_search`. `limit` must be an integer from 1 to 1000 inclusive, even with `show_all=True`.
 
@@ -497,6 +502,7 @@ Async tests: `await bedrock.asetup(...)` and `await bedrock_runtime.registry.ash
 4. **Don't recursively call `mark_ready()` or `shutdown()`** from lifecycle hooks or signal receivers
 5. **Don't register extensions via import-time side effects or accept import paths from requests** — register trusted paths in `on_load`
 6. **Don't hand-roll test isolation** — no `monkeypatch.setattr(lifecycle, "apps", ...)`, `db.set_session()` rollback fixtures, or hand-written packages on `sys.path`; use `bedrock_runtime`, `db_session`, and `module_factory`
+7. **Don't read `db.session` / `db.asession` without a bound session** — it raises `SessionNotBoundError`; services only read it, entry points bind it with `with db.session_scope():` / `@db.session_scope()` (async: `asession_scope`) or an integration that binds one per request or task; tests call such services inside `with db.session_scope():` (rolled back by `db_session`)
 
 ## Commands Reference
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -15,12 +15,12 @@ from bedrock.testing.modules import ModuleFactory
 from typer.testing import CliRunner
 
 
-def _revision_a(name: str) -> str:
+def _revision_a(name: str, rev: str = "mak111") -> str:
     """Root revision for the *name* branch."""
 
     return f'''"""init
 
-Revision ID: mak111a
+Revision ID: {rev}a
 Revises:
 Create Date: 2026-01-01
 
@@ -29,7 +29,7 @@ Create Date: 2026-01-01
 from alembic import op
 import sqlalchemy as sa
 
-revision = "mak111a"
+revision = "{rev}a"
 down_revision = None
 branch_labels = ("{name}",)
 depends_on = None
@@ -44,13 +44,13 @@ def downgrade() -> None:
 '''
 
 
-def _revision_b(name: str) -> str:
+def _revision_b(name: str, rev: str = "mak111") -> str:
     """Second revision for the *name* branch."""
 
     return f'''"""follow
 
-Revision ID: mak111b
-Revises: mak111a
+Revision ID: {rev}b
+Revises: {rev}a
 Create Date: 2026-01-02
 
 """
@@ -58,8 +58,8 @@ Create Date: 2026-01-02
 from alembic import op
 import sqlalchemy as sa
 
-revision = "mak111b"
-down_revision = "mak111a"
+revision = "{rev}b"
+down_revision = "{rev}a"
 branch_labels = None
 depends_on = None
 
@@ -110,7 +110,7 @@ def _manager(url: str, lock_timeout: float = 30) -> MigrationsManager:
     return MigrationsManager(registry=ModuleRegistry(), database_url=url, lock_timeout=lock_timeout)
 
 
-def _write_orders_app(factory: ModuleFactory, name: str) -> str:
+def _write_orders_app(factory: ModuleFactory, name: str, rev: str = "mak111") -> str:
     """Create an importable app with two revisions on one branch."""
 
     factory(
@@ -126,8 +126,8 @@ def _write_orders_app(factory: ModuleFactory, name: str) -> str:
     )
     migrations = factory.root / name / "migrations"
     migrations.mkdir()
-    (migrations / "mak111a_init.py").write_text(_revision_a(name), encoding="utf-8")
-    (migrations / "mak111b_follow.py").write_text(_revision_b(name), encoding="utf-8")
+    (migrations / f"{rev}a_init.py").write_text(_revision_a(name, rev), encoding="utf-8")
+    (migrations / f"{rev}b_follow.py").write_text(_revision_b(name, rev), encoding="utf-8")
     return name
 
 
@@ -223,7 +223,7 @@ class TestMigrationLockSelection:
             ("upgrade", "mak111_head@head"),
             "exit",
             "enter",
-            ("downgrade", "-1"),
+            ("downgrade", "mak111_head@-1"),
             "exit",
         ]
 
@@ -326,3 +326,116 @@ class TestDbCheck:
             with sqlite3.connect(db_path) as connection:
                 tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
             assert "alembic_version" not in tables
+
+
+def _sqlite_rows(db_path: Path, query: str) -> set[str]:
+    """Return the first column of *query* run against *db_path*."""
+
+    with sqlite3.connect(db_path) as connection:
+        return {row[0] for row in connection.execute(query)}
+
+
+def _versions(db_path: Path) -> set[str]:
+    return _sqlite_rows(db_path, "SELECT version_num FROM alembic_version")
+
+
+def _tables(db_path: Path) -> set[str]:
+    return _sqlite_rows(db_path, "SELECT name FROM sqlite_master WHERE type = 'table'")
+
+
+@pytest.fixture
+def populate(module_factory: ModuleFactory) -> Iterator[Callable[..., ModuleRegistry]]:
+    """Write orders apps as ``(name, revision prefix)`` pairs and return a populated registry."""
+
+    names: list[str] = []
+
+    def _populate(*apps: tuple[str, str]) -> ModuleRegistry:
+        created = [_write_orders_app(module_factory, name, rev) for name, rev in apps]
+        names.extend(created)
+        registry = ModuleRegistry()
+        registry.populate(created)
+        return registry
+
+    yield _populate
+    from bedrock.database.base import BedrockModel
+
+    for name in names:
+        table = BedrockModel.metadata.tables.get(name)
+        if table is not None:
+            BedrockModel.metadata.remove(table)
+
+
+class TestMigrationTargets:
+    """upgrade and downgrade only move the requested app's branch."""
+
+    @pytest.fixture
+    def two_apps(self, populate: Callable[..., ModuleRegistry], tmp_path: Path) -> tuple[MigrationsManager, Path]:
+        registry = populate(("sec02_a", "sec02a"), ("sec02_b", "sec02b"))
+        db_path = tmp_path / "two.db"
+        manager = MigrationsManager(registry, _database_url(db_path))
+        manager.upgrade("sec02_a")
+        manager.upgrade("sec02_b")
+        return manager, db_path
+
+    def test_downgrade_to_base_leaves_other_branches(self, two_apps: tuple[MigrationsManager, Path]) -> None:
+        manager, db_path = two_apps
+
+        manager.downgrade("sec02_a", "base")
+
+        assert _versions(db_path) == {"sec02bb"}
+        assert "sec02_b" in _tables(db_path)
+        assert "sec02_a" not in _tables(db_path)
+
+    def test_relative_downgrade_moves_only_the_app_branch(self, two_apps: tuple[MigrationsManager, Path]) -> None:
+        manager, db_path = two_apps
+
+        manager.downgrade("sec02_a", "-1")
+
+        assert _versions(db_path) == {"sec02aa", "sec02bb"}
+
+    @pytest.mark.parametrize(
+        ("method", "target"),
+        [
+            ("downgrade", "sec02ba"),
+            ("downgrade", "sec02_b@base"),
+            ("upgrade", "heads"),
+            ("upgrade", "sec02bb"),
+            ("downgrade", "sec02_a@sec02ba"),
+            ("upgrade", "sec02_a@sec02bb"),
+        ],
+    )
+    def test_targets_outside_the_app_branch_are_rejected(
+        self, two_apps: tuple[MigrationsManager, Path], method: str, target: str
+    ) -> None:
+        manager, db_path = two_apps
+
+        with pytest.raises(MigrationError):
+            getattr(manager, method)("sec02_a", target)
+
+        assert _versions(db_path) == {"sec02ab", "sec02bb"}
+
+
+def test_percent_encoded_database_url_reaches_alembic(populate: Callable[..., ModuleRegistry], tmp_path: Path) -> None:
+    """URL-encoded characters (as in an encoded password) survive Alembic's config interpolation."""
+
+    registry = populate(("sec03_app", "sec03"))
+    db_path = tmp_path / "encoded.db"
+
+    MigrationsManager(registry, f"{_database_url(db_path)}?timeout=%32%30").upgrade("sec03_app")
+
+    assert _versions(db_path) == {"sec03b"}
+
+
+def test_unreadable_database_is_an_error_not_an_empty_branch(
+    populate: Callable[..., ModuleRegistry], tmp_path: Path
+) -> None:
+    """A failed read of applied revisions must not look like a branch that was never applied."""
+
+    registry = populate(("sec10_app", "sec10"))
+    manager = MigrationsManager(registry, _database_url(tmp_path / "missing" / "app.db"))
+
+    with pytest.raises(MigrationError):
+        manager.uninstall("sec10_app")
+    with pytest.raises(MigrationError):
+        manager.ensure_schema("sec10_app")
+    assert manager.check("sec10_app")[0].state == "unknown"

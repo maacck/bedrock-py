@@ -4,7 +4,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from bedrock.database import db
+from bedrock.database import SessionNotBoundError, db
 from bedrock.database.config import DbSettings
 from bedrock.database.manager import DatabaseManager, DatabaseNotConfiguredError
 from bedrock.database.session_factory import _current_async_db_session, _current_db_session
@@ -41,8 +41,10 @@ def test_sync_commit_is_rolled_back_and_factory_restored(tmp_path: Path) -> None
             with manager.session_scope() as service:
                 service.execute(text("INSERT INTO items VALUES ('service')"))
             assert session.scalar(text("SELECT count(*) FROM items")) == 1
-            assert manager.session.scalar(text("SELECT count(*) FROM items")) == 1
-            manager.clear_session()
+            with pytest.raises(SessionNotBoundError):
+                _ = manager.session
+            with manager.session_scope() as service:
+                assert service.scalar(text("SELECT count(*) FROM items")) == 1
             with manager.independent_session() as independent:
                 independent.execute(text("INSERT INTO items VALUES ('independent')"))
             assert session.scalar(text("SELECT count(*) FROM items")) == 2
@@ -88,8 +90,10 @@ async def test_async_commit_is_rolled_back_and_factory_restored(tmp_path: Path) 
             async with manager.asession_scope() as service:
                 await service.execute(text("INSERT INTO items VALUES ('service')"))
             assert await session.scalar(text("SELECT count(*) FROM items")) == 1
-            assert await manager.asession.scalar(text("SELECT count(*) FROM items")) == 1
-            await manager._async_session_factory.aclear_session()
+            with pytest.raises(SessionNotBoundError):
+                _ = manager.asession
+            async with manager.asession_scope() as service:
+                assert await service.scalar(text("SELECT count(*) FROM items")) == 1
             async with manager.aindependent_session() as independent:
                 await independent.execute(text("INSERT INTO items VALUES ('independent')"))
             assert await session.scalar(text("SELECT count(*) FROM items")) == 2
@@ -141,5 +145,8 @@ def initialized_db(tmp_path: Path) -> Iterator[None]:
 
 def test_db_session_fixture(initialized_db: None, request: pytest.FixtureRequest) -> None:
     session = request.getfixturevalue("db_session")
-    assert session is not db.session
-    assert db.session.scalar(text("SELECT 1")) == 1
+    with pytest.raises(SessionNotBoundError):
+        _ = db.session
+    with db.session_scope() as service:
+        assert service is not session
+        assert service.scalar(text("SELECT 1")) == 1

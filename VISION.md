@@ -20,7 +20,7 @@ The shape is borrowed from Django and Odoo: **applications are modules**, and a 
 
 - Boot a framework-agnostic module runtime (`bedrock.setup()`).
 - Organize business modules by convention instead of inventing directories and load order.
-- Reuse cross-application infrastructure through first-party contrib (cache, storage, metrics; further contrib is abstracted from real applications, not pre-built as a full batteries suite).
+- Reuse cross-application infrastructure through first-party contrib (cache, storage, metrics; further contrib is chosen for its product value to applications, and never re-implements what Python, SQLAlchemy, or another dependency already provides).
 - Run the same business module behind a web adapter, a worker, or a CLI without changing its service layer.
 
 ## What it is not

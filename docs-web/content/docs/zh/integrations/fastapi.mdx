@@ -199,7 +199,7 @@ async def create_item(body: ItemIn, audit: RequestAudit = Depends(get_audit)) ->
 
 **与 Bedrock 其他地方一样，由 service 负责事务。**service 使用已绑定的 session 并自己提交。中间件不会提交；请求结束时仍未提交的内容（例如 service 在提交前抛出异常）会被回滚。
 
-- **不要在 service 中开启 `db.session_scope()` 或 `db.asession_scope()`。**请求内已经绑定了 session，它们会抛出 `RuntimeError`。没有中间件的 worker、CLI 命令和脚本自己开启作用域，再调用同一个 service。
+- **不要在 service 中开启 `db.session_scope()` 或 `db.asession_scope()`。**请求内已经绑定了 session，它们会抛出 `SessionAlreadyBoundError`。没有中间件的 worker、CLI 命令和脚本自己开启作用域，再调用同一个 service。
 - **每次提交都是最终的。**一个请求调用多个各自提交的 service 时，后面的出错不会撤销前面已提交的内容。多个写入必须一起成功或失败时，把它们放在同一个只提交一次的 service 方法中。
 - **没人提交的写入会被静默丢弃。**响应仍可能是成功。
 - **异步提交前先读取需要的数据。**提交会让已加载的属性过期，读取 `AsyncSession` 对象上已过期的属性会抛出 `MissingGreenlet`。像上面的 service 那样：先 flush，构造 entity，再提交。
@@ -209,7 +209,7 @@ async def create_item(body: ItemIn, audit: RequestAudit = Depends(get_audit)) ->
 - **两个中间件可以同时安装。**它们绑定各自独立的 session 和事务，因此通过 `db.session` 和 `db.asession` 的写入不构成一个原子操作。
 - 如果没有调用 `db.init()`，每个请求都会因 `DatabaseNotConfiguredError` 失败。首个异步请求会创建异步 engine，需要设置 `DATABASE_ASYNC_DRIVER`。
 
-session 必须由中间件绑定：同步依赖或端点自行创建 `db.session` 时，是在工作线程的复制上下文中创建的，下一个依赖会拿到不同的 session，请求结束时也没有代码关闭它。
+session 必须由中间件绑定。未安装中间件时，在依赖或端点中读取 `db.session` 或 `db.asession` 会抛出 `SessionNotBoundError`。
 
 ## 错误响应
 

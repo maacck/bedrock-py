@@ -132,16 +132,16 @@ The `db` singleton is a `DatabaseManager` instance. It owns the engine, session 
 |-------------------|-----------|-------------|
 | `db.init()` | `init(url: str \| None = None, settings: DbSettings \| None = None)` | Initialize engine and session factory. Call once at process start. |
 | `db.engine` | `property → Engine` | The SQLAlchemy engine. Raises `DatabaseNotConfiguredError` if not initialized. |
-| `db.session` | `property → Session` | The current context-local session. Creates one on first access within a context. |
+| `db.session` | `property → Session` | The session bound to the current context. Raises `SessionNotBoundError` when none is bound. |
 | `db.session_factory` | `property → SessionFactory` | The underlying session factory. |
 | `db.settings` | `property → DbSettings` | The resolved database settings. |
 | `db.set_session(session)` | `set_session(session: Session)` | Bind an existing session to the current execution context. |
 | `db.clear_session()` | `clear_session()` | Close and unbind the current context-local session. |
-| `db.session_scope()` | `contextmanager → Session` | Transactional scope with auto commit/rollback. Binds to context. |
+| `db.session_scope()` | `contextmanager → Session` | Transactional scope with auto commit/rollback. Binds to context. Also usable as a decorator. |
 | `db.independent_session()` | `contextmanager → Session` | Isolated transaction that does not bind to context. |
 | `db.aengine` | `property → AsyncEngine` | Async engine for the URL resolved by `init()`, with only the driver swapped for `DATABASE_ASYNC_DRIVER`. |
-| `db.asession` | `property → AsyncSession` | Current context-local async session. Separate context variable from `db.session`. |
-| `db.asession_scope()` | `async context manager → AsyncSession` | Async transactional scope with the same commit, rollback, and nesting rules as `session_scope()`. |
+| `db.asession` | `property → AsyncSession` | The async session bound to the current context. Separate context variable from `db.session`. Raises `SessionNotBoundError` when none is bound. |
+| `db.asession_scope()` | `async context manager → AsyncSession` | Async transactional scope with the same commit, rollback, and nesting rules as `session_scope()`. Also usable as a decorator on `async def`. |
 | `db.aindependent_session()` | `async context manager → AsyncSession` | Async transaction that does not bind `db.asession`. |
 | `db.close()` | `close()` | Dispose the sync engine. Leaves a built async engine usable. Safe to call twice. `init()` works again afterwards. |
 | `db.aclose()` | `async aclose()` | Dispose the async engine. Leaves the sync engine usable. Safe to call twice. |
@@ -150,27 +150,39 @@ The `db` singleton is a `DatabaseManager` instance. It owns the engine, session 
 
 Accessing `db.engine`, `db.session`, or `db.settings` before calling `db.init()` raises `DatabaseNotConfiguredError`. Always initialize the database before using any of these properties.
 
+Reading `db.session` or `db.asession` when no session is bound to the current context raises `SessionNotBoundError` (a `BedrockExc`). Nothing is created implicitly: open a scope at the entry point.
+
 ## Session Management
 
 Bedrock uses context-local sessions backed by a `ContextVar`. New async tasks inherit their creator's context, including any bound session; clear or establish separate bindings at task and request boundaries rather than sharing a session concurrently.
 
 ### How It Works
 
-The `SessionFactory` wraps SQLAlchemy's `sessionmaker`. When you access `db.session`, it checks the `ContextVar` for an existing session. If none exists, it creates one and stores it. Subsequent accesses within the same context return the same session.
+The `SessionFactory` wraps SQLAlchemy's `sessionmaker`. `db.session` returns the session stored in the `ContextVar` and never creates one. Something at the entry point binds it:
+
+| Entry point | Binds the session with |
+|-------------|------------------------|
+| Script, CLI command, custom worker, WebSocket handler, startup hook | `with db.session_scope():` or `@db.session_scope()` |
+| FastAPI HTTP request | `DbSessionMiddleware` / `AsyncDbSessionMiddleware` from `bedrock-fastapi` |
+| Test | `with db.session_scope():` in the test; the `db_session` fixture from `bedrock.testing` rolls it back |
+| Session managed by another framework | `db.set_session(...)` |
+
+Services read `db.session` and commit; they never open a scope themselves:
 
 ```python
 from bedrock.database import db
 
+# service.py
+def create_product(name: str) -> None:
+    db.session.add(Product(name=name))
+    db.session.commit()
+
+# entry point
 db.init()
+with db.session_scope():
+    create_product("Widget")
 
-# First access creates a session
-session = db.session
-session.add(Product(name="Widget"))
-session.commit()
-
-# Same session within the same context
-same_session = db.session
-assert session is same_session
+create_product("Gadget")  # raises SessionNotBoundError: no scope is open
 ```
 
 ### Transaction Scopes with `session_scope()`
@@ -201,7 +213,26 @@ except ValueError:
 - Binds the session to `ContextVar` so `db.session` works inside the block
 - Commits on clean exit, rolls back on any exception (including `BaseException`)
 - Always closes the session and resets the `ContextVar` on exit
-- Raises `RuntimeError` if called while a session is already bound (prevents nesting)
+- Raises `SessionAlreadyBoundError` (a `BedrockExc` that is also a `RuntimeError`) if called while a session is already bound (prevents nesting)
+
+### Decorating Entry Points
+
+`session_scope()` and `asession_scope()` also work as decorators. Every call opens a new scope, so each invocation gets its own session and transaction. The decorator can be applied before `db.init()`, because the database is only used when the function is called:
+
+```python
+from bedrock.database import db
+
+@db.session_scope()
+def import_products(path: str) -> None:
+    for name in read_names(path):
+        db.session.add(Product(name=name))
+
+@db.asession_scope()
+async def sync_inventory() -> None:
+    await refresh_stock(db.asession)
+```
+
+Note the parentheses: `@db.session_scope()`, not `@db.session_scope`. The function's return value passes through unchanged. Do not decorate a function that is called while a session is already bound, such as a service called from a request: the nested scope raises `SessionAlreadyBoundError`.
 
 ### Independent Sessions with `independent_session()`
 
@@ -275,42 +306,10 @@ from bedrock.database import db
 
 # Bind a session from an external source
 db.set_session(framework_session)
-
-# Now db.session returns the bound session
-product = db.session.query(Product).first()
-
-# Clean up when done
-db.clear_session()
-```
-
-### Clearing Sessions
-
-Always clear sessions when a request or task finishes to prevent stale data. `clear_session()` closes the session before unbinding:
-
-```python
-from bedrock.database import db
-
 try:
-    # Process request...
-    result = db.session.query(Product).all()
+    product = db.session.query(Product).first()
 finally:
-    db.clear_session()  # Closes session, then clears ContextVar
-```
-
-### SessionFactory as Context Manager
-
-`SessionFactory` itself can be used as a context manager. On exit, it closes and unbinds the current session:
-
-```python
-from bedrock.database import db
-
-db.init()
-
-with db.session_factory:
-    session = db.session
-    session.add(Product(name="Widget"))
-    session.commit()
-# Session is closed and unbound here
+    db.clear_session()  # Closes the session, then unbinds it
 ```
 
 ## BedrockModel
@@ -335,6 +334,7 @@ from sqlalchemy import Column, String, Integer
 
 class Product(BedrockModel):
     __tablename__ = "products"
+    __filterable_fields__ = ["name", "price"]
 
     id = Column(Integer, primary_key=True)
     name = Column(String(100), nullable=False)
@@ -362,6 +362,27 @@ BedrockModel listens for the `init` event and applies column defaults before the
 
 The `search_filter_sort_paginate` function builds queries with filtering, sorting, pagination, and automatic joins. It returns a dictionary with `items`, `total`, and `page_info`.
 
+### Filterable Fields
+
+`filter_specs`, `sort_key`, and `group_by` usually come from the client, so they may only reference fields the model exposes. Primary keys are always allowed; every other column, hybrid, association proxy, or relationship must be listed in `__filterable_fields__`:
+
+```python
+class Order(BedrockModel):
+    __tablename__ = "orders"
+    __filterable_fields__ = ["status", "customer"]  # "customer" is a relationship
+
+
+class Customer(BedrockModel):
+    __tablename__ = "customers"
+    __filterable_fields__ = ["name"]  # password_hash stays hidden
+```
+
+- Each hop of a dotted or colon path is checked against its own model: `customer.name` needs `customer` on `Order` and `name` on `Customer`.
+- `count_pk` must be a primary key.
+- Any other name raises `BadFilterFormatError` ("Field `x` is not filterable on Order"). Hidden and missing fields raise the same error, so clients cannot probe the schema.
+- If the application already validates field names before they reach the query builder, set `__filterable_fields__ = "__all__"` to turn the check off for that model. Related models reached through a path still apply their own `__filterable_fields__`, so set `"__all__"` on them too if needed. With `"__all__"`, guarding secret columns is the application's job.
+- `sqla_filters` and the `__searchable_columns__` used by `q` are written by your code and are not checked.
+
 ### Basic Usage
 
 ```python
@@ -383,6 +404,24 @@ result["items"]     # List of Product instances
 result["total"]     # Total count matching filters
 result["page_info"] # Pagination metadata
 ```
+
+### Async Sessions
+
+In `async def` services, call `asearch_filter_sort_paginate` with `db.asession`. It takes the same arguments and returns the same dictionary:
+
+```python
+from bedrock.database.service import asearch_filter_sort_paginate
+
+result = await asearch_filter_sort_paginate(
+    db_session=db.asession,
+    model=Product,
+    filter_specs=[{"field": "name", "op": "ilike", "value": "%widget%"}],
+    page=1,
+    limit=20,
+)
+```
+
+Async sessions cannot lazy-load relationships. Load the relationships you read on `result["items"]` through `options`, for example `options=[selectinload(Product.tags)]`.
 
 ### Filter Operators
 
@@ -467,7 +506,7 @@ The `page_info` dictionary includes:
 
 | Key | Description |
 |-----|-------------|
-| `total` | Total matching records |
+| `total` | Total matching records; with `group_by`, the number of groups |
 | `limit` | Items per page |
 | `offset` | Current offset |
 | `page` | Current page number |
@@ -487,6 +526,8 @@ Filter across relationships using dot notation for joins or colon notation for `
 # Colon notation: uses any() for collections, has() for scalars
 {"field": "category:name", "op": "eq", "value": "Electronics"}
 ```
+
+Both paths require `category` in `Product.__filterable_fields__` and `name` in the related model's `__filterable_fields__` (see [Filterable Fields](#filterable-fields)).
 
 ## Migrations
 
@@ -542,57 +583,28 @@ A timeout raises `MigrationError`. SQLite has no shared lock in this manager.
 
 `bedrock db check <app>` prints the current and head revisions for the app and for every other installed app that already has migration scripts. It does not change the database and does not create the Alembic version table. The process exits with status 1 when any reported branch is `behind` or `unknown`. `unknown` includes a database that has never been migrated. Use the command as a deploy gate before serving traffic. See [CLI Reference — Database Commands](/docs/guides/cli#database-commands-bedrock-db).
 
-## Model Observer
+## Model Events
 
-The observer system hooks into SQLAlchemy's `before_flush` event to invoke callbacks when models are inserted, updated, or deleted.
-
-### Event Identifiers
-
-| Identifier | Fires When |
-|------------|------------|
-| `on_insert` | A new instance is added to the session |
-| `on_update` | An existing instance is modified |
-| `on_delete` | An instance is marked for deletion |
-
-### Registering Observers
-
-Use the `@observes_model` decorator:
+Bedrock does not wrap ORM events. Register SQLAlchemy listeners directly and pick the phase you need:
 
 ```python
-from bedrock.database import BedrockModel
-from bedrock.database.observer import observes_model, observer
-from sqlalchemy import Column, Integer, String
+from sqlalchemy import event
+from sqlalchemy.orm import Session
 
-class Catalog(BedrockModel):
-    __tablename__ = "catalog"
-    id = Column(Integer, primary_key=True)
-    name = Column(String(100))
+# After the INSERT ran: the primary key is set. Use `connection` for extra SQL; do not modify the session.
+@event.listens_for(Catalog, "after_insert", propagate=True)
+def catalog_inserted(mapper, connection, target):
+    ...
 
-@observes_model(Catalog, "on_insert", "on_delete")
-def log_catalog_changes(session, target, identifier):
-    print(f"Catalog {target.id} was {identifier}")
+# Before the flush: objects added to the session here are flushed in the same transaction.
+@event.listens_for(Session, "before_flush")
+def audit_catalog(session, flush_context, instances):
+    for obj in session.new:
+        if isinstance(obj, Catalog):
+            session.add(AuditLog(action="catalog_created"))
 ```
 
-The callback receives three arguments: the session, the model instance, and the event identifier string.
-
-### Custom Observer Instances
-
-Pass a custom `ModelObserver` via the `observer` keyword:
-
-```python
-from bedrock.database.observer import ModelObserver
-
-custom_observer = ModelObserver()
-
-@observes_model(Catalog, "on_insert", observer=custom_observer)
-def handle_insert(session, target, identifier):
-    # Custom observers register their own SQLAlchemy listener; callbacks are stored on the model
-    pass
-```
-
-### Weak References
-
-Observer callbacks are stored as weak references; bound methods use a `WeakMethod` wrapper. Keep callbacks and their owning objects alive while registered: dead weak references are not safely skipped during dispatch.
+`after_update` / `after_delete` (and the `before_*` variants) work the same way. `propagate=True` also covers subclasses. See SQLAlchemy's [ORM events](https://docs.sqlalchemy.org/en/20/orm/events.html) for every hook and its restrictions.
 
 ## Architecture
 
@@ -608,7 +620,6 @@ bedrock/database/
 ├── manager.py             # DatabaseManager singleton (db)
 ├── migrations/            # Alembic env.py and script.py.mako
 ├── migrations_manager.py  # Per-module Alembic orchestration
-├── observer.py            # Model lifecycle observer
 ├── service.py             # search_filter_sort_paginate query builder
 ├── session_factory.py     # Context-local sessions via ContextVar
 └── utils.py               # Model registry helpers
@@ -620,7 +631,9 @@ bedrock/database/
 
 **Don't access `db.session` before initialization.** This raises `DatabaseNotConfiguredError`. Always call `db.init()` first.
 
-**Don't forget to clear sessions.** Stale sessions hold database connections and can return outdated data. Use `db.clear_session()` at the end of each request or task.
+**Don't read `db.session` outside a scope.** It raises `SessionNotBoundError`. Bind a session at the entry point with `db.session_scope()` or the FastAPI middleware; services only read it.
+
+**Don't forget to clear sessions you bind yourself.** A session bound with `db.set_session()` stays bound until `db.clear_session()`. Call it in a `finally` block.
 
 **Don't put HTTP types in service or model layers.** Request and Response objects belong at adapter boundaries, not in business logic.
 
