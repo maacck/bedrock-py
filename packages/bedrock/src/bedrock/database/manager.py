@@ -172,7 +172,12 @@ class DatabaseManager:
 
     @property
     def session(self) -> Session:
-        """Return the current context-local SQLAlchemy session."""
+        """Return the SQLAlchemy session bound to the current context.
+
+        Raises:
+            DatabaseNotConfiguredError: If :meth:`init` has not been called.
+            SessionNotBoundError: If no session is bound; open one with :meth:`session_scope`.
+        """
 
         if self._session_factory is None:
             raise DatabaseNotConfiguredError("Database is not initialized. Call db.init(...) before using db.session.")
@@ -180,13 +185,18 @@ class DatabaseManager:
 
     @property
     def asession(self) -> AsyncSession:
-        """Return the current context-local async session."""
+        """Return the async session bound to the current context.
+
+        Raises:
+            DatabaseNotConfiguredError: If :meth:`init` has not been called.
+            SessionNotBoundError: If no async session is bound; open one with :meth:`asession_scope`.
+        """
 
         return self._ensure_async().session
 
     @property
     def session_factory(self) -> SessionFactory:
-        """Return the current context-local SQLAlchemy session."""
+        """Return the synchronous session factory."""
 
         if self._session_factory is None:
             raise DatabaseNotConfiguredError("Database is not initialized. Call db.init(...) before using db.session.")

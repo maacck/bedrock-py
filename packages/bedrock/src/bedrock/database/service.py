@@ -13,19 +13,20 @@ from sqlalchemy import (
 from sqlalchemy import (
     select as sa_select,
 )
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.session import Session
 from sqlalchemy.sql.elements import ColumnElement
 
-from bedrock.database.base import BedrockModel
-
-from ..exc import InvalidQueryLimitError
-from ..logging import get_logger
-from .filters import Field, Filter, init_filters
-
-logger = get_logger(__name__)
+from ..exc import BadFilterFormatError, InvalidQueryLimitError
+from .base import BedrockModel
+from .filters import BooleanFilter, Field, Filter, init_filters, primary_key_names
 
 FilterSpec = dict[str, Any]
 FilterSpecs = FilterSpec | list[FilterSpec]
+type SortKey = str | list[tuple[str, str | None]]
+"""A column name, or ``(column, direction)`` pairs applied in order."""
+type GroupBy = str | ColumnElement[Any]
+"""A column name checked against ``__filterable_fields__``, or a SQL expression."""
 
 MAX_QUERY_LIMIT = 1000
 
@@ -37,7 +38,7 @@ def _validate_query_limit(limit: int) -> int:
     return limit
 
 
-def build_filters(model: type[BedrockModel], filters: list[Filter]) -> ColumnElement[bool]:
+def build_filters(model: type[BedrockModel], filters: list[Filter | BooleanFilter]) -> ColumnElement[bool]:
     """Combine a list of Filter objects into a single SQLAlchemy AND clause.
 
     Args:
@@ -55,7 +56,7 @@ def build_filters(model: type[BedrockModel], filters: list[Filter]) -> ColumnEle
     return and_(*_filters)
 
 
-def build_auto_joins(model: type[BedrockModel], filters: list[Filter]) -> list[tuple[Any, ...]]:
+def build_auto_joins(model: type[BedrockModel], filters: list[Filter | BooleanFilter]) -> list[tuple[Any, ...]]:
     """Collect distinct join arguments required by the given filters.
 
     Iterates over each filter, extracts the join arguments needed to
@@ -87,14 +88,14 @@ def build_query(
     page: int = 1,
     sort_dir: str | None = None,
     q: str | None = None,
-    sort_key: str | None = None,
+    sort_key: SortKey | None = None,
     sqla_filters: list[ColumnElement[bool]] | None = None,
     filter_specs: FilterSpecs | None = None,
     join_models: list[tuple[Any, ...]] | None = None,
     options: list[Any] | None = None,
     show_all: bool = False,
     count_pk: str | None = None,
-    group_by: str | None = None,
+    group_by: GroupBy | None = None,
     auto_join_: bool = True,
 ) -> tuple[Select, Select, list[ColumnElement[bool]]]:
     """Build a filtered, sorted, paginated SQLAlchemy query pair.
@@ -119,9 +120,11 @@ def build_query(
             and optional ``isouter`` flag).
         options: SQLAlchemy loader options (e.g. ``selectinload``).
         show_all: When ``True``, ignore *limit* and *page*.
-        count_pk: Primary-key column name for the count query. Defaults
-            to the model's first primary key.
-        group_by: Column name or expression to group results by.
+        count_pk: Primary-key attribute name for the count query. Defaults
+            to the model's first primary key; any other name raises
+            :class:`~bedrock.exc.BadFilterFormatError`.
+        group_by: Column name or expression to group results by. The count
+            query then counts groups, not rows.
         auto_join_: When ``True``, automatically join related models
             required by filter field paths.
 
@@ -144,17 +147,22 @@ def build_query(
     if sqla_filters is not None:
         filters.extend(sqla_filters)
     if sort_key is not None:
-        if isinstance(sort_key, str):
-            sort_key = [(sort_key, sort_dir)]
+        sort_pairs = [(sort_key, sort_dir)] if isinstance(sort_key, str) else sort_key
         sort_by = []
-        for _sort_key, _sort_dir in sort_key:
+        for _sort_key, _sort_dir in sort_pairs:
             sort_field = Field(model, _sort_key).get_sqlalchemy_field()
             if _sort_dir == "desc":
                 sort_by.append(sort_field.desc())
             else:
                 sort_by.append(sort_field.asc())
     query = select
-    count_query = sa_select(sa_func.count(getattr(model, count_pk if count_pk else model.get_primary_keys()[0])))
+    if count_pk is None:
+        count_pk = model.get_primary_keys()[0]
+    elif count_pk not in primary_key_names(model):
+        raise BadFilterFormatError(
+            f"Field `{count_pk}` is not filterable on {model.__name__} as `count_pk`; use a primary key."
+        )
+    count_query = sa_select(sa_func.count(getattr(model, count_pk)))
     for j in join_models:
         if isinstance(j, tuple):
             if len(j) > 2:
@@ -179,14 +187,54 @@ def build_query(
         else:
             group_by_clause = group_by
         query = query.group_by(group_by_clause)
-        count_query = count_query.group_by(group_by_clause)
 
     if limit > 0 and not show_all:
         query = query.offset(offset).limit(limit)
 
     count_query = count_query.where(and_(*filters))
+    if group_by is not None:
+        count_query = sa_select(sa_func.count()).select_from(count_query.group_by(group_by_clause).subquery())
     query = query.where(and_(*filters))
     return query, count_query, filters
+
+
+def _search_statements(
+    model: type[BedrockModel], additional_select: list[Any] | None, **build_kwargs: Any
+) -> tuple[Select, Select]:
+    """Build the data and count statements shared by the sync and async search helpers."""
+    select_fields = [model]
+    if additional_select is not None:
+        select_fields.extend(additional_select)
+    query, count_query, _ = build_query(select=sa_select(*select_fields), model=model, **build_kwargs)
+    return query, count_query
+
+
+def _search_result(
+    items: Any,
+    total_count: int,
+    *,
+    limit: int,
+    page: int,
+    q: str | None,
+    filter_specs: FilterSpecs | None,
+    show_all: bool,
+) -> dict[str, Any]:
+    """Shape executed search results into the ``items``/``total``/``page_info`` dictionary."""
+    offset = (page - 1) * limit if page > 1 else 0
+    return {
+        "items": items,
+        "total": total_count,
+        "page_info": {
+            "total": total_count,
+            "limit": limit,
+            "offset": offset,
+            "page": page,
+            "query": q or "",
+            "filters": filter_specs or [],
+            "paginated": not show_all,
+            "has_more": total_count > offset + limit,
+        },
+    }
 
 
 def search_filter_sort_paginate(
@@ -197,7 +245,7 @@ def search_filter_sort_paginate(
     page: int = 1,
     sort_dir: str | None = None,
     q: str | None = None,
-    sort_key: str | None = None,
+    sort_key: SortKey | None = None,
     sqla_filters: list[ColumnElement[bool]] | None = None,
     filter_specs: FilterSpecs | None = None,
     join_models: list[tuple[Any, ...]] | None = None,
@@ -206,7 +254,7 @@ def search_filter_sort_paginate(
     show_all: bool = False,
     count_pk: str | None = None,
     return_raw: bool = False,
-    group_by: str | None = None,
+    group_by: GroupBy | None = None,
     auto_join_: bool = True,
 ) -> dict[str, Any]:
     """Execute a search with filtering, sorting, and pagination in one call.
@@ -241,13 +289,9 @@ def search_filter_sort_paginate(
         metadata.
     """
     limit = _validate_query_limit(limit)
-    select_fields = [model]
-    if additional_select is not None:
-        select_fields.extend(additional_select)
-    offset = (page - 1) * limit if page > 1 else 0
-    query, count_query, filters = build_query(
-        select=sa_select(*select_fields),
-        model=model,
+    query, count_query = _search_statements(
+        model,
+        additional_select,
         limit=limit,
         page=page,
         sort_dir=sort_dir,
@@ -262,25 +306,84 @@ def search_filter_sort_paginate(
         auto_join_=auto_join_,
         show_all=show_all,
     )
-
     total_count: int = db_session.execute(count_query).scalar()
-    items = db_session.execute(query)
-    if return_raw:
-        items = items.all()
-    else:
-        items = items.scalars().all()
+    rows = db_session.execute(query)
+    items = rows.all() if return_raw else rows.scalars().all()
+    return _search_result(items, total_count, limit=limit, page=page, q=q, filter_specs=filter_specs, show_all=show_all)
 
-    return {
-        "items": items,
-        "total": total_count,
-        "page_info": {
-            "total": total_count,
-            "limit": limit,
-            "offset": offset,
-            "page": page,
-            "query": q or "",
-            "filters": filter_specs or [],
-            "paginated": not show_all,
-            "has_more": total_count > offset + limit,
-        },
-    }
+
+async def asearch_filter_sort_paginate(
+    *,
+    db_session: AsyncSession,
+    model: type[BedrockModel],
+    limit: int = 10,
+    page: int = 1,
+    sort_dir: str | None = None,
+    q: str | None = None,
+    sort_key: SortKey | None = None,
+    sqla_filters: list[ColumnElement[bool]] | None = None,
+    filter_specs: FilterSpecs | None = None,
+    join_models: list[tuple[Any, ...]] | None = None,
+    options: list[Any] | None = None,
+    additional_select: list[Any] | None = None,
+    show_all: bool = False,
+    count_pk: str | None = None,
+    return_raw: bool = False,
+    group_by: GroupBy | None = None,
+    auto_join_: bool = True,
+) -> dict[str, Any]:
+    """Asynchronous variant of :func:`search_filter_sort_paginate` for an ``AsyncSession``.
+
+    Takes the same arguments and returns the same dictionary; only ``db_session`` is an
+    :class:`~sqlalchemy.ext.asyncio.AsyncSession`, such as ``db.asession``. Relationships that the
+    caller reads on the returned items must be loaded eagerly through ``options`` (for example
+    ``selectinload``), because lazy loading is not available on async sessions.
+
+    Args:
+        db_session: Active SQLAlchemy async session.
+        model: The SQLAlchemy model class (or selectable) to query.
+        limit: Maximum number of results per page.
+        page: 1-based page number.
+        sort_dir: Sort direction — ``"asc"`` or ``"desc"``.
+        q: Optional free-text search string.
+        sort_key: Column name or list of ``(column, direction)`` tuples.
+        sqla_filters: Additional raw SQLAlchemy filter expressions.
+        filter_specs: Declarative filter specifications.
+        join_models: Explicit join specifications.
+        options: SQLAlchemy loader options.
+        additional_select: Extra selectables to include alongside the
+            model (e.g. computed columns).
+        show_all: When ``True``, ignore *limit* and *page*.
+        count_pk: Primary-key column name for the count query.
+        return_raw: When ``True``, return full row objects instead of
+            scalar results.
+        group_by: Column name or expression to group results by.
+        auto_join_: When ``True``, automatically join related models.
+
+    Returns:
+        A dictionary with keys ``"items"``, ``"total"``, and
+        ``"page_info"`` containing the query results and pagination
+        metadata.
+    """
+    limit = _validate_query_limit(limit)
+    query, count_query = _search_statements(
+        model,
+        additional_select,
+        limit=limit,
+        page=page,
+        sort_dir=sort_dir,
+        q=q,
+        sort_key=sort_key,
+        sqla_filters=sqla_filters,
+        filter_specs=filter_specs,
+        join_models=join_models,
+        options=options,
+        count_pk=count_pk,
+        group_by=group_by,
+        auto_join_=auto_join_,
+        show_all=show_all,
+    )
+    total_count: int = (await db_session.execute(count_query)).scalar()
+    rows = await db_session.execute(query)
+    items = rows.all() if return_raw else rows.scalars().all()
+    return _search_result(items, total_count, limit=limit, page=page, q=q, filter_specs=filter_specs, show_all=show_all)

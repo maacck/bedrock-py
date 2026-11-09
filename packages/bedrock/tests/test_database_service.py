@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import pytest
+import pytest_asyncio
 from bedrock.database.base import BedrockModel
 from bedrock.database.filters import MAX_FILTER_DEPTH, init_filters
-from bedrock.database.service import MAX_QUERY_LIMIT, search_filter_sort_paginate
+from bedrock.database.service import MAX_QUERY_LIMIT, asearch_filter_sort_paginate, search_filter_sort_paginate
 from bedrock.exc import BadFilterFormatError, FilterDepthExceededError, InvalidQueryLimitError
 from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, create_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, relationship, sessionmaker
 
 
@@ -19,6 +21,7 @@ class InventoryItem(Base):
     """Minimal model used to exercise filter_specs query behavior."""
 
     __tablename__ = "inventory_items"
+    __filterable_fields__ = ["name", "category", "quantity", "is_active", "created_at"]
 
     id = Column(Integer, primary_key=True)
     name = Column(String(100), nullable=False)
@@ -26,6 +29,51 @@ class InventoryItem(Base):
     quantity = Column(Integer, nullable=False)
     is_active = Column(Boolean, nullable=False)
     created_at = Column(DateTime, nullable=True)
+
+
+class Owner(Base):
+    """Related model whose secret column must stay out of client filters."""
+
+    __tablename__ = "owners"
+    __filterable_fields__ = ["name"]
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String(50), nullable=False)
+    password_hash = Column(String(100), nullable=False)
+
+
+class Order(Base):
+    """Model exposing one relationship and one column to client filters."""
+
+    __tablename__ = "orders"
+    __filterable_fields__ = ["owner", "total"]
+
+    id = Column(Integer, primary_key=True)
+    owner_id = Column(Integer, ForeignKey("owners.id"), nullable=False)
+    total = Column(Integer, nullable=False)
+    internal_note = Column(String(100), nullable=True)
+    owner = relationship(Owner, backref="orders")
+
+
+class Note(Base):
+    """Model that declares no ``__filterable_fields__``."""
+
+    __tablename__ = "notes"
+
+    id = Column(Integer, primary_key=True)
+    body = Column(String(100), nullable=False)
+
+
+class OpenOrder(Base):
+    """Model that opts out of the allowlist because its caller validates field names."""
+
+    __tablename__ = "open_orders"
+    __filterable_fields__ = "__all__"
+
+    id = Column(Integer, primary_key=True)
+    owner_id = Column(Integer, ForeignKey("owners.id"), nullable=False)
+    internal_note = Column(String(100), nullable=True)
+    owner = relationship(Owner)
 
 
 @pytest.fixture
@@ -142,12 +190,38 @@ class TestSearchFilterSortPaginate:
         assert [item.name for item in result["items"]] == ["charlie", "delta", "echo"]
         assert result["total"] == 3
 
+    def test_group_by_total_counts_groups(self, db_session):
+        """With group_by, total is the number of groups, and an empty result is 0 rather than None."""
+        grouped = search_filter_sort_paginate(
+            db_session=db_session,
+            model=InventoryItem,
+            filter_specs={"field": "is_active", "op": "eq", "value": True},
+            group_by="category",
+            count_pk="id",
+            limit=2,
+            return_raw=True,
+        )
+        empty = search_filter_sort_paginate(
+            db_session=db_session,
+            model=InventoryItem,
+            filter_specs={"field": "category", "op": "eq", "value": "none"},
+            group_by="category",
+            count_pk="id",
+        )
+
+        assert len(grouped["items"]) == 2
+        assert grouped["total"] == 3
+        assert grouped["page_info"]["has_more"] is True
+        assert empty["total"] == 0
+        assert empty["page_info"]["has_more"] is False
+
 
 class SearchableItem(BedrockModel):
     """Model with searchable columns configured via __searchable_columns__."""
 
     __tablename__ = "searchable_items"
     __searchable_columns__ = ["name", "category"]
+    __filterable_fields__ = ["name", "category", "quantity", "tags"]
     __search_op__ = "like"
 
     id = Column(Integer, primary_key=True)
@@ -372,3 +446,153 @@ class TestFilterInputValidation:
         )
 
         assert result["page_info"]["limit"] == MAX_QUERY_LIMIT
+
+
+class TestFilterableFields:
+    """Client-controlled field names only reach primary keys and ``__filterable_fields__``."""
+
+    def test_allowlisted_relationship_path_filters(self, db_session):
+        db_session.add(Order(owner=Owner(name="ann", password_hash="s3cr"), total=5))
+        db_session.commit()
+
+        result = search_filter_sort_paginate(
+            db_session=db_session,
+            model=Order,
+            filter_specs={"field": "owner.name", "op": "eq", "value": "ann"},
+            sort_key="total",
+            count_pk="id",
+        )
+
+        assert result["total"] == 1
+
+    @pytest.mark.parametrize(
+        ("model", "kwargs"),
+        [
+            (Order, {"filter_specs": {"field": "owner.password_hash", "op": "like", "value": "s%"}}),
+            (Order, {"filter_specs": {"field": "owner:password_hash", "op": "eq", "value": "s3cr"}}),
+            (Order, {"filter_specs": {"field": "internal_note", "op": "eq", "value": "x"}}),
+            (Order, {"sort_key": "internal_note"}),
+            (Order, {"group_by": "internal_note"}),
+            (Order, {"count_pk": "internal_note"}),
+            (Owner, {"filter_specs": {"field": "orders.total", "op": "eq", "value": 5}}),
+            (Note, {"filter_specs": {"field": "body", "op": "eq", "value": "x"}}),
+        ],
+    )
+    def test_fields_outside_allowlist_are_rejected(self, db_session, model, kwargs):
+        with pytest.raises(BadFilterFormatError, match="not filterable"):
+            search_filter_sort_paginate(db_session=db_session, model=model, **{"count_pk": "id", **kwargs})
+
+    def test_primary_key_is_filterable_without_declaration(self, db_session):
+        db_session.add(Note(body="hidden"))
+        db_session.commit()
+
+        result = search_filter_sort_paginate(
+            db_session=db_session,
+            model=Note,
+            filter_specs={"field": "id", "op": "eq", "value": 1},
+            count_pk="id",
+        )
+
+        assert result["total"] == 1
+
+    def test_missing_field_is_indistinguishable_from_hidden_field(self, db_session):
+        with pytest.raises(BadFilterFormatError, match="not filterable"):
+            search_filter_sort_paginate(
+                db_session=db_session,
+                model=Order,
+                filter_specs={"field": "no_such_column", "op": "eq", "value": "x"},
+                count_pk="id",
+            )
+
+    def test_all_opts_the_model_out_of_the_allowlist(self, db_session):
+        db_session.add(OpenOrder(owner=Owner(name="ann", password_hash="s3cr"), internal_note="rush"))
+        db_session.commit()
+
+        result = search_filter_sort_paginate(
+            db_session=db_session,
+            model=OpenOrder,
+            filter_specs={"field": "internal_note", "op": "eq", "value": "rush"},
+            sort_key="owner_id",
+            count_pk="id",
+        )
+
+        assert result["total"] == 1
+
+    def test_all_does_not_open_related_models(self, db_session):
+        with pytest.raises(BadFilterFormatError, match="not filterable on Owner"):
+            search_filter_sort_paginate(
+                db_session=db_session,
+                model=OpenOrder,
+                filter_specs={"field": "owner.password_hash", "op": "like", "value": "s%"},
+                count_pk="id",
+            )
+
+
+@pytest_asyncio.fixture
+async def async_session(tmp_path):
+    """Seed an aiosqlite session with the same rows as ``db_session``."""
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'paginate.db'}")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    session = async_sessionmaker(engine)()
+    session.add_all(
+        [
+            InventoryItem(name="alpha", category="fruit", quantity=5, is_active=True),
+            InventoryItem(name="bravo", category="vegetable", quantity=3, is_active=True),
+            InventoryItem(name="charlie", category="fruit", quantity=2, is_active=False),
+            InventoryItem(name="delta", category="grain", quantity=9, is_active=True),
+            InventoryItem(name="echo", category="fruit", quantity=7, is_active=False),
+        ]
+    )
+    await session.commit()
+    try:
+        yield session
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+class TestAsyncSearchFilterSortPaginate:
+    """Verify the AsyncSession variant returns the same shape as the sync helper."""
+
+    @pytest.mark.asyncio
+    async def test_filters_sorts_and_paginates(self, async_session: AsyncSession):
+        filter_specs = [{"field": "category", "op": "eq", "value": "fruit"}]
+
+        result = await asearch_filter_sort_paginate(
+            db_session=async_session,
+            model=InventoryItem,
+            filter_specs=filter_specs,
+            sort_key="name",
+            sort_dir="asc",
+            limit=2,
+            page=1,
+            count_pk="id",
+        )
+
+        assert [item.name for item in result["items"]] == ["alpha", "charlie"]
+        assert result["total"] == 3
+        assert result["page_info"] == {
+            "total": 3,
+            "limit": 2,
+            "offset": 0,
+            "page": 1,
+            "query": "",
+            "filters": filter_specs,
+            "paginated": True,
+            "has_more": True,
+        }
+
+    @pytest.mark.asyncio
+    async def test_return_raw_includes_additional_select(self, async_session: AsyncSession):
+        result = await asearch_filter_sort_paginate(
+            db_session=async_session,
+            model=InventoryItem,
+            additional_select=[InventoryItem.quantity * 10],
+            filter_specs={"field": "name", "op": "eq", "value": "delta"},
+            return_raw=True,
+            count_pk="id",
+        )
+
+        [(item, scaled)] = result["items"]
+        assert (item.name, scaled) == ("delta", 90)

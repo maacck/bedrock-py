@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking changes
+
+- **Database query builder**: client-controlled field names are restricted to an allowlist.
+  `filter_specs`, `sort_key`, and string `group_by` in `search_filter_sort_paginate()`,
+  `asearch_filter_sort_paginate()`, and `build_query()` may only reference primary keys and the
+  names a model lists in the new `__filterable_fields__` class attribute (columns, hybrids,
+  association proxies, relationships). Each hop of a dotted or colon path is checked against its
+  own model. `count_pk` must be a primary key. Any other name raises `BadFilterFormatError`
+  ("Field `x` is not filterable on Model"), the same error for hidden and missing fields.
+  Previously every column of every reachable model was filterable, so a client could read secret
+  columns (for example `owner.password_hash`) by observing result counts or order.
+  Migration: add `__filterable_fields__ = [...]` to each model queried with client-supplied
+  filters, sorting, or grouping; for dotted paths, list the relationship on the parent model and
+  the target field on the related model. Models whose callers already validate field names can
+  set `__filterable_fields__ = "__all__"` to keep the previous behavior for that model; related
+  models reached through it keep their own setting. Raw `sqla_filters` and
+  `__searchable_columns__` for `q` are unaffected.
+- **Migrations**: `MigrationsManager.upgrade()`/`downgrade()` and `bedrock db upgrade`/`downgrade`
+  only move the requested app's branch. `head`, `base`, and relative steps (`+1`, `-1`) are
+  qualified as `<app>@<target>`; a revision ID must belong to the app's branch. Targets outside
+  it, such as `heads` or another app's revision ID, now raise `MigrationError`. Previously
+  `bedrock db downgrade <app> base` downgraded every installed app's branch and dropped their
+  tables. Migration: pass a target of the app you name, and migrate each app separately.
+- **Database sessions**: `db.session` and `db.asession` no longer create a session on first access.
+  With no session bound to the current context they raise the new `SessionNotBoundError` (a
+  `BedrockExc`, exported from `bedrock.database`). `SessionFactory` is no longer a context manager
+  (`with db.session_factory:` is removed). Previously a session touched in a long-lived context
+  (module import, a sync `setup()` hook, a reused worker thread) was created there, never closed, and
+  inherited by every later request or task, which leaked uncommitted writes between requests and
+  made every FastAPI request fail with `RuntimeError` once the middleware tried to open its scope.
+  Migration: bind a session at each entry point. Scripts, CLI commands, custom workers, WebSocket
+  handlers, and startup hooks use `with db.session_scope():` or decorate the entry function with
+  `@db.session_scope()` (async: `@db.asession_scope()`; each call opens its own scope). FastAPI
+  requests use `DbSessionMiddleware` / `AsyncDbSessionMiddleware`; tests call such services inside
+  `with db.session_scope():` (the `db_session` fixture still rolls it back); sessions owned by another
+  framework use `db.set_session()` with `db.clear_session()` in `finally`. Services that read
+  `db.session` need no change.
+- **Database observer removed**: `bedrock.database.observer` (`observes_model`, `ModelObserver`,
+  `observer`) is deleted. It re-implemented SQLAlchemy's ORM events: registering on an ordinary
+  model raised `AttributeError`, callbacks ran once per `ModelObserver` instance, collected
+  callbacks failed the next flush, and `on_insert` ran before the primary key was assigned.
+  Migration: use SQLAlchemy events directly, `@event.listens_for(Model, "after_insert",
+  propagate=True)` (likewise `after_update` / `after_delete`) when the callback needs the id, or
+  `@event.listens_for(Session, "before_flush")` filtering `session.new` / `session.dirty` /
+  `session.deleted` by model when it adds objects to the same flush.
+
 ### Added
 
 - **Testing**: runtime-level pytest fixtures in `bedrock.testing` (enabled with
@@ -52,6 +98,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `bedrock.shutdown()` closes it after every module and the database are released (and `ashutdown()` closes it
   if synchronous code used it). Code that calls `registry.shutdown()` without `bedrock.shutdown()` leaves the
   loop open until the next `bedrock.shutdown()` or interpreter exit; call `bedrock.shutdown()` to release it.
+
+- **Database**: `asearch_filter_sort_paginate()` in `bedrock.database.service`, the `AsyncSession`
+  variant of `search_filter_sort_paginate()`. It takes the same arguments and returns the same
+  `items`/`total`/`page_info` dictionary, so `async def` services can list with `db.asession`.
+- **Database**: `SessionAlreadyBoundError` (exported from `bedrock.database`) is raised when
+  `session_scope()` / `asession_scope()` opens while a session is already bound. It is a
+  `BedrockExc` and still a `RuntimeError`, so existing `except RuntimeError` handlers keep working.
+- **Migrations**: `MigrationsManager.get_history()` returns `RevisionHistoryEntry` typed dicts;
+  `is_head` is a `bool`, as the CLI already used it.
+
+### Fixed
+
+- **Migrations**: a database URL containing percent-encoded characters, such as a password with
+  `@` or `#`, no longer makes every migration command fail with `ValueError: invalid interpolation
+  syntax` that printed the full URL, password included.
+- **Migrations**: when the applied revisions cannot be read (connection, permission, or script
+  errors), `ensure_schema()` and `uninstall()` raise `MigrationError` instead of treating the
+  branch as never applied, which stamped head over pending migrations or reported an uninstall
+  that did nothing. `check()` reports such branches as `unknown`.
+- **Database query builder**: with `group_by`, `total` in `search_filter_sort_paginate()` /
+  `asearch_filter_sort_paginate()` is the number of groups. It used to be the row count of the
+  first group, and an empty result made `has_more` raise `TypeError`.
+- **Migrations**: online migrations open one connection instead of two (the first was never
+  closed), and offline (`--sql`) runs configure the Alembic context before starting the
+  transaction instead of failing with "No context has been configured yet".
+- **Database**: `BedrockModel.verbose_name` returns the class name instead of raising
+  `AttributeError`.
+- **Database query builder**: type annotations match accepted inputs. `sort_key` takes a column
+  name or a list of `(column, direction)` pairs (`SortKey`), and `group_by` takes a column name
+  or a SQL expression (`GroupBy`); type checkers no longer reject these documented forms.
+- **Migrations**: the `revision()` docstring no longer claims Bedrock writes dependency heads into
+  `depends_on`; it never did.
 
 ## [0.3.1] - 2026-11-08
 

@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import inspect
 from unittest.mock import Mock
 
 import bedrock.database.manager as manager_module
 import pytest
-from bedrock.database import DatabaseManager, SessionFactory
+from bedrock.database import DatabaseManager, SessionAlreadyBoundError, SessionFactory, SessionNotBoundError
 from bedrock.database.manager import DatabaseNotConfiguredError
 from bedrock.database.session_factory import _current_db_session
 from sqlalchemy import Column, Integer, String, create_engine
@@ -66,14 +67,15 @@ class TestDatabaseSessionFixtures:
         assert factory is not None
         assert db_manager is not None
 
-    def test_factory_session_returns_active_session(self, factory):
-        """Factory.session should return a usable SQLAlchemy session."""
-        session = factory.session
-        assert session.is_active
+    def test_factory_session_requires_a_bound_session(self, factory):
+        """Reading factory.session outside a scope raises and binds nothing."""
+        with pytest.raises(SessionNotBoundError, match="session_scope"):
+            _ = factory.session
+        assert _current_db_session.get() is None
 
-    def test_factory_clear_session_resets_context_var(self, factory):
+    def test_factory_clear_session_resets_context_var(self, factory, session_maker):
         """After clear_session the ContextVar should be None."""
-        _ = factory.session  # populate the context var
+        factory.set_session(session_maker())
         factory.clear_session()
         assert _current_db_session.get() is None
 
@@ -128,11 +130,12 @@ class TestSessionScope:
         assert _current_db_session.get() is None
 
     def test_session_scope_raises_on_nesting(self, factory):
-        """session_scope should reject nested scope entry when already bound."""
+        """Nested scopes raise SessionAlreadyBoundError, which is still a RuntimeError for older callers."""
         with factory.session_scope():
-            with pytest.raises(RuntimeError):
+            with pytest.raises(SessionAlreadyBoundError) as exc_info:
                 with factory.session_scope():
                     pass
+        assert isinstance(exc_info.value, RuntimeError)
 
     def test_session_scope_nesting_guard_preserves_existing(self, factory, session_maker):
         """session_scope nesting guard should preserve the existing binding."""
@@ -280,36 +283,59 @@ class TestDatabaseManagerProxy:
             with manager.session_scope():
                 pass
 
+    def test_session_scope_decorates_entry_points(self):
+        """@db.session_scope() binds and commits a fresh session per call, even when applied before init()."""
+        manager = DatabaseManager()
+        seen: list[Session] = []
+
+        @manager.session_scope()
+        def job(name: str) -> str:
+            seen.append(manager.session)
+            manager.session.add(Item(name=name))
+            return name
+
+        manager.init("sqlite:///:memory:")
+        Base.metadata.create_all(manager.engine)
+        try:
+            assert job("first") == "first"
+            assert job("second") == "second"
+            assert seen[0] is not seen[1]
+            with pytest.raises(SessionNotBoundError):
+                _ = manager.session
+            with Session(manager.engine) as verify_session:
+                assert {item.name for item in verify_session.query(Item)} == {"first", "second"}
+            assert list(inspect.signature(job).parameters) == ["name"]
+        finally:
+            manager.close()
+
 
 class TestBackwardCompatibility:
     """Coverage for currently supported session behavior that must keep passing."""
 
-    def test_db_session_auto_vivifies(self, db_manager):
-        """DatabaseManager.session should create and return a session on first access."""
-        session = db_manager.session
+    def test_db_session_requires_a_bound_session(self, db_manager):
+        """DatabaseManager.session raises outside a scope and returns the scope's session inside it."""
+        with pytest.raises(SessionNotBoundError):
+            _ = db_manager.session
 
-        try:
-            assert session is not None
-            assert session.is_active
-        finally:
-            session.close()
-            db_manager.clear_session()
+        with db_manager.session_scope() as session:
+            assert db_manager.session is session
 
-    def test_session_factory_call_bypasses_cache(self, factory):
-        """SessionFactory.__call__ should bypass the cached context-local session."""
-        cached_session = factory.session
-        fresh_session_one = factory()
-        fresh_session_two = factory()
+        with pytest.raises(SessionNotBoundError):
+            _ = db_manager.session
 
-        try:
-            assert fresh_session_one is not cached_session
-            assert fresh_session_two is not cached_session
-            assert fresh_session_two is not fresh_session_one
-        finally:
-            fresh_session_one.close()
-            fresh_session_two.close()
-            cached_session.close()
-            _current_db_session.set(None)
+    def test_session_factory_call_returns_unbound_sessions(self, factory):
+        """SessionFactory.__call__ returns a new session that is not the bound one."""
+        with factory.session_scope() as bound:
+            fresh_session_one = factory()
+            fresh_session_two = factory()
+            try:
+                assert fresh_session_one is not bound
+                assert fresh_session_two is not bound
+                assert fresh_session_two is not fresh_session_one
+                assert factory.session is bound
+            finally:
+                fresh_session_one.close()
+                fresh_session_two.close()
 
     def test_set_session_and_clear_roundtrip(self, factory, session_maker):
         """set_session and clear_session should round-trip an explicit session binding."""
@@ -368,12 +394,13 @@ class TestDatabaseManagerReinitialization:
 
         try:
             manager.init("sqlite:///:memory:")
-            assert manager.session is old_session
+            manager.set_session(old_session)
 
             manager.init("sqlite:///:memory:")
 
             old_session.close.assert_called_once_with()
-            assert manager.session is new_session
+            with pytest.raises(SessionNotBoundError):
+                _ = manager.session
         finally:
             manager.clear_session()
 

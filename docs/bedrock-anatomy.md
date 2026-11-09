@@ -313,7 +313,7 @@ adapters/
 - `errors.py` maps `inventory.exc` exceptions to transport errors.
 - With database session middleware, each HTTP request runs inside `session_scope()` / `asession_scope()`.
   Services keep owning their transactions: they work in `db.session` / `db.asession` and commit, but must not
-  open `session_scope()` themselves (it raises `RuntimeError` while the request's session is bound). Anything
+  open `session_scope()` themselves (it raises `SessionAlreadyBoundError` while the request's session is bound). Anything
   left uncommitted when the request ends is rolled back.
 
 First-party framework integrations live in `integrations/<framework>/` and publish as `bedrock-<framework>`.

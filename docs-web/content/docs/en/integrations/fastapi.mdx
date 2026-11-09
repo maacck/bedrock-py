@@ -199,7 +199,7 @@ Resolving a scoped service in any dependency or endpoint, sync or async, returns
 
 **Services own their transactions, as everywhere in Bedrock.** A service works in the bound session and commits. The middleware never commits; whatever is still uncommitted when the request ends, for example because a service raised before committing, is rolled back.
 
-- **Do not open `db.session_scope()` or `db.asession_scope()` in a service.** Inside a request a session is already bound, so they raise `RuntimeError`. Workers, CLI commands, and scripts, which have no middleware, open the scope themselves and call the same service.
+- **Do not open `db.session_scope()` or `db.asession_scope()` in a service.** Inside a request a session is already bound, so they raise `SessionAlreadyBoundError`. Workers, CLI commands, and scripts, which have no middleware, open the scope themselves and call the same service.
 - **Each commit is final.** If one request calls several services and each commits, an error in a later one does not undo the earlier ones. When several writes must succeed or fail together, put them in one service method that commits once.
 - **A write nobody commits is lost silently.** The response can still be a success.
 - **Read what you need before an async commit.** Commit expires loaded attributes, and reading an expired attribute of an `AsyncSession` object raises `MissingGreenlet`. Flush, build the entity, then commit, as in the service above.
@@ -209,7 +209,7 @@ Resolving a scoped service in any dependency or endpoint, sync or async, returns
 - **Both middlewares can be installed.** They bind separate sessions with separate transactions, so writes through `db.session` and `db.asession` are not atomic together.
 - If `db.init()` was not called, every request fails with `DatabaseNotConfiguredError`. The first async request builds the async engine and requires `DATABASE_ASYNC_DRIVER`.
 
-The session must be bound by middleware: a sync dependency or endpoint that creates `db.session` on its own does so in a worker thread's copied context, so the next dependency gets a different session and nothing closes it at the end of the request.
+The session must be bound by middleware. Without it, reading `db.session` or `db.asession` in a dependency or endpoint raises `SessionNotBoundError`.
 
 ## Error responses
 

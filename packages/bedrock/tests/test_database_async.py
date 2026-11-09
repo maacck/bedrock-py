@@ -9,7 +9,12 @@ import pytest
 from bedrock.database.config import DatabaseConfigurationError, DbSettings
 from bedrock.database.connection import async_url_for_driver, build_async_engine
 from bedrock.database.manager import DatabaseManager, DatabaseNotConfiguredError
-from bedrock.database.session_factory import _current_async_db_session, _current_db_session
+from bedrock.database.session_factory import (
+    SessionAlreadyBoundError,
+    SessionNotBoundError,
+    _current_async_db_session,
+    _current_db_session,
+)
 from sqlalchemy import Column, Integer, String, select
 from sqlalchemy.engine.url import make_url
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -153,6 +158,45 @@ class TestAsyncSessions:
                     assert manager.session is sync_session
                     assert manager.asession is async_session
                     assert sync_session is not async_session
+        finally:
+            await manager.aclose()
+            manager.close()
+
+    @pytest.mark.asyncio
+    async def test_asession_scope_decorates_async_entry_points(self, tmp_path: Path) -> None:
+        """@db.asession_scope() binds a fresh async session for every awaited call."""
+
+        manager = _manager(tmp_path)
+        seen: list[AsyncSession] = []
+
+        @manager.asession_scope()
+        async def job(name: str) -> None:
+            seen.append(manager.asession)
+            manager.asession.add(Item(name=name))
+
+        try:
+            await job("first")
+            await job("second")
+            assert seen[0] is not seen[1]
+            with pytest.raises(SessionNotBoundError):
+                _ = manager.asession
+            async with manager.aindependent_session() as session:
+                assert set(await session.scalars(select(Item.name))) == {"first", "second"}
+        finally:
+            await manager.aclose()
+            manager.close()
+
+    @pytest.mark.asyncio
+    async def test_asession_scope_rejects_nesting(self, tmp_path: Path) -> None:
+        """A nested async scope raises and leaves the outer session bound."""
+
+        manager = _manager(tmp_path)
+        try:
+            async with manager.asession_scope() as outer:
+                with pytest.raises(SessionAlreadyBoundError, match="aindependent_session"):
+                    async with manager.asession_scope():
+                        pass
+                assert manager.asession is outer
         finally:
             await manager.aclose()
             manager.close()

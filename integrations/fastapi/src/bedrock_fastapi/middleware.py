@@ -51,7 +51,7 @@ class DbSessionMiddleware:
     request ends, including work done by background tasks, is rolled back, so a write nobody commits is lost
     while the response may still be a success.
 
-    Because a session is already bound, ``db.session_scope()`` raises ``RuntimeError`` inside a request; use
+    Because a session is already bound, ``db.session_scope()`` raises ``SessionAlreadyBoundError`` inside a request; use
     ``db.independent_session()`` for side transactions. WebSocket and lifespan events pass through.
     """
 
@@ -91,7 +91,7 @@ class AsyncDbSessionMiddleware:
     """Run each HTTP request inside ``db.asession_scope()`` without committing on its behalf.
 
     Same contract as :class:`DbSessionMiddleware`: services commit with ``await db.asession.commit()``,
-    uncommitted work is rolled back when the request ends, and ``db.asession_scope()`` raises ``RuntimeError``
+    uncommitted work is rolled back when the request ends, and ``db.asession_scope()`` raises ``SessionAlreadyBoundError``
     inside a request (use ``db.aindependent_session()``). The sync and async sessions use separate context
     variables, so both middleware can be installed together; each has its own transaction.
     """

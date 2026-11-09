@@ -124,10 +124,9 @@ class Product(BedrockModel):
 
 db.init()
 
-# Context-local session management
-product = Product(name="Widget")
-db.session.add(product)
-db.session.commit()
+# 为该代码块绑定 session；正常退出时提交
+with db.session_scope():
+    db.session.add(Product(name="Widget"))
 
 # New session
 with db.independent_session() as session:

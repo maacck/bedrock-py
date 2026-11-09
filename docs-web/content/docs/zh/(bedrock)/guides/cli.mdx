@@ -190,7 +190,7 @@ bedrock db upgrade <app_import_path> [target]
 |--------|-------------|
 | `head` | 升级到最新版本（默认） |
 | `+1` | 向前升级一步 |
-| `<revision_id>` | 升级到指定版本 |
+| `<revision_id>` | 升级到该应用分支中的指定版本 |
 
 **示例：**
 
@@ -205,7 +205,7 @@ bedrock db upgrade myapp.users +1
 bedrock db upgrade myapp.users abc123def456
 ```
 
-**重要：** 只会升级指定应用的分支，其他分支不会受到影响。
+**重要：** 只会升级指定应用的分支，其他分支不会受到影响。目标不属于该应用分支时（例如 `heads` 或其他应用的版本 ID）会报错。
 
 升级和降级会获取迁移锁。PostgreSQL 使用 advisory lock，MySQL 和 MariaDB 使用 `GET_LOCK`，等待时间为 `DATABASE_MIGRATION_LOCK_TIMEOUT` 秒（默认 30）。SQLite 迁移不加锁，请只在一个进程中运行。超时会导致命令失败。
 
@@ -223,9 +223,11 @@ bedrock db downgrade <app_import_path> <target>
 
 | 目标 | 说明 |
 |--------|-------------|
-| `base` | 回退到空状态（移除所有表） |
+| `base` | 移除该应用的全部版本（其他应用不受影响） |
 | `-1` | 回退一步 |
-| `<revision_id>` | 回退到指定版本 |
+| `<revision_id>` | 回退到该应用分支中的指定版本 |
+
+只会移动指定应用的分支。目标不属于该分支时会报错。
 
 **示例：**
 

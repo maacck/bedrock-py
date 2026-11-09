@@ -132,16 +132,16 @@ db.init(url="postgresql+psycopg2://admin:secret@localhost:5432/myapp")
 |-------------------|-----------|-------------|
 | `db.init()` | `init(url: str \| None = None, settings: DbSettings \| None = None)` | 初始化 engine 和 session factory。在进程启动时调用一次。 |
 | `db.engine` | `property → Engine` | SQLAlchemy engine。未初始化时会抛出 `DatabaseNotConfiguredError`。 |
-| `db.session` | `property → Session` | 当前上下文局部 session。在某个上下文中首次访问时创建。 |
+| `db.session` | `property → Session` | 当前上下文绑定的 session。没有绑定时抛出 `SessionNotBoundError`。 |
 | `db.session_factory` | `property → SessionFactory` | 底层 session factory。 |
 | `db.settings` | `property → DbSettings` | 解析后的数据库 settings。 |
 | `db.set_session(session)` | `set_session(session: Session)` | 将现有 session 绑定到当前执行上下文。 |
 | `db.clear_session()` | `clear_session()` | 关闭并解绑当前上下文局部 session。 |
-| `db.session_scope()` | `contextmanager → Session` | 事务作用域，自动提交/回滚。绑定到上下文。 |
+| `db.session_scope()` | `contextmanager → Session` | 事务作用域，自动提交/回滚。绑定到上下文。也可以用作装饰器。 |
 | `db.independent_session()` | `contextmanager → Session` | 隔离事务，不绑定到上下文。 |
 | `db.aengine` | `property → AsyncEngine` | 使用 `init()` 已解析的 URL，只把驱动换成 `DATABASE_ASYNC_DRIVER`。 |
-| `db.asession` | `property → AsyncSession` | 当前上下文局部的异步 session，使用与 `db.session` 不同的上下文变量。 |
-| `db.asession_scope()` | `async context manager → AsyncSession` | 异步事务作用域，提交、回滚和禁止嵌套的规则与 `session_scope()` 相同。 |
+| `db.asession` | `property → AsyncSession` | 当前上下文绑定的异步 session，使用与 `db.session` 不同的上下文变量。没有绑定时抛出 `SessionNotBoundError`。 |
+| `db.asession_scope()` | `async context manager → AsyncSession` | 异步事务作用域，提交、回滚和禁止嵌套的规则与 `session_scope()` 相同。也可以用作 `async def` 的装饰器。 |
 | `db.aindependent_session()` | `async context manager → AsyncSession` | 不绑定 `db.asession` 的异步事务。 |
 | `db.close()` | `close()` | 释放同步 engine。已创建的异步 engine 仍可使用。可以重复调用。之后可以再次 `init()`。 |
 | `db.aclose()` | `async aclose()` | 释放异步 engine。同步 engine 仍可使用。可以重复调用。 |
@@ -150,27 +150,39 @@ db.init(url="postgresql+psycopg2://admin:secret@localhost:5432/myapp")
 
 在调用 `db.init()` 之前访问 `db.engine`、`db.session` 或 `db.settings` 会抛出 `DatabaseNotConfiguredError`。使用这些属性前务必先初始化数据库。
 
+当前上下文没有绑定 session 时读取 `db.session` 或 `db.asession` 会抛出 `SessionNotBoundError`（`BedrockExc` 的子类）。框架不会隐式创建 session：请在入口处打开作用域。
+
 ## Session 管理
 
 Bedrock 使用由 `ContextVar` 支撑的上下文局部 session。新异步任务会继承创建者的上下文，包括已绑定的 session；应在任务和请求边界清理或单独建立绑定，避免并发共享 session。
 
 ### 工作方式
 
-`SessionFactory` 对 SQLAlchemy 的 `sessionmaker` 做了封装。当你访问 `db.session` 时，它会检查 `ContextVar` 中是否已有 session。若不存在，就创建一个并存储进去。在同一上下文中的后续访问会返回同一个 session。
+`SessionFactory` 对 SQLAlchemy 的 `sessionmaker` 做了封装。`db.session` 只返回 `ContextVar` 中已绑定的 session，从不自行创建。绑定由入口负责：
+
+| 入口 | 绑定方式 |
+|------|----------|
+| 脚本、CLI 命令、自定义 worker、WebSocket 处理函数、启动钩子 | `with db.session_scope():` 或 `@db.session_scope()` |
+| FastAPI HTTP 请求 | `bedrock-fastapi` 的 `DbSessionMiddleware` / `AsyncDbSessionMiddleware` |
+| 测试 | 在测试中 `with db.session_scope():`；`bedrock.testing` 的 `db_session` fixture 负责回滚 |
+| 由其他框架管理的 session | `db.set_session(...)` |
+
+Service 读取 `db.session` 并负责提交，自身不打开作用域：
 
 ```python
 from bedrock.database import db
 
+# service.py
+def create_product(name: str) -> None:
+    db.session.add(Product(name=name))
+    db.session.commit()
+
+# 入口
 db.init()
+with db.session_scope():
+    create_product("Widget")
 
-# First access creates a session
-session = db.session
-session.add(Product(name="Widget"))
-session.commit()
-
-# Same session within the same context
-same_session = db.session
-assert session is same_session
+create_product("Gadget")  # 抛出 SessionNotBoundError：没有打开作用域
 ```
 
 ### 使用 `session_scope()` 管理事务
@@ -201,7 +213,26 @@ except ValueError:
 - 将 session 绑定到 `ContextVar`，块内可正常使用 `db.session`
 - 正常退出时提交，任何异常（包括 `BaseException`）时回滚
 - 退出时始终关闭 session 并重置 `ContextVar`
-- 如果在已绑定 session 的上下文中调用会抛出 `RuntimeError`（防止嵌套）
+- 如果在已绑定 session 的上下文中调用会抛出 `SessionAlreadyBoundError`（`BedrockExc` 的子类，同时也是 `RuntimeError`），防止嵌套
+
+### 装饰入口函数
+
+`session_scope()` 和 `asession_scope()` 也可以用作装饰器。每次调用都会打开新的作用域，所以每次调用都有自己的 session 和事务。装饰器可以在 `db.init()` 之前应用，因为数据库只在函数被调用时才会用到：
+
+```python
+from bedrock.database import db
+
+@db.session_scope()
+def import_products(path: str) -> None:
+    for name in read_names(path):
+        db.session.add(Product(name=name))
+
+@db.asession_scope()
+async def sync_inventory() -> None:
+    await refresh_stock(db.asession)
+```
+
+注意括号：写 `@db.session_scope()`，不是 `@db.session_scope`。函数返回值原样返回。不要装饰会在已绑定 session 时被调用的函数（例如请求内调用的 service）：嵌套的作用域会抛出 `SessionAlreadyBoundError`。
 
 ### 使用 `independent_session()` 进行独立事务
 
@@ -275,42 +306,10 @@ from bedrock.database import db
 
 # Bind a session from an external source
 db.set_session(framework_session)
-
-# Now db.session returns the bound session
-product = db.session.query(Product).first()
-
-# Clean up when done
-db.clear_session()
-```
-
-### 清理 Session
-
-请求或任务结束时务必清理 session，以防止陈旧数据残留。`clear_session()` 会先关闭 session 再解绑：
-
-```python
-from bedrock.database import db
-
 try:
-    # Process request...
-    result = db.session.query(Product).all()
+    product = db.session.query(Product).first()
 finally:
-    db.clear_session()  # 关闭 session，然后清除 ContextVar
-```
-
-### SessionFactory 作为上下文管理器
-
-`SessionFactory` 本身可以作为上下文管理器使用。退出时会关闭并解绑当前 session：
-
-```python
-from bedrock.database import db
-
-db.init()
-
-with db.session_factory:
-    session = db.session
-    session.add(Product(name="Widget"))
-    session.commit()
-# session 在此处被关闭和解绑
+    db.clear_session()  # 关闭 session，然后解绑
 ```
 
 ## BedrockModel
@@ -335,6 +334,7 @@ from sqlalchemy import Column, String, Integer
 
 class Product(BedrockModel):
     __tablename__ = "products"
+    __filterable_fields__ = ["name", "price"]
 
     id = Column(Integer, primary_key=True)
     name = Column(String(100), nullable=False)
@@ -362,6 +362,27 @@ BedrockModel 会监听 `init` 事件，并在构造函数结束前应用列默�
 
 `search_filter_sort_paginate` 函数可构建带有过滤、排序、分页和自动 join 的查询。它返回一个包含 `items`、`total` 和 `page_info` 的字典。
 
+### 可过滤字段
+
+`filter_specs`、`sort_key` 和 `group_by` 通常来自客户端，因此只能引用模型公开的字段。主键始终可用；其他列、hybrid 属性、association proxy 和关系都必须列在 `__filterable_fields__` 中：
+
+```python
+class Order(BedrockModel):
+    __tablename__ = "orders"
+    __filterable_fields__ = ["status", "customer"]  # "customer" is a relationship
+
+
+class Customer(BedrockModel):
+    __tablename__ = "customers"
+    __filterable_fields__ = ["name"]  # password_hash stays hidden
+```
+
+- 点号或冒号路径的每一跳都按所在模型检查：`customer.name` 需要 `Order` 列出 `customer`，`Customer` 列出 `name`。
+- `count_pk` 必须是主键。
+- 其他名称会抛出 `BadFilterFormatError`（"Field `x` is not filterable on Order"）。隐藏字段和不存在的字段抛出相同的错误，客户端无法借此探测表结构。
+- 如果应用在调用查询构建器之前已经校验了字段名，可以设置 `__filterable_fields__ = "__all__"`，关闭该模型的检查。通过路径访问的关联模型仍按各自的 `__filterable_fields__` 检查，需要时也给它们设置 `"__all__"`。使用 `"__all__"` 后，保护敏感列由应用自己负责。
+- `sqla_filters` 和 `q` 使用的 `__searchable_columns__` 由你的代码编写，不受此检查。
+
 ### 基本用法
 
 ```python
@@ -383,6 +404,24 @@ result["items"]     # List of Product instances
 result["total"]     # Total count matching filters
 result["page_info"] # Pagination metadata
 ```
+
+### 异步 Session
+
+在 `async def` 的 service 中，配合 `db.asession` 调用 `asearch_filter_sort_paginate`。它的参数和返回的字典与同步版本相同：
+
+```python
+from bedrock.database.service import asearch_filter_sort_paginate
+
+result = await asearch_filter_sort_paginate(
+    db_session=db.asession,
+    model=Product,
+    filter_specs=[{"field": "name", "op": "ilike", "value": "%widget%"}],
+    page=1,
+    limit=20,
+)
+```
+
+异步 session 不能延迟加载关系。需要读取 `result["items"]` 上的关系时，通过 `options` 预先加载，例如 `options=[selectinload(Product.tags)]`。
 
 ### 过滤操作符
 
@@ -467,7 +506,7 @@ result = search_filter_sort_paginate(
 
 | 键 | 说明 |
 |-----|-------------|
-| `total` | 匹配记录总数 |
+| `total` | 匹配记录总数；使用 `group_by` 时为分组数 |
 | `limit` | 每页条目数 |
 | `offset` | 当前偏移量 |
 | `page` | 当前页码 |
@@ -487,6 +526,8 @@ result = search_filter_sort_paginate(
 # Colon notation: uses any() for collections, has() for scalars
 {"field": "category:name", "op": "eq", "value": "Electronics"}
 ```
+
+两种写法都要求 `Product.__filterable_fields__` 包含 `category`，且关联模型的 `__filterable_fields__` 包含 `name`（参见[可过滤字段](#可过滤字段)）。
 
 ## 迁移
 
@@ -542,57 +583,28 @@ history = migrations.get_history("myapp.users")
 
 `bedrock db check <app>` 会打印该应用，以及已经带有迁移脚本的其他已安装应用的当前版本和 head 版本。它不修改数据库，也不会创建 Alembic 版本表。任一分支处于 `behind` 或 `unknown` 时，进程以状态码 1 退出。`unknown` 包含从未执行过迁移的数据库。可以把它用作对外提供流量之前的部署门禁。参见 [CLI 参考 — 数据库命令](/docs/guides/cli#database-commands-bedrock-db)。
 
-## 模型观察器
+## 模型事件
 
-观察器系统会挂接到 SQLAlchemy 的 `before_flush` 事件，在模型被插入、更新或删除时调用回调。
-
-### 事件标识符
-
-| 标识符 | 触发时机 |
-|------------|------------|
-| `on_insert` | 新实例被加入 session 时 |
-| `on_update` | 现有实例被修改时 |
-| `on_delete` | 实例被标记为删除时 |
-
-### 注册观察器
-
-使用 `@observes_model` 装饰器：
+Bedrock 不封装 ORM 事件。直接注册 SQLAlchemy 监听器，并按需要选择触发阶段：
 
 ```python
-from bedrock.database import BedrockModel
-from bedrock.database.observer import observes_model, observer
-from sqlalchemy import Column, Integer, String
+from sqlalchemy import event
+from sqlalchemy.orm import Session
 
-class Catalog(BedrockModel):
-    __tablename__ = "catalog"
-    id = Column(Integer, primary_key=True)
-    name = Column(String(100))
+# INSERT 执行之后：主键已经赋值。额外的 SQL 用 `connection` 执行，不要修改 session。
+@event.listens_for(Catalog, "after_insert", propagate=True)
+def catalog_inserted(mapper, connection, target):
+    ...
 
-@observes_model(Catalog, "on_insert", "on_delete")
-def log_catalog_changes(session, target, identifier):
-    print(f"Catalog {target.id} was {identifier}")
+# flush 之前：在这里加入 session 的对象会在同一个事务中一起 flush。
+@event.listens_for(Session, "before_flush")
+def audit_catalog(session, flush_context, instances):
+    for obj in session.new:
+        if isinstance(obj, Catalog):
+            session.add(AuditLog(action="catalog_created"))
 ```
 
-回调会接收三个参数：session、模型实例，以及事件标识符字符串。
-
-### 自定义观察器实例
-
-可通过 `observer` 关键字传入自定义 `ModelObserver`：
-
-```python
-from bedrock.database.observer import ModelObserver
-
-custom_observer = ModelObserver()
-
-@observes_model(Catalog, "on_insert", observer=custom_observer)
-def handle_insert(session, target, identifier):
-    # 自定义观察器注册自己的 SQLAlchemy 监听器；回调保存在模型上
-    pass
-```
-
-### 弱引用
-
-观察器回调以弱引用形式存储，绑定方法使用 `WeakMethod` 包装器。注册期间应保持回调及其所属对象存活：派发时不会安全跳过失效的弱引用。
+`after_update` / `after_delete`（以及对应的 `before_*`）用法相同。`propagate=True` 让子类也会触发。全部钩子及其限制见 SQLAlchemy 的 [ORM 事件文档](https://docs.sqlalchemy.org/en/20/orm/events.html)。
 
 ## 架构
 
@@ -608,7 +620,6 @@ bedrock/database/
 ├── manager.py             # DatabaseManager singleton (db)
 ├── migrations/            # Alembic env.py and script.py.mako
 ├── migrations_manager.py  # Per-module Alembic orchestration
-├── observer.py            # Model lifecycle observer
 ├── service.py             # search_filter_sort_paginate query builder
 ├── session_factory.py     # Context-local sessions via ContextVar
 └── utils.py               # Model registry helpers
@@ -620,7 +631,9 @@ bedrock/database/
 
 **不要在初始化前访问 `db.session`。** 这会抛出 `DatabaseNotConfiguredError`。务必先调用 `db.init()`。
 
-**不要忘记清理 session。** 陈旧 session 会占用数据库连接，也可能返回过期数据。请在每次请求或任务结束时使用 `db.clear_session()`。
+**不要在作用域之外读取 `db.session`。** 这会抛出 `SessionNotBoundError`。请在入口处用 `db.session_scope()` 或 FastAPI 中间件绑定 session；service 只负责读取。
+
+**不要忘记清理自己绑定的 session。** 用 `db.set_session()` 绑定的 session 会一直保持绑定，直到调用 `db.clear_session()`。请在 `finally` 中调用。
 
 **不要在 service 或 model 层中放入 HTTP 类型。** Request 和 Response 对象应位于适配器边界，而不应进入业务逻辑。
 

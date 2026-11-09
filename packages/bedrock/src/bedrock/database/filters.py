@@ -21,7 +21,7 @@ from sqlalchemy.ext.hybrid import HybridExtensionType
 from sqlalchemy.orm import InstrumentedAttribute, RelationshipProperty
 from sqlalchemy.sql.type_api import TypeEngine
 
-from bedrock.exc import BadFilterFormatError, FilterDepthExceededError
+from ..exc import BadFilterFormatError, FilterDepthExceededError
 
 BooleanFunction = namedtuple("BooleanFunction", ("key", "sqlalchemy_fn", "only_one_arg"))
 BOOLEAN_FUNCTIONS = [
@@ -32,6 +32,48 @@ BOOLEAN_FUNCTIONS = [
 # Keep untrusted filter trees well below Python's recursion limit while allowing
 # useful nested boolean expressions.
 MAX_FILTER_DEPTH = 50
+
+
+def primary_key_names(model: type[Any]) -> set[str]:
+    """Return the mapped attribute names of *model*'s primary-key columns.
+
+    Args:
+        model: The SQLAlchemy model class to inspect.
+
+    Returns:
+        The attribute names of the primary-key columns.
+    """
+    mapper = inspect(model)
+    return {mapper.get_property_by_column(column).key for column in mapper.primary_key}
+
+
+def ensure_filterable(model: type[Any], name: str) -> None:
+    """Reject a client-supplied field name that *model* does not expose.
+
+    Primary keys are always filterable. Any other column, hybrid, association proxy, or
+    relationship must be listed in the model's ``__filterable_fields__``, unless the model sets
+    ``__filterable_fields__ = "__all__"`` because the application validates field names before
+    they reach the query builder. The check runs before the name is looked up, so a hidden field
+    and a missing field raise the same error.
+
+    Args:
+        model: The SQLAlchemy model class the name is resolved against.
+        name: One attribute name, a single hop of a dotted or colon path.
+
+    Raises:
+        BadFilterFormatError: If *name* is neither a primary key nor allowed by
+            ``__filterable_fields__``.
+    """
+    declared = getattr(model, "__filterable_fields__", ())
+    if declared == "__all__":
+        return
+    if isinstance(declared, str):
+        declared = (declared,)
+    if name in declared or name in primary_key_names(model):
+        return
+    raise BadFilterFormatError(
+        f"Field `{name}` is not filterable on {model.__name__}. Add it to `__filterable_fields__` to allow it."
+    )
 
 
 def get_model_relationship(model: type[Any], field: str) -> RelationshipProperty:
@@ -72,6 +114,7 @@ class Field:
             field_parts = self.field_name.split(".")
             relationship_name = field_parts[0]
             self.join_path = field_parts
+            ensure_filterable(self.model, relationship_name)
             if relationship_name in self.model_state.relationships.keys():
                 relationship_state = self.model_state.relationships[relationship_name]
                 relationship_model = relationship_state.mapper.class_
@@ -99,6 +142,7 @@ class Field:
         """
         if self.field:
             return self.field.get_sqlalchemy_field()
+        ensure_filterable(self.model, self.field_name)
         if self.field_name not in self._get_valid_field_names():
             raise BadFilterFormatError(f"Model {self.model.__name__} has no column `{self.field_name}`.")
         sqlalchemy_field = getattr(self.model, self.field_name)
@@ -394,6 +438,7 @@ class Filter:
         """Handle text_search operator by wrapping in any()/has() based on relationship type."""
         if not isinstance(self.value, str):
             raise BadFilterFormatError("`text_search` value must be a string.")
+        ensure_filterable(default_model, self.field)
         relationship = get_model_relationship(default_model, self.field)
         relationship_field = getattr(default_model, self.field)
         text_clause = relationship.mapper.class_.text_search(self.value)
@@ -428,6 +473,7 @@ class Filter:
 
             # auto determine if it is any or has
             if isinstance(value, Filter) and self.strategy == "auto":
+                ensure_filterable(default_model, self.field)
                 relationship = get_model_relationship(default_model, self.field)
                 format_model = relationship.mapper.class_
                 if operator is None:
@@ -466,7 +512,7 @@ FilterableValue = FilterableValueBase | list[FilterableValueBase]
 class BooleanFilter:
     """Combine multiple filters using a boolean function (``and_``/``or_``)."""
 
-    def __init__(self, function: Any, *filters: Filter) -> None:
+    def __init__(self, function: Any, *filters: "Filter | BooleanFilter") -> None:
         """Initialise the boolean filter.
 
         Args:
