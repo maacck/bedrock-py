@@ -7,7 +7,7 @@ description: >
   debugging module lifecycle issues, writing bootstrap hooks, configuring database migrations,
   writing tests for Bedrock modules, or building applications on top of Bedrock. Trigger on: "python project dependencies contains 'bedrock-py'", "working on a Bedrock module", "writing a manifest.yaml", "using bedrock CLI commands", "testing a Bedrock module"
 metadata:
-  bedrock-core: "0.3.2"
+  bedrock-core: "0.3.3"
 ---
 
 # Bedrock Application Development
@@ -502,7 +502,7 @@ Async tests: `await bedrock.asetup(...)` and `await bedrock_runtime.registry.ash
 4. **Don't recursively call `mark_ready()` or `shutdown()`** from lifecycle hooks or signal receivers
 5. **Don't register extensions via import-time side effects or accept import paths from requests** — register trusted paths in `on_load`
 6. **Don't hand-roll test isolation** — no `monkeypatch.setattr(lifecycle, "apps", ...)`, `db.set_session()` rollback fixtures, or hand-written packages on `sys.path`; use `bedrock_runtime`, `db_session`, and `module_factory`
-7. **Don't read `db.session` / `db.asession` without a bound session** — it raises `SessionNotBoundError`; services only read it, entry points bind it with `with db.session_scope():` / `@db.session_scope()` (async: `asession_scope`) or the FastAPI middleware; tests call such services inside `with db.session_scope():` (rolled back by `db_session`)
+7. **Don't read `db.session` / `db.asession` without a bound session** — it raises `SessionNotBoundError`; services only read it, entry points bind it with `with db.session_scope():` / `@db.session_scope()` (async: `asession_scope`) or an integration that binds one per request or task; tests call such services inside `with db.session_scope():` (rolled back by `db_session`)
 
 ## Commands Reference
 
