@@ -4,11 +4,15 @@ description: >
   Use when scaffolding or generating Bedrock application code with the exploratory `bedrock-cli` package,
   especially for `bedrock-cli init`, `bedrock-cli add`, `bedrock-cli gen`, `_bedrock_gen` custom templates,
   or when a task risks confusing the scaffolding CLI with the runtime `bedrock` command.
+metadata:
+  bedrock-cli: "0.3.2"
 ---
 
 # Bedrock CLI Scaffolding
 
 `bedrock-cli` is the exploratory scaffolding companion for Bedrock. It is **not** the runtime `bedrock` CLI, and its command surface is not stable. Trust `packages/bedrock-cli/src/bedrock_cli/` over higher-level prose.
+
+This skill describes `bedrock-cli` at the version in `metadata.bedrock-cli` above. If the installed version differs (`uv run python -c "import importlib.metadata as m; print(m.version('bedrock-cli'))"`), tell the user and trust the installed `bedrock_cli` source and `bedrock-cli --help` over this skill.
 
 ## When to Use
 

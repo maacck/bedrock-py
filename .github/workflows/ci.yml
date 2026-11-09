@@ -236,3 +236,19 @@ jobs:
         with:
           name: dist-bedrock-cli
           path: dist/
+
+  skill-versions:
+    name: Skill versions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Check skill metadata matches package versions
+        run: |
+          check() {
+            version=$(grep -m1 '^version = ' "$1" | cut -d'"' -f2)
+            grep -qxF "  $2: \"$version\"" "$3" \
+              || { echo "::error file=$3::metadata.$2 must be \"$version\" to match $1"; exit 1; }
+          }
+          check packages/bedrock/pyproject.toml bedrock-core skills/bedrock/SKILL.md
+          check packages/bedrock-cli/pyproject.toml bedrock-cli skills/bedrock-cli/SKILL.md

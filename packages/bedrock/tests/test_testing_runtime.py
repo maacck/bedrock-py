@@ -11,7 +11,7 @@ import bedrock.module as module
 import bedrock.module.registry as registry_module
 import pytest
 from bedrock.conf import SettingsProxy
-from bedrock.database import db
+from bedrock.database import DbSettings, db
 from bedrock.di import container
 from bedrock.module import ModuleLifecycleError, ModuleRegistry
 from bedrock.module.signals import module_ready
@@ -185,6 +185,31 @@ def test_teardown_leaves_global_database_open(fake_package: Path, tmp_path: Path
             assert session.execute(text("select 1")).scalar_one() == 1
     finally:
         db.close()
+
+
+def test_teardown_releases_async_engine_used_on_runtime_loop(tmp_path: Path) -> None:
+    db.init(
+        settings=DbSettings(TYPE="sqlite", DRIVER="pysqlite", ASYNC_DRIVER="aiosqlite", SCHEMA=str(tmp_path / "a.db"))
+    )
+
+    async def query() -> int:
+        async with db.asession_scope() as session:
+            return (await session.execute(text("select 1"))).scalar_one()
+
+    try:
+        with isolated_runtime():
+            assert bedrock.run_async(query()) == 1
+            engine = db.aengine
+        # Pooled connections belonged to the closed runtime loop; the next runtime builds a fresh engine.
+        assert engine.sync_engine.pool.checkedin() == 0
+        assert not db.has_async_engine
+        assert db.session.execute(text("select 1")).scalar_one() == 1
+        with isolated_runtime():
+            assert bedrock.run_async(query()) == 1
+    finally:
+        db.close()
+        bedrock.run_async(db.aclose())
+        lifecycle.runtime_loop.close()
 
 
 @pytest.mark.asyncio
