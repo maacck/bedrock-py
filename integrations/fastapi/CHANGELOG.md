@@ -10,9 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Requires the Bedrock core release where `db.session` / `db.asession` no longer create a session on
-  first access. Without `DbSessionMiddleware` / `AsyncDbSessionMiddleware`, reading them in a dependency
-  or endpoint now raises `SessionNotBoundError` instead of creating a session that nothing closes.
+- With `bedrock-core` 0.3.3+, `db.session` / `db.asession` no longer create a session on first access.
+  Without `DbSessionMiddleware` / `AsyncDbSessionMiddleware`, reading them in a dependency or endpoint
+  raises `SessionNotBoundError` instead of creating a session that nothing closes.
 
 ## [0.1.0] - 2026-11-08
 
