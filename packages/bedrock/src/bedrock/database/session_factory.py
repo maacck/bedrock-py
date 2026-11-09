@@ -28,6 +28,24 @@ _ASYNC_NOT_BOUND = (
 )
 
 
+class SessionAlreadyBoundError(BedrockExc, RuntimeError):
+    """Raised when ``session_scope()`` or ``asession_scope()`` opens while a session is already bound.
+
+    Subclasses ``RuntimeError`` so code that caught the previous ``RuntimeError`` keeps working.
+    """
+
+    detail: str = (
+        "session_scope() called with an active session already bound to this context. "
+        "Use independent_session() for side transactions, or call clear_session() first."
+    )
+
+
+_ASYNC_ALREADY_BOUND = (
+    "asession_scope() called with an active async session already bound to this context. "
+    "Use aindependent_session() for side transactions, or clear the async session first."
+)
+
+
 class SessionFactory:
     """Provide context-local SQLAlchemy session access."""
 
@@ -58,13 +76,10 @@ class SessionFactory:
         and guarantees commit/rollback/close/unbind on exit.
 
         Raises:
-            RuntimeError: If a session is already bound to the current context.
+            SessionAlreadyBoundError: If a session is already bound to the current context.
         """
         if _current_db_session.get() is not None:
-            raise RuntimeError(
-                "session_scope() called with an active session already bound to this context. "
-                "Use independent_session() for side transactions, or call clear_session() first."
-            )
+            raise SessionAlreadyBoundError()
         session = self._session_local()
         token = _current_db_session.set(session)
         try:
@@ -157,14 +172,11 @@ class AsyncSessionFactory:
         guarantees commit, rollback, close, and unbind on exit.
 
         Raises:
-            RuntimeError: If an async session is already bound to this context.
+            SessionAlreadyBoundError: If an async session is already bound to this context.
         """
 
         if _current_async_db_session.get() is not None:
-            raise RuntimeError(
-                "asession_scope() called with an active async session already bound to this context. "
-                "Use aindependent_session() for side transactions, or clear the async session first."
-            )
+            raise SessionAlreadyBoundError(_ASYNC_ALREADY_BOUND)
         session = self._session_local()
         token = _current_async_db_session.set(session)
         try:

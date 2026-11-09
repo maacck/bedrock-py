@@ -9,7 +9,12 @@ import pytest
 from bedrock.database.config import DatabaseConfigurationError, DbSettings
 from bedrock.database.connection import async_url_for_driver, build_async_engine
 from bedrock.database.manager import DatabaseManager, DatabaseNotConfiguredError
-from bedrock.database.session_factory import SessionNotBoundError, _current_async_db_session, _current_db_session
+from bedrock.database.session_factory import (
+    SessionAlreadyBoundError,
+    SessionNotBoundError,
+    _current_async_db_session,
+    _current_db_session,
+)
 from sqlalchemy import Column, Integer, String, select
 from sqlalchemy.engine.url import make_url
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -177,6 +182,21 @@ class TestAsyncSessions:
                 _ = manager.asession
             async with manager.aindependent_session() as session:
                 assert set(await session.scalars(select(Item.name))) == {"first", "second"}
+        finally:
+            await manager.aclose()
+            manager.close()
+
+    @pytest.mark.asyncio
+    async def test_asession_scope_rejects_nesting(self, tmp_path: Path) -> None:
+        """A nested async scope raises and leaves the outer session bound."""
+
+        manager = _manager(tmp_path)
+        try:
+            async with manager.asession_scope() as outer:
+                with pytest.raises(SessionAlreadyBoundError, match="aindependent_session"):
+                    async with manager.asession_scope():
+                        pass
+                assert manager.asession is outer
         finally:
             await manager.aclose()
             manager.close()

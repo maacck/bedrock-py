@@ -124,7 +124,7 @@ except ValueError:
 - Binds session to `ContextVar` so `db.session` works inside the block
 - Commits on clean exit, rolls back on any exception
 - Always closes session and resets `ContextVar` on exit
-- Raises `RuntimeError` if called while a session is already bound
+- Raises `SessionAlreadyBoundError` (a `BedrockExc` and `RuntimeError`) if called while a session is already bound
 
 Commit expires ORM instances and the scope closes the session; return plain data or refresh and load required values before detaching instances.
 
@@ -143,7 +143,7 @@ async def nightly_sync() -> None:
     await sync_accounts(db.asession)
 ```
 
-Use parentheses (`@db.session_scope()`). Decorate entry points only: a decorated function called while a session is bound (for example from a request) raises `RuntimeError`.
+Use parentheses (`@db.session_scope()`). Decorate entry points only: a decorated function called while a session is bound (for example from a request) raises `SessionAlreadyBoundError`.
 
 ### Independent Sessions with `independent_session()`
 

@@ -30,7 +30,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Protocol, TypedDict
 
 from alembic import command
 from alembic.config import Config
@@ -90,6 +90,16 @@ class BranchRevisionStatus:
     current: tuple[str, ...]
     head: tuple[str, ...]
     state: str
+
+
+class RevisionHistoryEntry(TypedDict):
+    """One revision of a branch as returned by :meth:`MigrationsManager.get_history`."""
+
+    revision: str
+    down_revision: str
+    branch_labels: str
+    message: str
+    is_head: bool
 
 
 class MigrationError(BedrockExc):
@@ -198,11 +208,9 @@ class MigrationsManager:
         is set to the app import path.  Subsequent revisions are appended to
         ``<branch_label>@head``.
 
-        When the app declares ``depends_on`` in its manifest, the current head
-        revision IDs of all dependency branches are resolved at creation time
-        and written into the generated revision file's ``depends_on`` field.
-        This encodes the cross-app dependency at the schema level rather than
-        requiring a runtime check on every upgrade.
+        Bedrock does not write cross-app ``depends_on`` links into the
+        revision file; ordering migrations across apps is the developer's
+        responsibility.
 
         Args:
             app_import_path: Import path of the target app, e.g.
@@ -407,7 +415,7 @@ class MigrationsManager:
         """
         from sqlalchemy import create_engine
 
-        from bedrock.database.base import BedrockModel
+        from .base import BedrockModel
 
         branch_label = app.name
 
@@ -589,7 +597,7 @@ class MigrationsManager:
             statuses.append(self._branch_status(cfg, app.name))
         return statuses
 
-    def get_history(self, app_import_path: str) -> list[dict[str, str]]:
+    def get_history(self, app_import_path: str) -> list[RevisionHistoryEntry]:
         """Return the revision history for *app_import_path* as structured data.
 
         Iterates the branch from base to head and collects each revision's
@@ -600,9 +608,7 @@ class MigrationsManager:
             app_import_path: Import path of the target app.
 
         Returns:
-            A list of dicts with keys ``revision``, ``down_revision``,
-            ``branch_labels``, ``message``, and ``is_head``, one entry per
-            revision in the branch.
+            One :class:`RevisionHistoryEntry` per revision in the branch.
 
         Raises:
             MigrationError: If the app is not installed or the script directory
@@ -616,7 +622,7 @@ class MigrationsManager:
             upper = f"{app_import_path}@head"
             lower = f"{app_import_path}@base"
             head_revs = {r.revision for r in script.get_revisions(upper)}
-            rows: list[dict[str, str]] = []
+            rows: list[RevisionHistoryEntry] = []
             for rev in script.iterate_revisions(upper, lower):
                 rows.append(
                     {
@@ -829,7 +835,7 @@ class MigrationsManager:
             {"name": _MYSQL_MIGRATION_LOCK_NAME, "timeout": timeout_seconds},
         ).scalar()
         connection.commit()
-        if result is None or int(result) != 1:
+        if result != 1:
             raise MigrationError(f"Timed out after {self._lock_timeout:g}s waiting for the MySQL migration lock.")
 
     def _get_app(self, app_import_path: str) -> "AppConfig":

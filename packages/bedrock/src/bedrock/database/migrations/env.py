@@ -22,11 +22,15 @@ work.
 """
 
 import types
+from collections.abc import Callable
 from logging.config import fileConfig
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from alembic import context
 from sqlalchemy import engine_from_config, pool
+
+IncludeName = Callable[[str | None, str, dict[str, str | None]], bool]
+"""Alembic ``include_name`` hook: ``(name, type_, parent_names) -> include?``."""
 
 if TYPE_CHECKING:
     from bedrock.module.registry import ModuleRegistry
@@ -70,7 +74,7 @@ def _collect_app_tables(models_module: types.ModuleType) -> frozenset[str]:
     return frozenset(table_names)
 
 
-def _build_include_name(app_tables: frozenset[str]):
+def _build_include_name(app_tables: frozenset[str]) -> IncludeName:
     """Return an ``include_name`` callback restricted to *app_tables*.
 
     The callback is passed to :func:`alembic.context.configure` and ensures
@@ -83,7 +87,7 @@ def _build_include_name(app_tables: frozenset[str]):
         A callable compatible with the Alembic ``include_name`` hook.
     """
 
-    def include_name(name: str, type_: str, parent_names: dict) -> bool:
+    def include_name(name: str | None, type_: str, parent_names: dict[str, str | None]) -> bool:
         """Filter schema objects to only those owned by the current app.
 
         Args:
@@ -107,7 +111,7 @@ _is_bedrock = _attrs.get("bedrock_managed", False)
 _current_app: str | None = _attrs.get("current_app")
 _registry: "ModuleRegistry | None" = _attrs.get("registry")
 
-_include_name = None
+_include_name: IncludeName | None = None
 
 if _is_bedrock and _current_app is not None and _registry is not None:
     try:
@@ -133,7 +137,7 @@ def run_migrations_offline() -> None:
     """
     url = config.get_main_option("sqlalchemy.url")
 
-    context_kwargs: dict = {
+    context_kwargs: dict[str, Any] = {
         "url": url,
         "target_metadata": target_metadata,
         "literal_binds": True,
@@ -159,7 +163,7 @@ def run_migrations_online() -> None:
         poolclass=pool.NullPool,
     )
 
-    context_kwargs: dict = {"target_metadata": target_metadata}
+    context_kwargs: dict[str, Any] = {"target_metadata": target_metadata}
     if _include_name is not None:
         context_kwargs["include_name"] = _include_name
 

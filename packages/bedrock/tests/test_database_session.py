@@ -7,7 +7,7 @@ from unittest.mock import Mock
 
 import bedrock.database.manager as manager_module
 import pytest
-from bedrock.database import DatabaseManager, SessionFactory, SessionNotBoundError
+from bedrock.database import DatabaseManager, SessionAlreadyBoundError, SessionFactory, SessionNotBoundError
 from bedrock.database.manager import DatabaseNotConfiguredError
 from bedrock.database.session_factory import _current_db_session
 from sqlalchemy import Column, Integer, String, create_engine
@@ -130,11 +130,12 @@ class TestSessionScope:
         assert _current_db_session.get() is None
 
     def test_session_scope_raises_on_nesting(self, factory):
-        """session_scope should reject nested scope entry when already bound."""
+        """Nested scopes raise SessionAlreadyBoundError, which is still a RuntimeError for older callers."""
         with factory.session_scope():
-            with pytest.raises(RuntimeError):
+            with pytest.raises(SessionAlreadyBoundError) as exc_info:
                 with factory.session_scope():
                     pass
+        assert isinstance(exc_info.value, RuntimeError)
 
     def test_session_scope_nesting_guard_preserves_existing(self, factory, session_maker):
         """session_scope nesting guard should preserve the existing binding."""

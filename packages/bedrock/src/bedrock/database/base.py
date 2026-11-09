@@ -6,7 +6,7 @@ from sqlalchemy import event, inspect, or_, true
 from sqlalchemy.orm import DeclarativeBase, Session, object_session
 from sqlalchemy.sql.elements import ColumnElement
 
-from bedrock.exc import BedrockExc
+from ..exc import BedrockExc
 
 
 class CrudMixin:

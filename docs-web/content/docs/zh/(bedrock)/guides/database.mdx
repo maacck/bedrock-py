@@ -213,7 +213,7 @@ except ValueError:
 - 将 session 绑定到 `ContextVar`，块内可正常使用 `db.session`
 - 正常退出时提交，任何异常（包括 `BaseException`）时回滚
 - 退出时始终关闭 session 并重置 `ContextVar`
-- 如果在已绑定 session 的上下文中调用会抛出 `RuntimeError`（防止嵌套）
+- 如果在已绑定 session 的上下文中调用会抛出 `SessionAlreadyBoundError`（`BedrockExc` 的子类，同时也是 `RuntimeError`），防止嵌套
 
 ### 装饰入口函数
 
@@ -232,7 +232,7 @@ async def sync_inventory() -> None:
     await refresh_stock(db.asession)
 ```
 
-注意括号：写 `@db.session_scope()`，不是 `@db.session_scope`。函数返回值原样返回。不要装饰会在已绑定 session 时被调用的函数（例如请求内调用的 service）：嵌套的作用域会抛出 `RuntimeError`。
+注意括号：写 `@db.session_scope()`，不是 `@db.session_scope`。函数返回值原样返回。不要装饰会在已绑定 session 时被调用的函数（例如请求内调用的 service）：嵌套的作用域会抛出 `SessionAlreadyBoundError`。
 
 ### 使用 `independent_session()` 进行独立事务
 

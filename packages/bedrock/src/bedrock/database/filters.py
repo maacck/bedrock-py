@@ -21,7 +21,7 @@ from sqlalchemy.ext.hybrid import HybridExtensionType
 from sqlalchemy.orm import InstrumentedAttribute, RelationshipProperty
 from sqlalchemy.sql.type_api import TypeEngine
 
-from bedrock.exc import BadFilterFormatError, FilterDepthExceededError
+from ..exc import BadFilterFormatError, FilterDepthExceededError
 
 BooleanFunction = namedtuple("BooleanFunction", ("key", "sqlalchemy_fn", "only_one_arg"))
 BOOLEAN_FUNCTIONS = [
@@ -512,7 +512,7 @@ FilterableValue = FilterableValueBase | list[FilterableValueBase]
 class BooleanFilter:
     """Combine multiple filters using a boolean function (``and_``/``or_``)."""
 
-    def __init__(self, function: Any, *filters: Filter) -> None:
+    def __init__(self, function: Any, *filters: "Filter | BooleanFilter") -> None:
         """Initialise the boolean filter.
 
         Args:

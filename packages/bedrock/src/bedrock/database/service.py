@@ -17,16 +17,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.session import Session
 from sqlalchemy.sql.elements import ColumnElement
 
-from bedrock.database.base import BedrockModel
-
 from ..exc import BadFilterFormatError, InvalidQueryLimitError
-from ..logging import get_logger
-from .filters import Field, Filter, init_filters, primary_key_names
-
-logger = get_logger(__name__)
+from .base import BedrockModel
+from .filters import BooleanFilter, Field, Filter, init_filters, primary_key_names
 
 FilterSpec = dict[str, Any]
 FilterSpecs = FilterSpec | list[FilterSpec]
+type SortKey = str | list[tuple[str, str | None]]
+"""A column name, or ``(column, direction)`` pairs applied in order."""
+type GroupBy = str | ColumnElement[Any]
+"""A column name checked against ``__filterable_fields__``, or a SQL expression."""
 
 MAX_QUERY_LIMIT = 1000
 
@@ -38,7 +38,7 @@ def _validate_query_limit(limit: int) -> int:
     return limit
 
 
-def build_filters(model: type[BedrockModel], filters: list[Filter]) -> ColumnElement[bool]:
+def build_filters(model: type[BedrockModel], filters: list[Filter | BooleanFilter]) -> ColumnElement[bool]:
     """Combine a list of Filter objects into a single SQLAlchemy AND clause.
 
     Args:
@@ -56,7 +56,7 @@ def build_filters(model: type[BedrockModel], filters: list[Filter]) -> ColumnEle
     return and_(*_filters)
 
 
-def build_auto_joins(model: type[BedrockModel], filters: list[Filter]) -> list[tuple[Any, ...]]:
+def build_auto_joins(model: type[BedrockModel], filters: list[Filter | BooleanFilter]) -> list[tuple[Any, ...]]:
     """Collect distinct join arguments required by the given filters.
 
     Iterates over each filter, extracts the join arguments needed to
@@ -88,14 +88,14 @@ def build_query(
     page: int = 1,
     sort_dir: str | None = None,
     q: str | None = None,
-    sort_key: str | None = None,
+    sort_key: SortKey | None = None,
     sqla_filters: list[ColumnElement[bool]] | None = None,
     filter_specs: FilterSpecs | None = None,
     join_models: list[tuple[Any, ...]] | None = None,
     options: list[Any] | None = None,
     show_all: bool = False,
     count_pk: str | None = None,
-    group_by: str | None = None,
+    group_by: GroupBy | None = None,
     auto_join_: bool = True,
 ) -> tuple[Select, Select, list[ColumnElement[bool]]]:
     """Build a filtered, sorted, paginated SQLAlchemy query pair.
@@ -147,10 +147,9 @@ def build_query(
     if sqla_filters is not None:
         filters.extend(sqla_filters)
     if sort_key is not None:
-        if isinstance(sort_key, str):
-            sort_key = [(sort_key, sort_dir)]
+        sort_pairs = [(sort_key, sort_dir)] if isinstance(sort_key, str) else sort_key
         sort_by = []
-        for _sort_key, _sort_dir in sort_key:
+        for _sort_key, _sort_dir in sort_pairs:
             sort_field = Field(model, _sort_key).get_sqlalchemy_field()
             if _sort_dir == "desc":
                 sort_by.append(sort_field.desc())
@@ -246,7 +245,7 @@ def search_filter_sort_paginate(
     page: int = 1,
     sort_dir: str | None = None,
     q: str | None = None,
-    sort_key: str | None = None,
+    sort_key: SortKey | None = None,
     sqla_filters: list[ColumnElement[bool]] | None = None,
     filter_specs: FilterSpecs | None = None,
     join_models: list[tuple[Any, ...]] | None = None,
@@ -255,7 +254,7 @@ def search_filter_sort_paginate(
     show_all: bool = False,
     count_pk: str | None = None,
     return_raw: bool = False,
-    group_by: str | None = None,
+    group_by: GroupBy | None = None,
     auto_join_: bool = True,
 ) -> dict[str, Any]:
     """Execute a search with filtering, sorting, and pagination in one call.
@@ -321,7 +320,7 @@ async def asearch_filter_sort_paginate(
     page: int = 1,
     sort_dir: str | None = None,
     q: str | None = None,
-    sort_key: str | None = None,
+    sort_key: SortKey | None = None,
     sqla_filters: list[ColumnElement[bool]] | None = None,
     filter_specs: FilterSpecs | None = None,
     join_models: list[tuple[Any, ...]] | None = None,
@@ -330,7 +329,7 @@ async def asearch_filter_sort_paginate(
     show_all: bool = False,
     count_pk: str | None = None,
     return_raw: bool = False,
-    group_by: str | None = None,
+    group_by: GroupBy | None = None,
     auto_join_: bool = True,
 ) -> dict[str, Any]:
     """Asynchronous variant of :func:`search_filter_sort_paginate` for an ``AsyncSession``.

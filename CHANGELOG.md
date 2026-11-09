@@ -74,6 +74,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Database**: `asearch_filter_sort_paginate()` in `bedrock.database.service`, the `AsyncSession`
   variant of `search_filter_sort_paginate()`. It takes the same arguments and returns the same
   `items`/`total`/`page_info` dictionary, so `async def` services can list with `db.asession`.
+- **Database**: `SessionAlreadyBoundError` (exported from `bedrock.database`) is raised when
+  `session_scope()` / `asession_scope()` opens while a session is already bound. It is a
+  `BedrockExc` and still a `RuntimeError`, so existing `except RuntimeError` handlers keep working.
+- **Migrations**: `MigrationsManager.get_history()` returns `RevisionHistoryEntry` typed dicts;
+  `is_head` is a `bool`, as the CLI already used it.
 
 ### Fixed
 
@@ -92,6 +97,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   transaction instead of failing with "No context has been configured yet".
 - **Database**: `BedrockModel.verbose_name` returns the class name instead of raising
   `AttributeError`.
+- **Database query builder**: type annotations match accepted inputs. `sort_key` takes a column
+  name or a list of `(column, direction)` pairs (`SortKey`), and `group_by` takes a column name
+  or a SQL expression (`GroupBy`); type checkers no longer reject these documented forms.
+- **Migrations**: the `revision()` docstring no longer claims Bedrock writes dependency heads into
+  `depends_on`; it never did.
 
 ## [0.3.1] - 2026-11-08
 

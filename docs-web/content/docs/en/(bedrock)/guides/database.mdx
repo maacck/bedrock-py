@@ -213,7 +213,7 @@ except ValueError:
 - Binds the session to `ContextVar` so `db.session` works inside the block
 - Commits on clean exit, rolls back on any exception (including `BaseException`)
 - Always closes the session and resets the `ContextVar` on exit
-- Raises `RuntimeError` if called while a session is already bound (prevents nesting)
+- Raises `SessionAlreadyBoundError` (a `BedrockExc` that is also a `RuntimeError`) if called while a session is already bound (prevents nesting)
 
 ### Decorating Entry Points
 
@@ -232,7 +232,7 @@ async def sync_inventory() -> None:
     await refresh_stock(db.asession)
 ```
 
-Note the parentheses: `@db.session_scope()`, not `@db.session_scope`. The function's return value passes through unchanged. Do not decorate a function that is called while a session is already bound, such as a service called from a request: the nested scope raises `RuntimeError`.
+Note the parentheses: `@db.session_scope()`, not `@db.session_scope`. The function's return value passes through unchanged. Do not decorate a function that is called while a session is already bound, such as a service called from a request: the nested scope raises `SessionAlreadyBoundError`.
 
 ### Independent Sessions with `independent_session()`
 

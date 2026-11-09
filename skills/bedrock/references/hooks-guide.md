@@ -190,7 +190,7 @@ def place_order(order):
         _save(order)
 ```
 
-`call()` stops at the first exception, after earlier implementations have already run. Their writes are undone only if they joined the same transaction: write through `db.session`, never commit, and never use `independent_session()`. `session_scope()` raises `RuntimeError` when a session is already bound to the context; then call the hook inside the caller's existing transaction instead.
+`call()` stops at the first exception, after earlier implementations have already run. Their writes are undone only if they joined the same transaction: write through `db.session`, never commit, and never use `independent_session()`. `session_scope()` raises `SessionAlreadyBoundError` when a session is already bound to the context; then call the hook inside the caller's existing transaction instead.
 
 ### Run every implementation, then report all failures
 
