@@ -190,7 +190,7 @@ bedrock db upgrade <app_import_path> [target]
 |--------|-------------|
 | `head` | Upgrade to latest revision (default) |
 | `+1` | Upgrade one step |
-| `<revision_id>` | Upgrade to specific revision |
+| `<revision_id>` | Upgrade to a specific revision of this app's branch |
 
 **Examples:**
 
@@ -205,7 +205,7 @@ bedrock db upgrade myapp.users +1
 bedrock db upgrade myapp.users abc123def456
 ```
 
-**Important:** Only the specified app's branch is upgraded. Other branches are untouched.
+**Important:** Only the specified app's branch is upgraded. Other branches are untouched. A target outside the app's branch, such as `heads` or another app's revision ID, fails with an error.
 
 Upgrade and downgrade take a migration lock. PostgreSQL uses an advisory lock, MySQL and MariaDB use `GET_LOCK`, and the wait is `DATABASE_MIGRATION_LOCK_TIMEOUT` seconds (default 30). SQLite migrations are not locked; run them from one process. A timeout fails the command.
 
@@ -223,9 +223,11 @@ bedrock db downgrade <app_import_path> <target>
 
 | Target | Description |
 |--------|-------------|
-| `base` | Downgrade to empty (remove all tables) |
+| `base` | Remove all of this app's revisions (other apps untouched) |
 | `-1` | Downgrade one step |
-| `<revision_id>` | Downgrade to specific revision |
+| `<revision_id>` | Downgrade to a specific revision of this app's branch |
+
+Only the specified app's branch moves. A target outside it fails with an error.
 
 **Examples:**
 

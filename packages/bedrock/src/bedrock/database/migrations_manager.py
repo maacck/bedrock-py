@@ -24,6 +24,7 @@ from a single process.
 
 import math
 import os
+import re
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -306,6 +307,11 @@ class MigrationsManager:
         Returns:
             Set of applied revision ID strings for this branch.  Empty when the
             branch has never been applied.
+
+        Raises:
+            MigrationError: If the branch scripts or the database cannot be read.
+                A read failure is never reported as an empty set, because callers
+                treat an empty set as "never applied" and create, stamp, or skip work.
         """
         from alembic.runtime.migration import MigrationContext
         from sqlalchemy import create_engine
@@ -318,9 +324,10 @@ class MigrationsManager:
                 if branch_label in (rev.branch_labels or set())
                 or self._revision_in_branch(script, rev.revision, branch_label)
             }
-        except Exception:
-            log.debug("Failed to collect applied revisions for branch '%s'", branch_label, exc_info=True)
-            return set()
+        except Exception as exc:
+            raise MigrationError(
+                f"Cannot read the migration scripts of branch '{branch_label}': {exc}", branch_label
+            ) from exc
 
         if not branch_rev_ids:
             return set()
@@ -330,9 +337,11 @@ class MigrationsManager:
             with engine.connect() as conn:
                 migration_ctx = MigrationContext.configure(conn)
                 applied = migration_ctx.get_current_heads()
-        except Exception:
-            log.debug("Failed to query current migration heads from database", exc_info=True)
-            return set()
+        except Exception as exc:
+            raise MigrationError(
+                f"Cannot read the applied revisions of branch '{branch_label}' from the database: {exc}",
+                branch_label,
+            ) from exc
         finally:
             engine.dispose()
 
@@ -435,29 +444,63 @@ class MigrationsManager:
         except CommandError as exc:
             raise MigrationError(f"Failed to stamp '{branch_label}' at head: {exc}", branch_label) from exc
 
+    def _branch_target(self, cfg: Config, branch_label: str, target: str) -> str:
+        """Qualify an upgrade or downgrade *target* so Alembic only moves *branch_label*.
+
+        ``head``, ``base``, and relative steps (``+1``, ``-2``) become
+        ``<branch>@<target>``. A target already prefixed with ``<branch>@`` is kept.
+        Any other target must resolve to a revision of this branch; it is returned
+        as the full revision ID.
+
+        Args:
+            cfg: Alembic config whose version locations include the branch.
+            branch_label: Branch label, equal to the app import path.
+            target: Target as passed by the caller.
+
+        Returns:
+            A target that Alembic can only resolve inside *branch_label*.
+
+        Raises:
+            MigrationError: If *target* names another branch, several heads, or a
+                revision outside this branch.
+        """
+        if target in {"head", "base"} or re.fullmatch(r"[+-]\d+", target):
+            return f"{branch_label}@{target}"
+        if target.startswith(f"{branch_label}@"):
+            return target
+        script = ScriptDirectory.from_config(cfg)
+        try:
+            revision = script.get_revision(target)
+            branch_ids = {
+                rev.revision for rev in script.iterate_revisions(f"{branch_label}@head", f"{branch_label}@base")
+            }
+        except CommandError as exc:
+            raise MigrationError(str(exc), branch_label) from exc
+        if revision is None or revision.revision not in branch_ids:
+            raise MigrationError(
+                f"Target '{target}' is not a revision of the '{branch_label}' branch; "
+                "use 'head', 'base', a relative step such as '-1', or one of its revision IDs.",
+                branch_label,
+            )
+        return revision.revision
+
     def upgrade(self, app_import_path: str, target: str = "head") -> None:
         """Upgrade the given app's branch to *target*.
 
+        Only this app's branch moves; other branches are never upgraded.
+
         Args:
             app_import_path: Import path of the target app.
-            target: Revision identifier or relative offset accepted by
-                Alembic (``"head"``, ``"+1"``, a revision ID, …).
-                Defaults to ``"head"``.
+            target: ``"head"``, a relative step such as ``"+1"``, or a revision
+                ID of this app's branch. Defaults to ``"head"``.
 
         Raises:
-            MigrationError: If the app is not installed or the Alembic
-                operation fails.
+            MigrationError: If the app is not installed, *target* is outside the
+                app's branch, or the Alembic operation fails.
         """
         self._get_app(app_import_path)
         cfg = self._build_config(app_import_path)
-        branch_label = app_import_path
-
-        # If the caller passed a plain "head" we qualify it with the branch so
-        # that only this app's head is upgraded, never a foreign branch's head.
-        if target == "head":
-            alembic_target = f"{branch_label}@head"
-        else:
-            alembic_target = target
+        alembic_target = self._branch_target(cfg, app_import_path, target)
 
         try:
             with self._migration_lock():
@@ -468,21 +511,25 @@ class MigrationsManager:
     def downgrade(self, app_import_path: str, target: str) -> None:
         """Downgrade the given app's branch to *target*.
 
+        Only this app's branch moves: ``"base"`` removes this app's revisions,
+        never another app's.
+
         Args:
             app_import_path: Import path of the target app.
-            target: Revision identifier or relative offset accepted by
-                Alembic (``"base"``, ``"-1"``, a revision ID, …).
+            target: ``"base"``, a relative step such as ``"-1"``, or a revision
+                ID of this app's branch.
 
         Raises:
-            MigrationError: If the app is not installed or the Alembic
-                operation fails.
+            MigrationError: If the app is not installed, *target* is outside the
+                app's branch, or the Alembic operation fails.
         """
         self._get_app(app_import_path)
         cfg = self._build_config(app_import_path)
+        alembic_target = self._branch_target(cfg, app_import_path, target)
 
         try:
             with self._migration_lock():
-                command.downgrade(cfg, target)
+                command.downgrade(cfg, alembic_target)
         except CommandError as exc:
             raise MigrationError(str(exc), app_import_path) from exc
 
@@ -657,7 +704,10 @@ class MigrationsManager:
         except CommandError:
             return BranchRevisionStatus(branch=branch, current=(), head=head_revs, state="unknown")
 
-        current = tuple(sorted(self._get_current_revisions(cfg, branch)))
+        try:
+            current = tuple(sorted(self._get_current_revisions(cfg, branch)))
+        except MigrationError:
+            return BranchRevisionStatus(branch=branch, current=(), head=head_revs, state="unknown")
         current_ids = set(current)
         if not current_ids or not current_ids <= branch_ids:
             state = "unknown"
@@ -835,7 +885,9 @@ class MigrationsManager:
         """
         cfg = Config()
         cfg.set_main_option("script_location", self._script_location)
-        cfg.set_main_option("sqlalchemy.url", self._database_url)
+        # Alembic stores options in a ConfigParser, which treats "%" as interpolation;
+        # URL-encoded credentials (p@ss -> p%40ss) must be escaped to survive it.
+        cfg.set_main_option("sqlalchemy.url", self._database_url.replace("%", "%%"))
         cfg.set_main_option("file_template", "%%(rev)s_%%(year)d-%%(month).2d-%%(day).2d_%%(slug)s")
         # set version_table_pk
         cfg.set_main_option("version_table_pk", "id")

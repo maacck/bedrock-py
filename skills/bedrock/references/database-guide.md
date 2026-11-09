@@ -222,6 +222,8 @@ mgr.downgrade("myproject.modules.users", target="-1")
 mgr.downgrade("myproject.modules.users", target="base")
 ```
 
+Targets are confined to the app's branch: `head`, `base`, and `+N`/`-N` are qualified as `<app>@<target>`, and a revision ID must belong to the app's branch. Anything else (`heads`, another app's revision) raises `MigrationError`. When the applied revisions cannot be read, `ensure_schema` and `uninstall` raise `MigrationError` instead of treating the branch as never applied; `check` reports `unknown`.
+
 ### CLI Commands
 
 ```bash

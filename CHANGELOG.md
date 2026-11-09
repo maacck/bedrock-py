@@ -24,6 +24,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   set `__filterable_fields__ = "__all__"` to keep the previous behavior for that model; related
   models reached through it keep their own setting. Raw `sqla_filters` and
   `__searchable_columns__` for `q` are unaffected.
+- **Migrations**: `MigrationsManager.upgrade()`/`downgrade()` and `bedrock db upgrade`/`downgrade`
+  only move the requested app's branch. `head`, `base`, and relative steps (`+1`, `-1`) are
+  qualified as `<app>@<target>`; a revision ID must belong to the app's branch. Targets outside
+  it, such as `heads` or another app's revision ID, now raise `MigrationError`. Previously
+  `bedrock db downgrade <app> base` downgraded every installed app's branch and dropped their
+  tables. Migration: pass a target of the app you name, and migrate each app separately.
 
 ### Added
 
@@ -46,6 +52,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Database**: `asearch_filter_sort_paginate()` in `bedrock.database.service`, the `AsyncSession`
   variant of `search_filter_sort_paginate()`. It takes the same arguments and returns the same
   `items`/`total`/`page_info` dictionary, so `async def` services can list with `db.asession`.
+
+### Fixed
+
+- **Migrations**: a database URL containing percent-encoded characters, such as a password with
+  `@` or `#`, no longer makes every migration command fail with `ValueError: invalid interpolation
+  syntax` that printed the full URL, password included.
+- **Migrations**: when the applied revisions cannot be read (connection, permission, or script
+  errors), `ensure_schema()` and `uninstall()` raise `MigrationError` instead of treating the
+  branch as never applied, which stamped head over pending migrations or reported an uninstall
+  that did nothing. `check()` reports such branches as `unknown`.
 
 ## [0.3.1] - 2026-11-08
 

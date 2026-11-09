@@ -107,7 +107,9 @@ def revision(
 @db_app.command()
 def upgrade(
     app_import_path: Annotated[str, typer.Argument(help="Import path of the target app, e.g. 'myerp.wms'.")],
-    target: Annotated[str, typer.Argument(help="Revision target: 'head', '+1', or a revision ID.")] = "head",
+    target: Annotated[
+        str, typer.Argument(help="Revision target: 'head', '+1', or a revision ID of this app's branch.")
+    ] = "head",
 ) -> None:
     """Upgrade *APP_IMPORT_PATH* to *TARGET* (default: head).
 
@@ -133,9 +135,13 @@ def upgrade(
 @db_app.command()
 def downgrade(
     app_import_path: Annotated[str, typer.Argument(help="Import path of the target app, e.g. 'myerp.wms'.")],
-    target: Annotated[str, typer.Argument(help="Revision target: 'base', '-1', or a revision ID.")],
+    target: Annotated[
+        str, typer.Argument(help="Revision target: 'base', '-1', or a revision ID of this app's branch.")
+    ],
 ) -> None:
     """Downgrade *APP_IMPORT_PATH* to *TARGET*.
+
+    Only this app's branch moves; ``base`` removes this app's revisions, never another app's.
 
     Examples::
 
