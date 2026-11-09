@@ -64,7 +64,8 @@ bedrock --help
 uv run ruff check .
 uv run ruff format .
 
-# Tests (pytest, 4 test files in packages/bedrock/tests/)
+# Tests (pytest; testpaths in root pyproject.toml)
+uv run pytest                                     # every workspace suite
 uv run pytest packages/bedrock/tests/
 uv run pytest integrations/fastapi/tests/ integrations/celery/tests/
 
@@ -129,5 +130,5 @@ Completion: no surface references a removed or renamed API, and every code examp
 - Root `pyproject.toml` is workspace coordinator only, not application package
 - `bedrock-cli` is planned/future work—current CLI lives in `packages/bedrock/src/bedrock/cli/`
 - Ruff config: `[tool.ruff]` in root `pyproject.toml`
-- Pytest: dev dependency, 4 test files, no conftest.py
+- Pytest: `[tool.pytest.ini_options]` in root `pyproject.toml` lists each package's `tests/` as `testpaths`; `packages/bedrock/tests/conftest.py` enables the `bedrock.testing` plugin
 - No CI/CD pipelines, no Docker, no deployment scripts
