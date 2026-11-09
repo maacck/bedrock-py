@@ -148,7 +148,7 @@ Call `connect_worker()` once, in the module that creates the Celery app. It does
 
 A `def` task runs inside `db.session_scope()`; an `async def` task runs inside `db.asession_scope()`. Services own their transactions: they work in `db.session` / `db.asession` and commit. The task never commits for them; whatever is still uncommitted when it ends, for example because a service raised before committing, is rolled back.
 
-- **Do not open `db.session_scope()` or `db.asession_scope()` in a service.** A session is already bound inside a task, so they raise `RuntimeError`. For the same reason, do not call another task directly (`other_task(...)`) from inside a task; send it with `.delay()` / `.apply_async()`, or call its service.
+- **Do not open `db.session_scope()` or `db.asession_scope()` in a service.** A session is already bound inside a task, so they raise `SessionAlreadyBoundError`. For the same reason, do not call another task directly (`other_task(...)`) from inside a task; send it with `.delay()` / `.apply_async()`, or call its service.
 - **Each commit is final.** If a task retries after a service committed, the committed work stays. Keep writes that must succeed or fail together in one service method that commits once, and make tasks safe to run again.
 - **A write nobody commits is lost.** The task still finishes successfully.
 - **Side transactions** that must not share the task's transaction use `db.independent_session()` / `db.aindependent_session()`.
@@ -160,7 +160,7 @@ A `def` task runs inside `db.session_scope()`; an `async def` task runs inside `
 Declare a task with `async def` to call async services. Celery runs tasks synchronously, so `BedrockTask` runs the coroutine to completion with `bedrock.run_async()` within the call: `self.request`, `self.retry()`, and the other task options work as in a `def` task. A `def` task can also call `bedrock.run_async()` itself for a single async call.
 
 - **Async work in one process runs one task at a time.** The runtime loop has no thread of its own; the task's thread drives it. With the `threads` pool, async tasks from several threads take turns on the loop, while `def` tasks still run concurrently. Async tasks are tested with the `prefork`, `solo`, and `threads` pools.
-- An async task binds only `db.asession`. Use async services in it, not services that use `db.session`.
+- An async task binds only `db.asession`. Use async services in it, not services that use `db.session`: reading `db.session` there raises `SessionNotBoundError`.
 - Do not call `asyncio.run()` in a task: it creates and closes a loop per call, and async engines and clients belong to the loop they were created on. Use `bedrock.run_async()`.
 
 ## Testing

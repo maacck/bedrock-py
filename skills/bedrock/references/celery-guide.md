@@ -50,7 +50,7 @@ async def arestock(self, sku: str, qty: int) -> int:
 
 - `BedrockTask` runs each task inside `container.scope("task")` with a bound session: `db.session` for `def` tasks, `db.asession` for `async def` tasks. `Lifetime.SCOPED` services resolve once per task.
 - Services commit; the task never commits for them. Whatever is uncommitted when the task ends is rolled back.
-- Because a session is bound, `db.session_scope()` / `db.asession_scope()` raise `RuntimeError` inside a task. Use `db.independent_session()` / `db.aindependent_session()` for side transactions.
+- Because a session is bound, `db.session_scope()` / `db.asession_scope()` raise `SessionAlreadyBoundError` inside a task. Use `db.independent_session()` / `db.aindependent_session()` for side transactions. An `async def` task binds only `db.asession`; reading `db.session` there raises `SessionNotBoundError`.
 - `async def` tasks run with `bedrock.run_async()` on Bedrock's runtime loop, so async clients opened by `on_load` hooks stay usable. Never use `asyncio.run()` or `async_to_sync` in tasks.
 - Class-based tasks: `run` is classified by the class that defines it. A subclass inheriting an async `run` stays async; one overriding it with `def run` gets a sync session.
 

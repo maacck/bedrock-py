@@ -344,9 +344,16 @@ A module that owns both sync and async clients releases both. Keep `on_shutdown`
 
 ```python
 import bedrock
+from bedrock.database import db
+
+
+@db.asession_scope()  # binds db.asession for the service
+async def restock(sku: str, quantity: int) -> int:
+    return await inventory_service.arestock(sku, quantity)
+
 
 bedrock.setup("shop.inventory")
-stock = bedrock.run_async(inventory_service.arestock("A1", 3))
+stock = bedrock.run_async(restock("A1", 3))
 bedrock.shutdown()
 ```
 
