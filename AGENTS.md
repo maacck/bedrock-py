@@ -42,6 +42,7 @@ Python monorepo for Bedrock modular framework. `uv` workspaces, `src/` layout.
 - `packages/bedrock-cli` — Scaffolding CLI (planned, gitignored)
 - `packages/bedrock-example` — Example app (gitignored)
 - `integrations/fastapi` — `bedrock-fastapi`: FastAPI adapter library (request DI scope, per-request DB transactions, `BedrockExc` handler)
+- `integrations/celery` — `bedrock-celery`: Celery adapter library (per-process worker lifecycle, per-task DI scope and DB session, async tasks)
 - `docs-web/` — Derived fumadocs Web Doc site (don't hand-edit)
 - `docs-web/content/docs` — Docs source-of-truth (MDX)
 - `xboc/` — Reference prototype (gitignored, not for production)
@@ -65,7 +66,7 @@ uv run ruff format .
 
 # Tests (pytest, 4 test files in packages/bedrock/tests/)
 uv run pytest packages/bedrock/tests/
-uv run pytest integrations/fastapi/tests/
+uv run pytest integrations/fastapi/tests/ integrations/celery/tests/
 
 # Docs
 cd docs-web && npm run dev    # Dev server with live sync

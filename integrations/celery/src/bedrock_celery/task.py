@@ -1,0 +1,77 @@
+"""Celery task base class that gives each task its own Bedrock DI scope and database session."""
+
+import functools
+import inspect
+from collections.abc import Callable
+from typing import Any, ClassVar
+
+import bedrock
+from bedrock.database import db
+from bedrock.di import container
+from celery import Task
+
+
+class BedrockTask(Task):
+    """Run each task inside ``container.scope("task")`` with a database session bound for it.
+
+    Use it as the app's task class (``Celery(..., task_cls=BedrockTask)``) or per task (``base=BedrockTask``).
+
+    A ``def`` task runs inside ``db.session_scope()``; an ``async def`` task runs on Bedrock's runtime loop (see
+    ``bedrock.run_async()``) inside ``db.asession_scope()``. Either way the task never commits on its behalf:
+    services work in ``db.session`` / ``db.asession`` and commit, and whatever is still uncommitted when the task
+    ends is rolled back. Because a session is bound, ``db.session_scope()`` / ``db.asession_scope()`` raise
+    ``RuntimeError`` inside a task; use ``db.independent_session()`` / ``db.aindependent_session()`` for side
+    transactions.
+    """
+
+    _runs_async: ClassVar[bool] = False
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        """Turn an ``async def`` ``run`` into a sync one that runs it with ``bedrock.run_async()``.
+
+        Celery calls ``run`` synchronously, with the task's request pushed for the calling thread. Running the
+        coroutine to completion inside that call keeps ``self.request`` and ``self.retry()`` working. A subclass
+        that only inherits ``run`` keeps its parent's kind; one that overrides ``run`` is classified by the override.
+        """
+        super().__init_subclass__(**kwargs)
+        if "run" not in cls.__dict__:
+            return
+        raw = cls.__dict__["run"]
+        fn = raw.__func__ if isinstance(raw, staticmethod) else raw
+        cls._runs_async = inspect.iscoroutinefunction(fn)
+        if cls._runs_async:
+            runner = _run_with_async_session(fn)
+            cls.run = staticmethod(runner) if isinstance(raw, staticmethod) else runner
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        """Execute the task inside its DI scope and database session.
+
+        Raises:
+            DatabaseNotConfiguredError: When ``db.init()`` has not been called in the worker process.
+        """
+        if self._runs_async:
+            with container.scope("task"):
+                return super().__call__(*args, **kwargs)
+        with container.scope("task"), db.session_scope() as session:
+            try:
+                return super().__call__(*args, **kwargs)
+            finally:
+                # Discard uncommitted work so the scope's own commit has nothing left.
+                session.rollback()
+
+
+def _run_with_async_session(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Wrap the coroutine function *fn* so a sync call runs it on the runtime loop with a bound async session."""
+
+    async def in_session(*args: Any, **kwargs: Any) -> Any:
+        async with db.asession_scope() as session:
+            try:
+                return await fn(*args, **kwargs)
+            finally:
+                await session.rollback()
+
+    @functools.wraps(fn)
+    def run(*args: Any, **kwargs: Any) -> Any:
+        return bedrock.run_async(in_session(*args, **kwargs))
+
+    return run

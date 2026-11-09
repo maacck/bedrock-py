@@ -39,9 +39,11 @@ Test fixtures (isolated runtime, temporary modules, DB rollback): `pytest_plugin
 - **Understanding project structure** → Read `references/module-hierarchy.md`
 - **Understanding architecture / layer boundaries** → Read `references/architecture.md`
 - **Writing tests: isolated runtime, temporary modules, DB rollback** → Read `references/testing-guide.md`
+- **Running modules in Celery workers (`bedrock-celery`)** → Read `references/celery-guide.md`
 - **Using caching / distributed locks** → View `bedrock app playbook bedrock.contrib.cache`
 - **Instrumenting metrics** → View `bedrock app playbook bedrock.contrib.metric`
 - **Using file/object storage** → View `bedrock app playbook bedrock.contrib.storage`
+- **Rate limiting commands, jobs, or outbound calls** → View `bedrock app playbook bedrock.contrib.rate_limit`
 
 ## Contrib Packages
 
@@ -52,6 +54,7 @@ Bedrock ships first-party contrib packages, each documented by a playbook (view 
 | Cache | `bedrock.contrib.cache` | In-memory / Redis cache with TTL, distributed locks, typed namespaces |
 | Metrics | `bedrock.contrib.metric` | Counter/gauge/timer instrumentation with StatsD, Sentry, and Prometheus providers |
 | Storage | `bedrock.contrib.storage` | File/object storage with local and S3-compatible backends |
+| Rate limit | `bedrock.contrib.rate_limit` | Token-bucket rate limiting with a Redis backend and replaceable backends |
 
 ## Quick Start: New Project
 
@@ -131,7 +134,7 @@ bedrock.setup()  # Reads BEDROCK_APP env var, or pass app path explicitly
 bedrock.setup("myproject.app")  # Explicit app path
 ```
 
-Call `bedrock.setup()` once at process start. It is safe to call multiple times, and it does not configure logging. In an async process call `await bedrock.asetup()` and stop with `await bedrock.ashutdown()` (sync: `bedrock.shutdown()`), which stops modules in reverse order and then releases the initialized database. Use one family end to end; see `references/module-guide.md` (Async lifecycle).
+Call `bedrock.setup()` once at process start. It is safe to call multiple times, and it does not configure logging. In an async process call `await bedrock.asetup()` and stop with `await bedrock.ashutdown()` (sync: `bedrock.shutdown()`), which stops modules in reverse order and then releases the initialized database. Use one family end to end; see `references/module-guide.md` (Async lifecycle). Synchronous code that calls async services uses `bedrock.run_async(coro)` rather than `asyncio.run()`, so the clients `on_load` opened stay usable.
 
 Importing Bedrock does not remove loguru handlers or install Bedrock's sink. `configure_logging()` installs Bedrock's stderr sink (or `LOG_FILE` when that variable is set) and, on a later call, replaces only that sink. Handlers already present, including Loguru's preconfigured stderr handler, stay. `LOG_LEVEL`, `LOG_FORMAT`, `LOG_FILE`, `LOG_ROTATION`, `LOG_RETENTION`, `LOG_COMPRESSION`, and `LOG_SERIALIZE` are read when it runs. The `bedrock` CLI calls `configure_cli_logging()` before dispatching commands. That removes Loguru's preconfigured stderr handler so CLI lines are not duplicated and `LOG_*` controls CLI stderr; host handlers stay. Commands inside a module do not need to configure logging.
 

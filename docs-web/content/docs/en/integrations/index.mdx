@@ -17,5 +17,6 @@ Bedrock's core runtime does not depend on any web framework or task queue. Integ
 | Integration | Package | Provides |
 | --- | --- | --- |
 | [FastAPI](/docs/integrations/fastapi) | `bedrock-fastapi` | Per-request DI scope, per-request database session, `BedrockExc` to HTTP error responses |
+| [Celery](/docs/integrations/celery) | `bedrock-celery` | Per-process worker lifecycle, per-task DI scope and database session, async tasks |
 
 In the repository, each integration lives in `integrations/<framework>/` and is published as `bedrock-<framework>`.

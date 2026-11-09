@@ -10,6 +10,7 @@ import pytest
 from bedrock.contrib.cache import CacheCloseError, CacheService, cache, register_backend
 from bedrock.contrib.cache.backends.memory import InMemoryBackend
 from bedrock.contrib.metric import MetricsManager, metrics
+from bedrock.contrib.rate_limit import RateLimitService, rate_limit
 from bedrock.contrib.storage import storage
 from bedrock.module import ModuleAsyncRequiredError, ModuleLifecycleError, ModuleLifecycleState, ModuleRegistry
 
@@ -189,7 +190,6 @@ class TestCacheModuleHooks:
 
         assert fake_log == ["close", "aclose:start", "aclose:done"]
         assert registry._app_configs["bedrock.contrib.cache"].lifecycle_state is ModuleLifecycleState.SHUTDOWN
-        assert not registry._adapter.is_open
 
     @pytest.mark.asyncio
     async def test_async_shutdown_awaits_the_async_close(self, clean_cache: CacheService, fake_log: list[str]) -> None:
@@ -355,7 +355,6 @@ class TestMetricsModuleHooks:
 
         assert log == ["flush", "close", "aflush:start", "aflush:done", "aclose:start", "aclose:done"]
         assert registry._app_configs["bedrock.contrib.metric"].lifecycle_state is ModuleLifecycleState.SHUTDOWN
-        assert not registry._adapter.is_open
 
     @pytest.mark.asyncio
     async def test_async_shutdown_awaits_the_provider(self, clean_metrics: MetricsManager) -> None:
@@ -407,3 +406,45 @@ class TestStorageModuleHooks:
 
         assert backend.closed == 1
         assert storage._backend is None
+
+
+@pytest.fixture
+def clean_rate_limit(monkeypatch: pytest.MonkeyPatch) -> Iterator[RateLimitService]:
+    monkeypatch.delenv("RATE_LIMIT_BACKEND", raising=False)
+    rate_limit._backend = None
+    rate_limit._open = []
+    yield rate_limit
+    rate_limit._backend = None
+    rate_limit._open = []
+
+
+class TestRateLimitModuleHooks:
+    @pytest.mark.parametrize("mode", ["sync", "async"])
+    def test_ready_configures_redis_and_shutdown_closes_both_clients(
+        self, mode: str, clean_rate_limit: RateLimitService, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        pytest.importorskip("redis")
+        from bedrock.contrib.rate_limit.backends.redis import RedisRateLimitBackend
+
+        registry = ModuleRegistry()
+        registry.install("bedrock.contrib.rate_limit")
+        registry.mark_ready()
+        backend = clean_rate_limit._backend
+        assert isinstance(backend, RedisRateLimitBackend)
+
+        calls: list[str] = []
+
+        async def close_async_client() -> None:
+            calls.append("async")
+
+        monkeypatch.setattr(backend._client, "close", lambda: calls.append("sync"))
+        monkeypatch.setattr(backend._async_client, "aclose", close_async_client)
+
+        if mode == "sync":
+            registry.shutdown()
+        else:
+            asyncio.run(registry.ashutdown())
+
+        assert calls == ["sync", "async"]
+        assert clean_rate_limit._backend is None
+        assert registry._app_configs["bedrock.contrib.rate_limit"].lifecycle_state is ModuleLifecycleState.SHUTDOWN

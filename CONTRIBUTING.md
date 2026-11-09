@@ -149,8 +149,8 @@ uv run pytest packages/bedrock/tests/ -v
 # Run specific test file
 uv run pytest packages/bedrock/tests/test_signal.py
 
-# Run the FastAPI integration tests
-uv run pytest integrations/fastapi/tests/
+# Run the integration tests
+uv run pytest integrations/fastapi/tests/ integrations/celery/tests/
 ```
 
 ### Writing Tests

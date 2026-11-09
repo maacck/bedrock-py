@@ -12,6 +12,7 @@ from pathlib import Path
 import bedrock
 import bedrock.lifecycle as lifecycle
 import pytest
+from bedrock._loop import runtime_loop
 from bedrock.database import manager as manager_module
 from bedrock.database.config import DbSettings
 from bedrock.database.manager import DatabaseManager
@@ -393,7 +394,7 @@ class TestDatabaseReleasedAfterModules:
         bedrock.shutdown()
 
         assert "async_connection_closed" in proc_state
-        assert not registry._adapter.is_open
+        assert not runtime_loop.is_open
 
 
 class TestRunningLoop:

@@ -70,6 +70,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     is rolled back afterwards; `commit()` in service code (including `db.session_scope()`) commits a
     savepoint. `rollback_session()` and `arollback_session()` provide the same isolation as context
     managers, the async one for use in an async fixture. SQLite is supported.
+- **Lifecycle**: `bedrock.run_async(awaitable)` runs async code from synchronous code (Celery tasks, CLI
+  commands, scripts) on Bedrock's process-wide runtime loop, the loop synchronous `bedrock.setup()` runs async
+  hooks on. Clients opened by `on_load` hooks and the async database engine stay usable across calls, unlike
+  with `asyncio.run()`. The calling thread drives the loop and blocks; calls from several threads run one at a
+  time. It works without `setup()`, and raises `RuntimeError` inside a running event loop, after `asetup()` on
+  a loop that is still open, and from a thread that a coroutine on the runtime loop is waiting for.
+  `bedrock.shutdown()` and `ashutdown()` raise `RuntimeError` before shutting anything down when called from
+  work running on the runtime loop, which cannot close itself; call `shutdown()` after `run_async()` returns.
+- **Rate limit**: new `bedrock.contrib.rate_limit` module, a framework-agnostic token bucket (GCRA).
+  `RateLimitPolicy(name, limit, period)` lets `limit` units be spent at once and returns one every
+  `period / limit`. `rate_limit.hit(policy, key, cost=1)` / `ahit()` return
+  `RateLimitDecision(allowed, limit, remaining, retry_after, reset_after)` with durations in seconds; denied hits
+  consume nothing. `reset()` / `areset()` refill a bucket. Keys are hashed before storage. The built-in Redis
+  backend (extra `bedrock-core[rate-limit-redis]`, Redis 5+) evaluates each hit atomically in one Lua script
+  on the server clock; it is selected by `RATE_LIMIT_BACKEND` (default `redis`) and configured by
+  `RATE_LIMIT_REDIS_*`, independent of `CACHE_REDIS_*`. `register_backend()` / `register_backend_lazy()` add
+  replacement backends implementing `RateLimitBackend`. Errors: `InvalidRateLimitPolicyError`,
+  `InvalidRateLimitArgumentError`, `RateLimitPolicyConflictError`, `RateLimitBackendError` (no connection
+  details in the message), `RateLimitBackendNotConfiguredError`, `RateLimitCloseError`, all under
+  `RateLimitError`.
+
+### Changed
+
+- **Lifecycle**: the event loop that synchronous registry entrypoints run async hooks on is now process-wide
+  instead of one per `ModuleRegistry`. A registry no longer closes it when its last module shuts down;
+  `bedrock.shutdown()` closes it after every module and the database are released (and `ashutdown()` closes it
+  if synchronous code used it). Code that calls `registry.shutdown()` without `bedrock.shutdown()` leaves the
+  loop open until the next `bedrock.shutdown()` or interpreter exit; call `bedrock.shutdown()` to release it.
 
 - **Database**: `asearch_filter_sort_paginate()` in `bedrock.database.service`, the `AsyncSession`
   variant of `search_filter_sort_paginate()`. It takes the same arguments and returns the same

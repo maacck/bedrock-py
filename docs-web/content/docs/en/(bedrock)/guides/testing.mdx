@@ -53,12 +53,13 @@ When the test ends, whether it passed or failed:
 
 1. Modules that are not shut down yet are shut down with `registry.shutdown()`.
 2. Receivers connected to the lifecycle signals (`bedrock.module.signals`) during the test are removed.
-3. The DI container and the hook registry are reset, like `clean_container` and `clean_hooks`.
-4. `os.environ` is restored.
-5. Every `SettingsProxy` drops its cached settings, so the next access reads the environment again.
+3. Bedrock's runtime loop (see `bedrock.run_async()`) is closed, so the next test starts a fresh one.
+4. The DI container and the hook registry are reset, like `clean_container` and `clean_hooks`.
+5. `os.environ` is restored.
+6. Every `SettingsProxy` drops its cached settings, so the next access reads the environment again.
    The same reset also happens when the fixture starts, so `monkeypatch.setenv(...)` takes effect even
    for settings an earlier test already loaded.
-6. The original global registry is put back.
+7. The original global registry is put back.
 
 Every step runs even if an earlier one fails; the first failure is then reported as a teardown
 error.

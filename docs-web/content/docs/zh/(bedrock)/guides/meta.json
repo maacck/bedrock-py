@@ -10,6 +10,7 @@
     "cache",
     "metric",
     "storage",
+    "rate-limit",
     "signals",
     "di",
     "provider",
