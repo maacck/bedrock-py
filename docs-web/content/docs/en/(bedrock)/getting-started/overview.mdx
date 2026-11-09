@@ -125,10 +125,9 @@ class Product(BedrockModel):
 
 db.init()
 
-# Context-local session management
-product = Product(name="Widget")
-db.session.add(product)
-db.session.commit()
+# Bind a session for this block; commits on clean exit
+with db.session_scope():
+    db.session.add(Product(name="Widget"))
 
 # New session
 with db.independent_session() as session:

@@ -132,16 +132,16 @@ The `db` singleton is a `DatabaseManager` instance. It owns the engine, session 
 |-------------------|-----------|-------------|
 | `db.init()` | `init(url: str \| None = None, settings: DbSettings \| None = None)` | Initialize engine and session factory. Call once at process start. |
 | `db.engine` | `property → Engine` | The SQLAlchemy engine. Raises `DatabaseNotConfiguredError` if not initialized. |
-| `db.session` | `property → Session` | The current context-local session. Creates one on first access within a context. |
+| `db.session` | `property → Session` | The session bound to the current context. Raises `SessionNotBoundError` when none is bound. |
 | `db.session_factory` | `property → SessionFactory` | The underlying session factory. |
 | `db.settings` | `property → DbSettings` | The resolved database settings. |
 | `db.set_session(session)` | `set_session(session: Session)` | Bind an existing session to the current execution context. |
 | `db.clear_session()` | `clear_session()` | Close and unbind the current context-local session. |
-| `db.session_scope()` | `contextmanager → Session` | Transactional scope with auto commit/rollback. Binds to context. |
+| `db.session_scope()` | `contextmanager → Session` | Transactional scope with auto commit/rollback. Binds to context. Also usable as a decorator. |
 | `db.independent_session()` | `contextmanager → Session` | Isolated transaction that does not bind to context. |
 | `db.aengine` | `property → AsyncEngine` | Async engine for the URL resolved by `init()`, with only the driver swapped for `DATABASE_ASYNC_DRIVER`. |
-| `db.asession` | `property → AsyncSession` | Current context-local async session. Separate context variable from `db.session`. |
-| `db.asession_scope()` | `async context manager → AsyncSession` | Async transactional scope with the same commit, rollback, and nesting rules as `session_scope()`. |
+| `db.asession` | `property → AsyncSession` | The async session bound to the current context. Separate context variable from `db.session`. Raises `SessionNotBoundError` when none is bound. |
+| `db.asession_scope()` | `async context manager → AsyncSession` | Async transactional scope with the same commit, rollback, and nesting rules as `session_scope()`. Also usable as a decorator on `async def`. |
 | `db.aindependent_session()` | `async context manager → AsyncSession` | Async transaction that does not bind `db.asession`. |
 | `db.close()` | `close()` | Dispose the sync engine. Leaves a built async engine usable. Safe to call twice. `init()` works again afterwards. |
 | `db.aclose()` | `async aclose()` | Dispose the async engine. Leaves the sync engine usable. Safe to call twice. |
@@ -150,27 +150,39 @@ The `db` singleton is a `DatabaseManager` instance. It owns the engine, session 
 
 Accessing `db.engine`, `db.session`, or `db.settings` before calling `db.init()` raises `DatabaseNotConfiguredError`. Always initialize the database before using any of these properties.
 
+Reading `db.session` or `db.asession` when no session is bound to the current context raises `SessionNotBoundError` (a `BedrockExc`). Nothing is created implicitly: open a scope at the entry point.
+
 ## Session Management
 
 Bedrock uses context-local sessions backed by a `ContextVar`. New async tasks inherit their creator's context, including any bound session; clear or establish separate bindings at task and request boundaries rather than sharing a session concurrently.
 
 ### How It Works
 
-The `SessionFactory` wraps SQLAlchemy's `sessionmaker`. When you access `db.session`, it checks the `ContextVar` for an existing session. If none exists, it creates one and stores it. Subsequent accesses within the same context return the same session.
+The `SessionFactory` wraps SQLAlchemy's `sessionmaker`. `db.session` returns the session stored in the `ContextVar` and never creates one. Something at the entry point binds it:
+
+| Entry point | Binds the session with |
+|-------------|------------------------|
+| Script, CLI command, custom worker, WebSocket handler, startup hook | `with db.session_scope():` or `@db.session_scope()` |
+| FastAPI HTTP request | `DbSessionMiddleware` / `AsyncDbSessionMiddleware` from `bedrock-fastapi` |
+| Test | `with db.session_scope():` in the test; the `db_session` fixture from `bedrock.testing` rolls it back |
+| Session managed by another framework | `db.set_session(...)` |
+
+Services read `db.session` and commit; they never open a scope themselves:
 
 ```python
 from bedrock.database import db
 
+# service.py
+def create_product(name: str) -> None:
+    db.session.add(Product(name=name))
+    db.session.commit()
+
+# entry point
 db.init()
+with db.session_scope():
+    create_product("Widget")
 
-# First access creates a session
-session = db.session
-session.add(Product(name="Widget"))
-session.commit()
-
-# Same session within the same context
-same_session = db.session
-assert session is same_session
+create_product("Gadget")  # raises SessionNotBoundError: no scope is open
 ```
 
 ### Transaction Scopes with `session_scope()`
@@ -202,6 +214,25 @@ except ValueError:
 - Commits on clean exit, rolls back on any exception (including `BaseException`)
 - Always closes the session and resets the `ContextVar` on exit
 - Raises `RuntimeError` if called while a session is already bound (prevents nesting)
+
+### Decorating Entry Points
+
+`session_scope()` and `asession_scope()` also work as decorators. Every call opens a new scope, so each invocation gets its own session and transaction. The decorator can be applied before `db.init()`, because the database is only used when the function is called:
+
+```python
+from bedrock.database import db
+
+@db.session_scope()
+def import_products(path: str) -> None:
+    for name in read_names(path):
+        db.session.add(Product(name=name))
+
+@db.asession_scope()
+async def sync_inventory() -> None:
+    await refresh_stock(db.asession)
+```
+
+Note the parentheses: `@db.session_scope()`, not `@db.session_scope`. The function's return value passes through unchanged. Do not decorate a function that is called while a session is already bound, such as a service called from a request: the nested scope raises `RuntimeError`.
 
 ### Independent Sessions with `independent_session()`
 
@@ -275,42 +306,10 @@ from bedrock.database import db
 
 # Bind a session from an external source
 db.set_session(framework_session)
-
-# Now db.session returns the bound session
-product = db.session.query(Product).first()
-
-# Clean up when done
-db.clear_session()
-```
-
-### Clearing Sessions
-
-Always clear sessions when a request or task finishes to prevent stale data. `clear_session()` closes the session before unbinding:
-
-```python
-from bedrock.database import db
-
 try:
-    # Process request...
-    result = db.session.query(Product).all()
+    product = db.session.query(Product).first()
 finally:
-    db.clear_session()  # Closes session, then clears ContextVar
-```
-
-### SessionFactory as Context Manager
-
-`SessionFactory` itself can be used as a context manager. On exit, it closes and unbinds the current session:
-
-```python
-from bedrock.database import db
-
-db.init()
-
-with db.session_factory:
-    session = db.session
-    session.add(Product(name="Widget"))
-    session.commit()
-# Session is closed and unbound here
+    db.clear_session()  # Closes the session, then unbinds it
 ```
 
 ## BedrockModel
@@ -662,7 +661,9 @@ bedrock/database/
 
 **Don't access `db.session` before initialization.** This raises `DatabaseNotConfiguredError`. Always call `db.init()` first.
 
-**Don't forget to clear sessions.** Stale sessions hold database connections and can return outdated data. Use `db.clear_session()` at the end of each request or task.
+**Don't read `db.session` outside a scope.** It raises `SessionNotBoundError`. Bind a session at the entry point with `db.session_scope()` or the FastAPI middleware; services only read it.
+
+**Don't forget to clear sessions you bind yourself.** A session bound with `db.set_session()` stays bound until `db.clear_session()`. Call it in a `finally` block.
 
 **Don't put HTTP types in service or model layers.** Request and Response objects belong at adapter boundaries, not in business logic.
 

@@ -139,6 +139,8 @@ def test_place_order(db_session):
 测试期间，`db` 提供的每个 session（`db.session`、`db.session_scope()`、`db.independent_session()`）
 都运行在同一个连接的外层事务中。service 代码里的 `commit()` 只提交到 savepoint；测试结束时外层事务回滚，
 测试失败时也一样。`db_session` 本身不绑定到 `db.session`，因此 service 代码里的 `db.session_scope()` 照常工作。
+只读取 `db.session` 的 service 需要测试自己绑定 session：在 `with db.session_scope():` 中调用它，否则会抛出
+`SessionNotBoundError`。
 
 SQLite 需要显式的 `BEGIN` 语句，savepoint 才能随外层事务一起回滚；插件只把测试自己的那一条连接切换到这种模式，
 结束后再还原。

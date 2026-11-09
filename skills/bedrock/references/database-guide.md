@@ -74,20 +74,28 @@ An explicit URL selects the connection URL; engine pool options still come from 
 
 ## Session Management
 
-Access the current context-local session via the `db` singleton:
+`db.session` returns the session bound to the current context and never creates one. Reading it with nothing bound raises `SessionNotBoundError`. The entry point binds it; services only read it and commit:
+
+| Entry point | Binds the session with |
+|-------------|------------------------|
+| Script, CLI command, custom worker, WebSocket handler, startup hook | `with db.session_scope():` or `@db.session_scope()` |
+| FastAPI HTTP request | `DbSessionMiddleware` / `AsyncDbSessionMiddleware` (`bedrock-fastapi`) |
+| Test | `with db.session_scope():` in the test; the `db_session` fixture rolls it back |
+| Session managed by another framework | `db.set_session(...)` + `db.clear_session()` in `finally` |
 
 ```python
 from bedrock.database import db
 
-# Get current session (auto-created on first access per context)
-session = db.session
-
-# Use in service layer
+# service.py: never opens a scope
 def create_user(name: str, email: str) -> UserModel:
     user = UserModel(name=name, email=email)
     db.session.add(user)
     db.session.commit()
     return user
+
+# entry point
+with db.session_scope():
+    create_user("Alice", "alice@example.com")
 ```
 
 ### Transaction Scopes with `session_scope()`
@@ -118,7 +126,24 @@ except ValueError:
 - Always closes session and resets `ContextVar` on exit
 - Raises `RuntimeError` if called while a session is already bound
 
-Accessing `db.session` before entering the scope binds a session, so call `db.clear_session()` first if necessary. Commit expires ORM instances and the scope closes the session; return plain data or refresh and load required values before detaching instances.
+Commit expires ORM instances and the scope closes the session; return plain data or refresh and load required values before detaching instances.
+
+### Decorating Entry Points
+
+`session_scope()` and `asession_scope()` also work as decorators. Each call opens a new scope with its own session and transaction, and the decorator may be applied before `db.init()`:
+
+```python
+@db.session_scope()
+def import_users(path: str) -> None:
+    for name, email in read_rows(path):
+        create_user(name, email)
+
+@db.asession_scope()
+async def nightly_sync() -> None:
+    await sync_accounts(db.asession)
+```
+
+Use parentheses (`@db.session_scope()`). Decorate entry points only: a decorated function called while a session is bound (for example from a request) raises `RuntimeError`.
 
 ### Independent Sessions with `independent_session()`
 
@@ -154,21 +179,10 @@ For middleware or request lifecycle management:
 ```python
 # Bind an external session to current context
 db.set_session(my_session)
-
-# Clear binding when done (closes session, then clears ContextVar)
-db.clear_session()
-```
-
-### SessionFactory as Context Manager
-
-`SessionFactory` can be used as a context manager — closes and unbinds session on exit:
-
-```python
-with db.session_factory:
-    session = db.session
-    session.add(UserModel(name="Charlie", email="charlie@example.com"))
-    session.commit()
-# Session is closed and unbound here
+try:
+    ...
+finally:
+    db.clear_session()  # closes the session, then clears ContextVar
 ```
 
 ---
@@ -756,16 +770,16 @@ The `db` singleton is a `DatabaseManager` instance. It owns the engine, session 
 |-------------------|-------------|
 | `db.init(url, settings)` | Initialize or replace the engine and session factory. |
 | `db.engine` | The SQLAlchemy engine. Raises `DatabaseNotConfiguredError` if not initialized. |
-| `db.session` | The current context-local session. Creates one on first access within a context. |
+| `db.session` | The session bound to the current context. Raises `SessionNotBoundError` when none is bound. |
 | `db.session_factory` | The underlying session factory. |
 | `db.settings` | The resolved database settings. |
 | `db.set_session(session)` | Bind an existing session to the current execution context. |
 | `db.clear_session()` | Close and unbind the current context-local session. |
-| `db.session_scope()` | Context manager — transactional scope with auto commit/rollback. Binds to context. |
+| `db.session_scope()` | Context manager or decorator — transactional scope with auto commit/rollback. Binds to context. |
 | `db.independent_session()` | Context manager — isolated transaction that does not bind to context. |
 | `db.aengine` | Async engine for the URL resolved by `init()`, including an explicit `url=`. Only the driver is swapped for `DATABASE_ASYNC_DRIVER`. |
-| `db.asession` | Context-local async session. Separate context variable from `db.session`. |
-| `db.asession_scope()` | Async transactional scope. Same commit, rollback, and nesting rules as `session_scope()`. |
+| `db.asession` | The async session bound to the current context. Separate context variable from `db.session`. Raises `SessionNotBoundError` when none is bound. |
+| `db.asession_scope()` | Async context manager or decorator. Same commit, rollback, and nesting rules as `session_scope()`. |
 | `db.aindependent_session()` | Async transaction that does not bind `db.asession`. |
 | `db.close()` | Dispose the sync engine. A built async engine stays usable. Idempotent. `init()` works again afterwards. |
 | `db.aclose()` | Dispose the async engine. The sync engine stays usable. Idempotent. Does not shut down the module registry. If both engines were built, call `close()` and `await aclose()`. `bedrock.shutdown()` / `await bedrock.ashutdown()` call whichever apply after all module hooks. |
@@ -775,3 +789,5 @@ Async drivers install as extras: `aiosqlite` → `bedrock-core[async-sqlite]`; `
 ### Error Handling
 
 Accessing `db.engine`, `db.session`, `db.session_factory`, or `db.settings`, or using session management methods, before calling `db.init()` raises `DatabaseNotConfiguredError`. Always initialize the database before using them.
+
+Reading `db.session` / `db.asession` with no session bound to the current context raises `SessionNotBoundError` (a `BedrockExc`). Bind one at the entry point.

@@ -132,16 +132,16 @@ db.init(url="postgresql+psycopg2://admin:secret@localhost:5432/myapp")
 |-------------------|-----------|-------------|
 | `db.init()` | `init(url: str \| None = None, settings: DbSettings \| None = None)` | 初始化 engine 和 session factory。在进程启动时调用一次。 |
 | `db.engine` | `property → Engine` | SQLAlchemy engine。未初始化时会抛出 `DatabaseNotConfiguredError`。 |
-| `db.session` | `property → Session` | 当前上下文局部 session。在某个上下文中首次访问时创建。 |
+| `db.session` | `property → Session` | 当前上下文绑定的 session。没有绑定时抛出 `SessionNotBoundError`。 |
 | `db.session_factory` | `property → SessionFactory` | 底层 session factory。 |
 | `db.settings` | `property → DbSettings` | 解析后的数据库 settings。 |
 | `db.set_session(session)` | `set_session(session: Session)` | 将现有 session 绑定到当前执行上下文。 |
 | `db.clear_session()` | `clear_session()` | 关闭并解绑当前上下文局部 session。 |
-| `db.session_scope()` | `contextmanager → Session` | 事务作用域，自动提交/回滚。绑定到上下文。 |
+| `db.session_scope()` | `contextmanager → Session` | 事务作用域，自动提交/回滚。绑定到上下文。也可以用作装饰器。 |
 | `db.independent_session()` | `contextmanager → Session` | 隔离事务，不绑定到上下文。 |
 | `db.aengine` | `property → AsyncEngine` | 使用 `init()` 已解析的 URL，只把驱动换成 `DATABASE_ASYNC_DRIVER`。 |
-| `db.asession` | `property → AsyncSession` | 当前上下文局部的异步 session，使用与 `db.session` 不同的上下文变量。 |
-| `db.asession_scope()` | `async context manager → AsyncSession` | 异步事务作用域，提交、回滚和禁止嵌套的规则与 `session_scope()` 相同。 |
+| `db.asession` | `property → AsyncSession` | 当前上下文绑定的异步 session，使用与 `db.session` 不同的上下文变量。没有绑定时抛出 `SessionNotBoundError`。 |
+| `db.asession_scope()` | `async context manager → AsyncSession` | 异步事务作用域，提交、回滚和禁止嵌套的规则与 `session_scope()` 相同。也可以用作 `async def` 的装饰器。 |
 | `db.aindependent_session()` | `async context manager → AsyncSession` | 不绑定 `db.asession` 的异步事务。 |
 | `db.close()` | `close()` | 释放同步 engine。已创建的异步 engine 仍可使用。可以重复调用。之后可以再次 `init()`。 |
 | `db.aclose()` | `async aclose()` | 释放异步 engine。同步 engine 仍可使用。可以重复调用。 |
@@ -150,27 +150,39 @@ db.init(url="postgresql+psycopg2://admin:secret@localhost:5432/myapp")
 
 在调用 `db.init()` 之前访问 `db.engine`、`db.session` 或 `db.settings` 会抛出 `DatabaseNotConfiguredError`。使用这些属性前务必先初始化数据库。
 
+当前上下文没有绑定 session 时读取 `db.session` 或 `db.asession` 会抛出 `SessionNotBoundError`（`BedrockExc` 的子类）。框架不会隐式创建 session：请在入口处打开作用域。
+
 ## Session 管理
 
 Bedrock 使用由 `ContextVar` 支撑的上下文局部 session。新异步任务会继承创建者的上下文，包括已绑定的 session；应在任务和请求边界清理或单独建立绑定，避免并发共享 session。
 
 ### 工作方式
 
-`SessionFactory` 对 SQLAlchemy 的 `sessionmaker` 做了封装。当你访问 `db.session` 时，它会检查 `ContextVar` 中是否已有 session。若不存在，就创建一个并存储进去。在同一上下文中的后续访问会返回同一个 session。
+`SessionFactory` 对 SQLAlchemy 的 `sessionmaker` 做了封装。`db.session` 只返回 `ContextVar` 中已绑定的 session，从不自行创建。绑定由入口负责：
+
+| 入口 | 绑定方式 |
+|------|----------|
+| 脚本、CLI 命令、自定义 worker、WebSocket 处理函数、启动钩子 | `with db.session_scope():` 或 `@db.session_scope()` |
+| FastAPI HTTP 请求 | `bedrock-fastapi` 的 `DbSessionMiddleware` / `AsyncDbSessionMiddleware` |
+| 测试 | 在测试中 `with db.session_scope():`；`bedrock.testing` 的 `db_session` fixture 负责回滚 |
+| 由其他框架管理的 session | `db.set_session(...)` |
+
+Service 读取 `db.session` 并负责提交，自身不打开作用域：
 
 ```python
 from bedrock.database import db
 
+# service.py
+def create_product(name: str) -> None:
+    db.session.add(Product(name=name))
+    db.session.commit()
+
+# 入口
 db.init()
+with db.session_scope():
+    create_product("Widget")
 
-# First access creates a session
-session = db.session
-session.add(Product(name="Widget"))
-session.commit()
-
-# Same session within the same context
-same_session = db.session
-assert session is same_session
+create_product("Gadget")  # 抛出 SessionNotBoundError：没有打开作用域
 ```
 
 ### 使用 `session_scope()` 管理事务
@@ -202,6 +214,25 @@ except ValueError:
 - 正常退出时提交，任何异常（包括 `BaseException`）时回滚
 - 退出时始终关闭 session 并重置 `ContextVar`
 - 如果在已绑定 session 的上下文中调用会抛出 `RuntimeError`（防止嵌套）
+
+### 装饰入口函数
+
+`session_scope()` 和 `asession_scope()` 也可以用作装饰器。每次调用都会打开新的作用域，所以每次调用都有自己的 session 和事务。装饰器可以在 `db.init()` 之前应用，因为数据库只在函数被调用时才会用到：
+
+```python
+from bedrock.database import db
+
+@db.session_scope()
+def import_products(path: str) -> None:
+    for name in read_names(path):
+        db.session.add(Product(name=name))
+
+@db.asession_scope()
+async def sync_inventory() -> None:
+    await refresh_stock(db.asession)
+```
+
+注意括号：写 `@db.session_scope()`，不是 `@db.session_scope`。函数返回值原样返回。不要装饰会在已绑定 session 时被调用的函数（例如请求内调用的 service）：嵌套的作用域会抛出 `RuntimeError`。
 
 ### 使用 `independent_session()` 进行独立事务
 
@@ -275,42 +306,10 @@ from bedrock.database import db
 
 # Bind a session from an external source
 db.set_session(framework_session)
-
-# Now db.session returns the bound session
-product = db.session.query(Product).first()
-
-# Clean up when done
-db.clear_session()
-```
-
-### 清理 Session
-
-请求或任务结束时务必清理 session，以防止陈旧数据残留。`clear_session()` 会先关闭 session 再解绑：
-
-```python
-from bedrock.database import db
-
 try:
-    # Process request...
-    result = db.session.query(Product).all()
+    product = db.session.query(Product).first()
 finally:
-    db.clear_session()  # 关闭 session，然后清除 ContextVar
-```
-
-### SessionFactory 作为上下文管理器
-
-`SessionFactory` 本身可以作为上下文管理器使用。退出时会关闭并解绑当前 session：
-
-```python
-from bedrock.database import db
-
-db.init()
-
-with db.session_factory:
-    session = db.session
-    session.add(Product(name="Widget"))
-    session.commit()
-# session 在此处被关闭和解绑
+    db.clear_session()  # 关闭 session，然后解绑
 ```
 
 ## BedrockModel
@@ -662,7 +661,9 @@ bedrock/database/
 
 **不要在初始化前访问 `db.session`。** 这会抛出 `DatabaseNotConfiguredError`。务必先调用 `db.init()`。
 
-**不要忘记清理 session。** 陈旧 session 会占用数据库连接，也可能返回过期数据。请在每次请求或任务结束时使用 `db.clear_session()`。
+**不要在作用域之外读取 `db.session`。** 这会抛出 `SessionNotBoundError`。请在入口处用 `db.session_scope()` 或 FastAPI 中间件绑定 session；service 只负责读取。
+
+**不要忘记清理自己绑定的 session。** 用 `db.set_session()` 绑定的 session 会一直保持绑定，直到调用 `db.clear_session()`。请在 `finally` 中调用。
 
 **不要在 service 或 model 层中放入 HTTP 类型。** Request 和 Response 对象应位于适配器边界，而不应进入业务逻辑。
 

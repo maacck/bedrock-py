@@ -152,7 +152,8 @@ During the test, every session that `db` hands out (`db.session`, `db.session_sc
 `db.independent_session()`) runs on one connection inside an outer transaction. A `commit()` in
 service code commits a savepoint; the outer transaction is rolled back when the test ends, also when
 the test fails. The `db_session` session itself is not bound to `db.session`, so service code that
-opens `db.session_scope()` keeps working.
+opens `db.session_scope()` keeps working. A service that only reads `db.session` needs the test to
+bind one: call it inside `with db.session_scope():`, otherwise it raises `SessionNotBoundError`.
 
 SQLite needs explicit `BEGIN` statements for savepoints to roll back with the outer transaction; the
 plugin switches only the test's own connection into that mode and restores it afterwards.

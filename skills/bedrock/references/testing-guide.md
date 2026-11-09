@@ -91,7 +91,8 @@ def test_place_order(db_session):
 
 - All sessions from `db` (`db.session`, `db.session_scope()`, `db.independent_session()`) share one connection
   inside an outer transaction; `commit()` commits a savepoint; the outer transaction rolls back at the end.
-- The yielded session is not bound to `db.session`, so service code may open `db.session_scope()`.
+- The yielded session is not bound to `db.session`, so service code may open `db.session_scope()`. A service that
+  only reads `db.session` must be called inside `with db.session_scope():` in the test.
 - SQLite is handled (the test connection emits explicit `BEGIN`, restored afterwards).
 - Limits: `independent_session()` sees the caller's uncommitted data; `db.engine.connect()` bypasses the rollback;
   calling `db.init()` in the test ends isolation; uninitialized `db` raises `DatabaseNotConfiguredError`.

@@ -211,7 +211,7 @@ Resolving a scoped service in any dependency or endpoint, sync or async, returns
 - **Both middlewares can be installed.** They bind separate sessions with separate transactions, so writes through `db.session` and `db.asession` are not atomic together.
 - If `db.init()` was not called, every request fails with `DatabaseNotConfiguredError`. The first async request builds the async engine and requires `DATABASE_ASYNC_DRIVER`.
 
-The session must be bound by middleware: a sync dependency or endpoint that creates `db.session` on its own does so in a worker thread's copied context, so the next dependency gets a different session and nothing closes it at the end of the request.
+The session must be bound by middleware. Without it, reading `db.session` or `db.asession` in a dependency or endpoint raises `SessionNotBoundError`.
 
 ## Error responses
 

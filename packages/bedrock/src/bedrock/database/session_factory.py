@@ -5,8 +5,27 @@ from contextvars import ContextVar
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
+from ..exc import BedrockExc
+
 _current_db_session: ContextVar[Session | None] = ContextVar("_current_db_session", default=None)
 _current_async_db_session: ContextVar[AsyncSession | None] = ContextVar("_current_async_db_session", default=None)
+
+
+class SessionNotBoundError(BedrockExc):
+    """Raised when ``db.session`` or ``db.asession`` is read while no session is bound to the context."""
+
+    detail: str = (
+        "No database session is bound to this context. Open one with `with db.session_scope():` or "
+        "`@db.session_scope()` at the entry point (script, CLI command, worker, WebSocket handler, startup hook), "
+        "or use the integration middleware or task wrapper that binds one per request or task."
+    )
+
+
+_ASYNC_NOT_BOUND = (
+    "No async database session is bound to this context. Open one with `async with db.asession_scope():` or "
+    "`@db.asession_scope()` at the entry point, or use the integration middleware or task wrapper that binds "
+    "one per request or task."
+)
 
 
 class SessionFactory:
@@ -17,11 +36,18 @@ class SessionFactory:
 
     @property
     def session(self) -> Session:
-        """Return the current context-local session, creating one on first access."""
+        """Return the session bound to the current context.
+
+        A session is bound by :meth:`session_scope`, :meth:`set_session`, or an integration that opens a
+        scope per request or task. Reading it creates nothing, so a session can never outlive the scope
+        that opened it.
+
+        Raises:
+            SessionNotBoundError: If no session is bound to the current context.
+        """
         session = _current_db_session.get()
         if session is None:
-            session = self._session_local()
-            _current_db_session.set(session)
+            raise SessionNotBoundError()
         return session
 
     @contextmanager
@@ -96,16 +122,8 @@ class SessionFactory:
         _current_db_session.set(None)
 
     def __call__(self) -> Session:
-        """Return a new session from the factory, bypassing context-local caching."""
+        """Return a new session from the factory without binding it to the context."""
         return self._session_local()
-
-    def __enter__(self) -> "SessionFactory":
-        """Enter context manager block."""
-        return self
-
-    def __exit__(self, *args: object) -> None:
-        """Close and unbind session when exiting context manager block."""
-        self.clear_session()
 
 
 class AsyncSessionFactory:
@@ -120,12 +138,15 @@ class AsyncSessionFactory:
 
     @property
     def session(self) -> AsyncSession:
-        """Return the current context-local async session, creating one on first access."""
+        """Return the async session bound to the current context.
+
+        Raises:
+            SessionNotBoundError: If no async session is bound to the current context.
+        """
 
         session = _current_async_db_session.get()
         if session is None:
-            session = self._session_local()
-            _current_async_db_session.set(session)
+            raise SessionNotBoundError(_ASYNC_NOT_BOUND)
         return session
 
     @asynccontextmanager

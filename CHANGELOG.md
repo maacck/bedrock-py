@@ -30,6 +30,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it, such as `heads` or another app's revision ID, now raise `MigrationError`. Previously
   `bedrock db downgrade <app> base` downgraded every installed app's branch and dropped their
   tables. Migration: pass a target of the app you name, and migrate each app separately.
+- **Database sessions**: `db.session` and `db.asession` no longer create a session on first access.
+  With no session bound to the current context they raise the new `SessionNotBoundError` (a
+  `BedrockExc`, exported from `bedrock.database`). `SessionFactory` is no longer a context manager
+  (`with db.session_factory:` is removed). Previously a session touched in a long-lived context
+  (module import, a sync `setup()` hook, a reused worker thread) was created there, never closed, and
+  inherited by every later request or task, which leaked uncommitted writes between requests and
+  made every FastAPI request fail with `RuntimeError` once the middleware tried to open its scope.
+  Migration: bind a session at each entry point. Scripts, CLI commands, custom workers, WebSocket
+  handlers, and startup hooks use `with db.session_scope():` or decorate the entry function with
+  `@db.session_scope()` (async: `@db.asession_scope()`; each call opens its own scope). FastAPI
+  requests use `DbSessionMiddleware` / `AsyncDbSessionMiddleware`; tests call such services inside
+  `with db.session_scope():` (the `db_session` fixture still rolls it back); sessions owned by another
+  framework use `db.set_session()` with `db.clear_session()` in `finally`. Services that read
+  `db.session` need no change.
 
 ### Added
 

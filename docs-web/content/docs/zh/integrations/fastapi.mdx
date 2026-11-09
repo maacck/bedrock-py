@@ -211,7 +211,7 @@ async def create_item(body: ItemIn, audit: RequestAudit = Depends(get_audit)) ->
 - **两个中间件可以同时安装。**它们绑定各自独立的 session 和事务，因此通过 `db.session` 和 `db.asession` 的写入不构成一个原子操作。
 - 如果没有调用 `db.init()`，每个请求都会因 `DatabaseNotConfiguredError` 失败。首个异步请求会创建异步 engine，需要设置 `DATABASE_ASYNC_DRIVER`。
 
-session 必须由中间件绑定：同步依赖或端点自行创建 `db.session` 时，是在工作线程的复制上下文中创建的，下一个依赖会拿到不同的 session，请求结束时也没有代码关闭它。
+session 必须由中间件绑定。未安装中间件时，在依赖或端点中读取 `db.session` 或 `db.asession` 会抛出 `SessionNotBoundError`。
 
 ## 错误响应
 

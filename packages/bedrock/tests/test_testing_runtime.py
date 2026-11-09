@@ -181,7 +181,8 @@ def test_teardown_leaves_global_database_open(fake_package: Path, tmp_path: Path
     try:
         with isolated_runtime():
             bedrock.setup(name)
-        assert db.session.execute(text("select 1")).scalar_one() == 1
+        with db.session_scope() as session:
+            assert session.execute(text("select 1")).scalar_one() == 1
     finally:
         db.close()
 
