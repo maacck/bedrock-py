@@ -17,6 +17,13 @@ end
 return 0
 """
 
+_COMPARE_AND_EXPIRE_SCRIPT = """
+if redis.call('get', KEYS[1]) == ARGV[1] then
+    return redis.call('expire', KEYS[1], ARGV[2])
+end
+return 0
+"""
+
 _CLEAR_BATCH_SIZE = 100
 
 
@@ -223,6 +230,14 @@ class RedisBackend(CacheBackend):
                 expected,
             )
         )
+
+    def compare_and_expire(self, key: str, expected: bytes, ex: int) -> bool:
+        """Reset a key's TTL to *ex* seconds only when its current value matches *expected*."""
+        return bool(self._client.eval(_COMPARE_AND_EXPIRE_SCRIPT, 1, self._make_key(key), expected, ex))
+
+    async def acompare_and_expire(self, key: str, expected: bytes, ex: int) -> bool:
+        """Asynchronous variant of :meth:`compare_and_expire`."""
+        return bool(await self._async_client.eval(_COMPARE_AND_EXPIRE_SCRIPT, 1, self._make_key(key), expected, ex))
 
     def exists(self, key: str) -> bool:
         """Check whether a key exists in the cache."""

@@ -135,7 +135,7 @@ All inherit from `CacheError` (`BedrockExc`):
 | `CacheClearRequiresPrefixError` | Redis `clear()` with empty `key_prefix` and no `prefix=` |
 | `CacheLockError` | Same `CacheLock` instance acquired twice |
 | `CacheLockAcquisitionError` | `with` / `async with` could not acquire |
-| `CacheLockOwnershipError` | `release()` when not held, expired, or stolen |
+| `CacheLockOwnershipError` | `release()` / `extend()` when not held, expired, or stolen |
 | `CacheConnectionError` | Reserved for connection failures |
 | `CacheSerializationError` | Reserved for coder failures |
 | `ValueError` | `type_`+`coder`, bad lock/slot/namespace params |
@@ -148,7 +148,7 @@ Details: `references/exceptions.md`.
 - Shut down through one family: `bedrock.shutdown()` or `await bedrock.ashutdown()`. A sync `shutdown()` inside a running event loop raises `ModuleAsyncRequiredError` when Redis async clients are open.
 - Don't call Redis `clear()` without `CACHE_REDIS_KEY_PREFIX` or an explicit `prefix=`.
 - Don't use the in-memory backend for cross-process locks.
-- Don't hold a lock longer than `expire` — the key vanishes and `release()` raises `CacheLockOwnershipError`.
+- Don't hold a lock longer than `expire` without calling `extend()` — the key vanishes and `release()` raises `CacheLockOwnershipError`.
 - Don't pass both `type_` and `coder`.
 - Don't concatenate raw cache keys. Use `namespace` / `slot`.
 - Don't import `bedrock.cache`. Canonical path is `bedrock.contrib.cache`.
