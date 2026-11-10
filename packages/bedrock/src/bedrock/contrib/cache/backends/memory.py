@@ -173,7 +173,8 @@ class InMemoryBackend(CacheBackend):
     ) -> bool:
         """Asynchronous variant of :meth:`add`."""
         expires_at = self._resolve_expires_at(ex=ex, px=px, ea=ea)
-        async with self._lock:
+        # Shares the thread lock with add()/compare_and_*() so sync and async lock callers exclude each other.
+        with self._sync_lock:
             entry = self._store.get(key)
             if entry is not None and not entry.is_expired:
                 return False
@@ -223,7 +224,7 @@ class InMemoryBackend(CacheBackend):
 
     async def acompare_and_delete(self, key: str, expected: bytes) -> bool:
         """Asynchronous variant of :meth:`compare_and_delete`."""
-        async with self._lock:
+        with self._sync_lock:
             entry = self._store.get(key)
             if entry is None:
                 return False
@@ -233,6 +234,31 @@ class InMemoryBackend(CacheBackend):
             if entry.value != expected:
                 return False
             del self._store[key]
+            return True
+
+    def compare_and_expire(self, key: str, expected: bytes, ex: int) -> bool:
+        """Reset a key's TTL to *ex* seconds only when its current value matches *expected*."""
+        with self._sync_lock:
+            entry = self._store.get(key)
+            if entry is None or entry.value != expected:
+                return False
+            if entry.is_expired:
+                del self._store[key]
+                return False
+            # Re-insert instead of mutating: unlocked expiry cleanup (get/exists) may have dropped the old entry.
+            self._store[key] = CacheEntry(value=expected, expires_at=self._resolve_expires_at(ex=ex))
+            return True
+
+    async def acompare_and_expire(self, key: str, expected: bytes, ex: int) -> bool:
+        """Asynchronous variant of :meth:`compare_and_expire`."""
+        with self._sync_lock:
+            entry = self._store.get(key)
+            if entry is None or entry.value != expected:
+                return False
+            if entry.is_expired:
+                del self._store[key]
+                return False
+            self._store[key] = CacheEntry(value=expected, expires_at=self._resolve_expires_at(ex=ex))
             return True
 
     def exists(self, key: str) -> bool:
