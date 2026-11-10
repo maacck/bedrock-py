@@ -55,6 +55,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Release tooling**: `make release-version VERSION=X.Y.Z` synchronizes the root, core, and CLI package
+  versions through uv and regenerates the lockfile once. `PACKAGE=bedrock-fastapi` or `PACKAGE=bedrock-celery`
+  selects an independent integration release. Failed updates restore the selected manifests and lockfile;
+  dependency minimums, release notes, Git tags, and publishing remain explicit maintainer steps.
+- **CLI version metadata**: `bedrock_cli.__version__` reads the installed distribution version instead of
+  maintaining a separate hard-coded value.
 - **Testing**: runtime-level pytest fixtures in `bedrock.testing` (enabled with
   `pytest_plugins = ["bedrock.testing"]`):
   - `bedrock_runtime` gives each test a fresh module registry that `bedrock.setup()`, `asetup()`,

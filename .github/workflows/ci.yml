@@ -30,6 +30,8 @@ jobs:
           filters: |
             python:
               - 'packages/**'
+              - 'scripts/**'
+              - 'Makefile'
               - 'pyproject.toml'
               - 'uv.lock'
               - '.github/workflows/**'
@@ -42,6 +44,8 @@ jobs:
               - '.github/workflows/**'
             bedrock_cli:
               - 'packages/bedrock-cli/**'
+              - 'scripts/**'
+              - 'Makefile'
               - 'pyproject.toml'
               - 'uv.lock'
               - '.github/workflows/**'

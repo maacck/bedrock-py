@@ -248,12 +248,33 @@ cd docs-web && npm run build
 ### 2. Bump and Tag
 
 1. Rename `## [Unreleased]` to `## [X.Y.Z] - YYYY-MM-DD` in `CHANGELOG.md`.
-2. Set `version` in `pyproject.toml`, `packages/bedrock/pyproject.toml`, and
-   `packages/bedrock-cli/pyproject.toml`, then run `uv lock`.
+2. Run `make release-version VERSION=X.Y.Z` to synchronize `pyproject.toml`,
+   `packages/bedrock/pyproject.toml`, and `packages/bedrock-cli/pyproject.toml`, then regenerate `uv.lock` once.
 3. Raise `bedrock-core>=` in `packages/bedrock-cli/src/bedrock_cli/templates/workspace/pyproject.toml.j2`
    when generated projects need this release.
 4. Add a new minor line to the supported versions in `SECURITY.md`.
 5. Commit as `chore(release): prepare vX.Y.Z`, merge to `main`, then tag that commit on `main` and push the tag.
+
+The version command requires Make and uv; uv selects Python 3.12 or newer. It delegates version validation
+and normalization to `uv version`, checks the resulting package versions, and restores the selected manifests
+and previous lockfile if an update or dependency resolution fails. It does not synchronize the virtual
+environment; run `uv sync` afterward if you need to inspect the newly installed package versions.
+
+Only the selected release group's package versions and the workspace lockfile are updated. Dependency minimums,
+historical changelogs, example/module versions, and unrelated integration versions are left unchanged.
+The command does not commit, tag, push, or publish. Complete the alignment check above before running it.
+
+Without Make, the equivalent command is:
+
+```bash
+uv run --no-project --python '>=3.12' scripts/release_version.py X.Y.Z
+```
+
+Release-tool regression checks run real Make and uv commands in temporary, offline workspaces:
+
+```bash
+uv run --package bedrock-cli pytest packages/bedrock-cli/tests/test_release_version.py
+```
 
 ### Releasing an integration
 
@@ -264,8 +285,10 @@ that touch `integrations/` or `packages/bedrock/`, so a core change that breaks 
 1. Check that the integration's `CHANGELOG.md` `[Unreleased]` section, its Web Doc page under
    `docs-web/content/docs/{en,zh}/integrations/`, and its `README.md` match the code.
 2. Rename `## [Unreleased]` to `## [X.Y.Z] - YYYY-MM-DD` in `integrations/<framework>/CHANGELOG.md`.
-3. Set `version` in `integrations/<framework>/pyproject.toml`. If the release needs newer core behavior, raise
-   its `bedrock-core>=` requirement to a published core version. Run `uv lock`.
+3. If this release needs newer core behavior, raise its `bedrock-core>=` requirement to a published core version.
+   Run `make release-version PACKAGE=bedrock-<framework> VERSION=X.Y.Z` to update only that integration's version
+   and regenerate `uv.lock`. Supported integration targets are `bedrock-fastapi` and `bedrock-celery`.
+   Without Make, pass `--package bedrock-<framework>` to `scripts/release_version.py`.
 4. Commit as `chore(release): prepare bedrock-<framework> vX.Y.Z` and merge to `main`.
 5. Tag that commit `bedrock-<framework>-vX.Y.Z` (for example `bedrock-fastapi-v0.1.0`) and push the tag.
    `.github/workflows/integrations-release.yml` checks the tag against the package version, publishes that
