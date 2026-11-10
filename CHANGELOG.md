@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **Cache backend protocol**: custom backends registered with `register_backend()` must implement
+  `compare_and_expire(key, expected, ex) -> bool` and `acompare_and_expire(...)`: reset the key's TTL to
+  `ex` seconds only when its value equals `expected`, atomically, and return whether it did.
+  A structural backend without them fails `CacheService.configure()`; a `CacheBackend` subclass that does
+  not override them inherits stubs returning `None`, so every `extend()` raises `CacheLockOwnershipError`.
+  The built-in memory and Redis backends implement both. Migration: add the two methods to each custom
+  backend; Redis-based ones can reuse a `GET` + `EXPIRE` Lua script like the built-in backend.
 - **Database query builder**: client-controlled field names are restricted to an allowlist.
   `filter_specs`, `sort_key`, and string `group_by` in `search_filter_sort_paginate()`,
   `asearch_filter_sort_paginate()`, and `build_query()` may only reference primary keys and the
@@ -54,6 +61,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `session.deleted` by model when it adds objects to the same flush.
 
 ### Added
+
+- **Cache locks**: `CacheLock.extend(expire=None)` and `aextend(expire=None)` renew a held lock. The
+  TTL is reset to `expire` seconds from now (default: the lock's own `expire`) only while the key still
+  holds this instance's token; otherwise they raise `CacheLockOwnershipError` and leave the other
+  owner's key untouched. Long tasks call it between steps instead of setting a large `expire` that
+  keeps the lock held long after a crash. There is no automatic background renewal.
 
 - **Testing**: runtime-level pytest fixtures in `bedrock.testing` (enabled with
   `pytest_plugins = ["bedrock.testing"]`):
@@ -109,6 +122,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `is_head` is a `bool`, as the CLI already used it.
 
 ### Fixed
+
+- **Cache locks (memory backend)**: `aadd()` and `acompare_and_delete()` now take the same thread lock as
+  `add()` and `compare_and_delete()`. Previously a lock acquired or released through `async with` in one
+  thread was not excluded from a `with` on the same lock name in another thread, so a release could
+  delete the key of a new owner.
 
 - **Migrations**: a database URL containing percent-encoded characters, such as a password with
   `@` or `#`, no longer makes every migration command fail with `ValueError: invalid interpolation

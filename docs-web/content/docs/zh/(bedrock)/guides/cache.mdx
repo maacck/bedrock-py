@@ -336,6 +336,21 @@ if lock.acquire():
         lock.release()
 ```
 
+### 锁续期
+
+锁键在 `expire` 秒后过期，不管持有者是否还在执行。对于耗时没有固定上限的任务，把 `expire` 设得短一些，并在各步骤之间调用 `extend()` 续期。TTL 会重置为从现在起的 `expire` 秒，而不是在剩余 TTL 上累加。
+
+```python
+from bedrock.contrib.cache import cache
+
+with cache.lock("import:42", expire=60) as lock:
+    for batch in batches:
+        process(batch)
+        lock.extend()  # raises CacheLockOwnershipError if the lock was lost
+```
+
+`extend()` 只在锁键仍保存本实例 token 时续期。如果锁已过期或被其他持有者拿走，它会抛出 `CacheLockOwnershipError`，且不会改动其他持有者的键。此时应停止任务。没有后台自动续期。
+
 ### 锁参数
 
 | 参数 | 默认值 | 说明 |
@@ -355,6 +370,8 @@ if lock.acquire():
 | `lock.aacquire()` | `aacquire(blocking=None, blocking_timeout=None, sleep=None) → bool` | 异步版本 |
 | `lock.release()` | `release() → None` | 释放锁 |
 | `lock.arelease()` | `arelease() → None` | 异步版本 |
+| `lock.extend()` | `extend(expire=None) → None` | 重置已持有锁的 TTL（`None` = 锁的 `expire`） |
+| `lock.aextend()` | `aextend(expire=None) → None` | 异步版本 |
 | `lock.locked()` | `locked() → bool` | 检查锁是否被持有 |
 | `lock.alocked()` | `alocked() → bool` | 异步版本 |
 
