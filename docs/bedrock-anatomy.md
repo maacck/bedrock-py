@@ -163,6 +163,12 @@ SQLAlchemy persistence owned by this module.
 - Models extend `BedrockModel`.
 - This is the canonical location for SQLAlchemy imports in a Bedrock module.
 - Importing the module causes Bedrock to import `models.py` so SQLAlchemy mappings are registered.
+- Migration ownership follows each mapped class's defining package, matched to the longest loaded Bedrock module import path. Models in imported domain packages belong to that module; importing or re-exporting another module's class does not transfer its table.
+- Ordinary ORM models need no ownership annotation. Unmapped `Table` objects, including association tables, declare `info={"bedrock_module": "my_project.inventory"}`. An ORM model can assert the same owner through `__table_args__["info"]`; the declaration must agree with its defining module.
+- Autogeneration and first-install table creation validate all tables in the shared metadata. Missing, conflicting, or unloaded owners raise `MigrationError`; every owner must have a `models` module. Keep all mappings of a shared table in one Bedrock module. An empty owned-table set never means all tables.
+- Every mapper sharing a table must have a resolved owner or a valid explicit table declaration; one resolved model cannot hide an unresolved model. An explicit declaration cannot override a known conflict between loaded modules.
+- Ownership uses schema-qualified table identities, with explicit and implicit default schemas normalized to one physical identity. Foreign keys can reference another module without transferring ownership. Declare the module dependency in the manifest and manage cross-branch migration order explicitly.
+- Ownership is a per-operation snapshot, not a database ledger or script sandbox. Once a table's model is removed, its historical ownership cannot be inferred: use a reviewed explicit migration to drop it. Audit existing migration scripts before rollback or uninstall; a correct branch label does not make their table operations safe.
 - Models represent persistence, not request/response contracts or business orchestration.
 - A module without tables must not create an empty `models.py`.
 

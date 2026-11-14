@@ -262,6 +262,8 @@ class UserModel(BedrockModel):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 ```
 
+**Migration ownership:** Ordinary ORM models need no new annotation: their defining package selects the longest matching loaded Bedrock module, including imported domain packages. Importing another module's model does not transfer ownership. Unmapped association `Table` objects must declare `info={"bedrock_module": "myapp.tags"}`. Autogeneration and first installation reject missing, conflicting, or unloaded owners with `MigrationError`; they never fall back to all tables. See [Migration table ownership](references/database-guide.md#table-ownership) for schema, inheritance, and raw-table examples. These rules do not repair old migration scripts or sandbox `downgrade()`; review old scripts before uninstalling.
+
 `BedrockModel` provides these methods on all instances:
 - `.dict()` — Serialize to dict
 - `.update(**kwargs)` — Update fields

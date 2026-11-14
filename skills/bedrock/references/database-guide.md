@@ -189,7 +189,7 @@ finally:
 
 ## Migrations
 
-Bedrock uses per-app Alembic branches via `MigrationsManager`. Each app gets its own branch label (equal to its import path), preventing cross-app migration conflicts.
+Bedrock uses per-app Alembic branches via `MigrationsManager`. Each app gets a branch label equal to its import path. Branch ownership prevents version-tree pollution; table ownership separately limits new autogeneration and first-install table creation. Neither mechanism sandboxes historical scripts.
 
 ### Setup
 
@@ -226,6 +226,47 @@ mgr.revision(
     autogenerate=True,  # default
 )
 ```
+
+### Table Ownership
+
+Ordinary ORM models need no annotation. Resolve ownership from the mapped class's defining package, matched to the longest loaded Bedrock module import path on a complete package boundary. Imported domain models belong to their owning module; imports and re-exports of foreign models do not transfer ownership. Import required domain models from `models.py`; unimported files are not discovered.
+
+Unmapped `Table` objects, including association tables, need `info["bedrock_module"]`. In `myapp.tags.models`, after the users module defines `users` in the shared metadata:
+
+```python
+from sqlalchemy import Column, ForeignKey, Integer, String, Table
+from bedrock.database import BedrockModel
+
+user_labels = Table(
+    "user_labels",
+    BedrockModel.metadata,
+    Column("user_id", Integer, ForeignKey("users.id"), primary_key=True),
+    Column("label", String(50), primary_key=True),
+    info={"bedrock_module": "myapp.tags"},
+)
+```
+
+Declare `myapp.users` in the tags module's manifest `depends_on`. Full metadata remains available for foreign keys, but referencing a table does not transfer ownership. Cross-branch migration ordering remains the developer's responsibility.
+
+- An ORM model can assert an owner with `__table_args__ = {"info": {"bedrock_module": "myapp.tags"}}`; it must agree with the model's defining module.
+- Validate every table in shared metadata before autogeneration or first-install DDL/stamp. Missing/conflicting owners, invalid declarations, unloaded apps, and owners without a models module raise `MigrationError`. This is a compatibility tightening, not a silent skip.
+- Validate every mapper sharing a table: a resolved model does not cover an unresolved model. A valid explicit table declaration can supply missing ownership, but cannot override known conflicts between loaded modules.
+- Same-module mappings of one table, including single-table inheritance, share an owner. Cross-module mappings of the same table are rejected. Joined-table inheritance resolves each local table separately.
+- Use schema-qualified identities. Explicit and implicit default schemas identify one physical table; duplicate declarations are rejected. Both reflection and metadata are filtered, including table-owned columns, indexes, constraints, and foreign keys.
+- Recompute the ownership snapshot per operation; no database ledger, global registration hook, or ordinary model annotation is needed. An empty owned set never means all tables.
+- Once a model is removed, do not infer its old table's owner or auto-drop it. Use `--no-autogenerate` for a reviewed explicit migration. Historical execution, manual revisions, and offline SQL do not require current ownership. Raw unmanaged Alembic calls retain the full metadata view and are outside the isolation guarantee.
+
+### Existing Migration Safety
+
+New filtering does not repair old contaminated scripts. First installation still creates owned tables and stamps head without executing upgrade; an empty owned set skips creation. A stamped revision's downgrade will run during uninstall even if its upgrade never ran.
+
+Before installing, upgrading, rolling back, or uninstalling an affected module:
+
+1. Pause operations, back up the database and scripts, and inspect each environment's `alembic_version`, actual schema, and data.
+2. Review both upgrade and downgrade across core and plugin branches, including columns, indexes, constraints, and raw SQL. Correct branch labels do not prove safe table operations.
+3. Regenerate unpublished scripts only after confirming they were never applied or stamped anywhere. Coordinate repairs to published/applied/stamped history; do not casually delete revisions, change IDs, or stamp base. Appending a new revision alone cannot prevent an older destructive downgrade from running.
+4. Check residual DDL after failed upgrades even without an applied revision. Restore lost data from verified backups or database recovery, not create_all.
+5. Verify the actual install/upgrade/uninstall paths on an isolated production copy before resuming.
 
 ### Upgrade / Downgrade
 

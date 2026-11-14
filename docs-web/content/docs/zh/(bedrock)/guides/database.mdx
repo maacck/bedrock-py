@@ -535,6 +535,35 @@ Bedrock 对 Alembic 做了按模块分支的封装。每个应用都有自己的
 
 完整的迁移 CLI 参考见 [CLI 参考 — 数据库命令](/docs/guides/cli#database-commands-bedrock-db)。
 
+### 表归属
+
+自动生成和首次建表会解析共享 metadata 中每张表的归属。普通 ORM 模型无需新增声明：根据模型类实际定义的 Python 包，选择最长匹配的已加载 Bedrock module 导入路径。已导入 domain package 中的模型同样参与解析；导入或重新导出其他 module 的模型不会转移表归属。需要使用的 domain 模型应由 `models.py` 导入，Bedrock 不会扫描未导入的模型文件。
+
+无 ORM 映射的 `Table`（例如关联表）通过 SQLAlchemy 的 `info` 字典声明 owner。例如，在 `myapp.tags.models` 中，users module 已经在共享 metadata 定义了 `users` 表之后：
+
+```python
+from sqlalchemy import Column, ForeignKey, Integer, String, Table
+from bedrock.database import BedrockModel
+
+user_labels = Table(
+    "user_labels",
+    BedrockModel.metadata,
+    Column("user_id", Integer, ForeignKey("users.id"), primary_key=True),
+    Column("label", String(50), primary_key=True),
+    info={"bedrock_module": "myapp.tags"},
+)
+```
+
+在 tags module 的 manifest `depends_on` 中声明 `myapp.users`。跨 module 外键仍能通过完整 metadata 解析，但引用其他表不会获得其所有权。跨分支迁移顺序仍由开发者负责。
+
+ORM 模型也可以声明 `__table_args__ = {"info": {"bedrock_module": "myapp.tags"}}`，但必须与实际定义 module 一致。归属缺失、声明无效、owner 未加载、owner 没有 `models` module 或多 module 映射同表冲突时，在写出 revision 或首次建表／stamp 前抛出 `MigrationError`，不会回退到全部表。同一张表的映射应放在同一个 module：支持同 module 单表继承，拒绝跨 module 单表映射，联合表继承按各自的 local table 分别确定归属。
+
+同表的每个映射类都必须能确定归属，不能因为其中一个类已找到 owner 就忽略其他未解析的类。有效的显式表归属声明可以补足缺失归属，但不能覆盖已加载 module 之间的已知冲突。
+
+归属记录是单次操作的快照，不是数据库归属表或全局注册钩子。表身份包含 schema；显式默认 schema 与隐式默认 schema 指向同一物理表，重复声明同一物理表会被拒绝。反射限制为目标 schema 和表，metadata 对象也会过滤。归属表集合为空时不创建任何表。
+
+模型移除后，无法从当前 metadata 推断数据库旧表的历史归属，因此不会自动认领或删除它。需要删除时，使用 `bedrock db revision <app> -m "drop obsolete table" --no-autogenerate` 编写经过审查的显式迁移。历史升级／回滚、手写 revision 和离线 SQL 输出不要求当前归属快照。不携带 Bedrock 管理上下文的原生 Alembic 调用仍使用完整 metadata，不属于此隔离保证的范围。
+
 ### 通过代码使用
 
 ```python
@@ -561,11 +590,23 @@ history = migrations.get_history("myapp.users")
 
 ### 分支归属
 
-每个应用的 migrations 目录都会在操作前进行审计。如果某个版本文件声明的分支标签与应用导入路径不匹配，就会抛出 `BranchOwnershipError`。这可以防止跨应用的版本树污染。
+每个应用的 migrations 目录都会在操作前进行审计。如果某个版本文件声明的分支标签与应用导入路径不匹配，就会抛出 `BranchOwnershipError`。这可以防止跨应用的版本树污染，但不限制正确标签脚本内部的任意表操作。自动生成过滤不是迁移脚本执行沙箱。
 
 ### 首次安装
 
 当应用分支在数据库中没有已应用的版本时，`ensure_schema()` 会根据 SQLAlchemy metadata 创建该应用的表，并将分支 stamp 到 head。即使存在版本文件，首次安装也无需执行迁移脚本。
+
+首次安装与自动生成使用相同的表归属规则，只创建所属表；集合为空时跳过建表，保持现有 stamp 行为。安装成功不代表历史脚本可以安全回滚：其 `upgrade()` 可能从未执行过。
+
+### 已有迁移的安全处置
+
+本次修复不会重写已经生成的脚本。对受影响 module 执行安装、升级、回滚或卸载前：
+
+1. 暂停这些操作，备份数据库与迁移文件，并记录每个部署环境的 `alembic_version` 和真实表结构／数据状态。
+2. 审查核心与插件分支中 `upgrade()`、`downgrade()` 两侧的表、列、索引、约束和原始 SQL。正确的分支标签不是表操作安全的证据。
+3. 只有确认所有环境都未应用或 stamp，才能重新生成或修正未发布 revision。已发布／应用／stamp 的历史需要跨部署协调并审查修复，不要随意删除 revision、修改 id 或 stamp base。只追加一个新 revision 无法消除卸载时仍会执行的旧危险 downgrade。
+4. 升级中途失败后，即使没有记录 revision，也要检查残留 DDL。已经丢失的数据应通过经过验证的备份或数据库恢复机制恢复；重新建表不会恢复数据行。
+5. 在生产数据的隔离副本上验证实际安装／升级／卸载路径，再恢复操作。
 
 ### 迁移锁
 
