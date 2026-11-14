@@ -85,6 +85,8 @@ def on_load(*, app) -> None:
 
 注册后使用 `cache.configure("custom")` 选择后端。`register_backend()` 也接受一个接收 `settings=` 的 factory。`configure()` 会检查创建出的对象是否具备 `CacheBackend` 的全部成员（只检查名称，不检查签名），因此请为自定义后端编写契约测试。
 
+自定义后端必须实现 `compare_and_expire(key: str, expected: bytes, ex: int) -> bool` 和 `acompare_and_expire(...)`。仅当当前值仍等于 `expected` 时，才原子地把 TTL 重置为 `ex` 秒；键不存在或属于其他持有者时返回 `False`，且不修改该键。内置 memory 和 Redis 后端均已实现。仅继承 `CacheBackend` 不等于实现：协议桩方法返回 `None`，会使锁续期抛出 `CacheLockOwnershipError`。升级已有自定义后端时需要补齐这两个方法。
+
 如果希望后端模块及其 SDK 在被选中之前不进入内存，可以改为登记路径：
 
 ```python

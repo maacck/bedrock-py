@@ -85,6 +85,8 @@ def on_load(*, app) -> None:
 
 Select it with `cache.configure("custom")` after registration. `register_backend()` also accepts a factory that takes `settings=`. `configure()` checks that the created object has every `CacheBackend` member (names only, not signatures), so cover a custom backend with your own contract tests.
 
+Custom backends must implement `compare_and_expire(key: str, expected: bytes, ex: int) -> bool` and `acompare_and_expire(...)`. Atomically reset the TTL to `ex` seconds only if the current value still equals `expected`; return `False` without modifying a missing or differently owned key. The built-in memory and Redis backends implement both. Inheriting `CacheBackend` alone is not an implementation: its protocol stubs return `None`, so lock renewal fails with `CacheLockOwnershipError`. Add both methods when upgrading an existing custom backend.
+
 To keep a backend module and its SDK out of memory until it is selected, register a path instead:
 
 ```python
