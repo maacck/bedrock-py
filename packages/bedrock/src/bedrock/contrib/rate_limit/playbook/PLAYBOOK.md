@@ -39,8 +39,8 @@ rate_limit.reset(LOGIN, f"{tenant_id}:{email}")                  # e.g. after a 
 decision = await rate_limit.ahit(LOGIN, key, cost=2)             # async; areset() too
 ```
 
-- `RateLimitPolicy(name, limit, period)` — `limit` units may be spent at once; one unit returns every `period / limit`. `period` accepts a `timedelta` or seconds. Define policies once as module constants; two policies with the same `name` must be equal.
-- `hit(policy, key, cost=1)` → `RateLimitDecision(allowed, limit, remaining, retry_after, reset_after)`. Durations are seconds (`float`). Denied hits consume nothing. `cost` must be an integer from 1 to `limit`.
+- `RateLimitPolicy(name=..., limit=..., period=...)` (keyword-only) — `limit` units may be spent at once; one unit returns every `period / limit`. `period` accepts a `timedelta` or seconds. Define policies once as module constants; two policies with the same `name` must be equal.
+- `hit(policy, key, cost=1)` → `RateLimitDecision` with fields `allowed`, `limit`, `remaining`, `retry_after`, `reset_after`. Durations are seconds (`float`). Denied hits consume nothing. `cost` must be an integer from 1 to `limit`.
 - `reset(policy, key)` refills the bucket.
 - Keys are hashed (BLAKE2b) before storage, so emails or API keys never reach Redis. Put the tenant in the key yourself: `f"{tenant_id}:{subject}"`.
 - Synchronous code that needs the async API uses `bedrock.run_async(...)`, not `asyncio.run()`.

@@ -165,11 +165,19 @@ def isolated_runtime() -> Iterator[BedrockRuntime]:
             ):
                 runtime.registry.shutdown()
 
+        def release_async_engine() -> None:
+            # Pooled async connections belong to the runtime loop closed below, so a later test on a new loop must
+            # not reuse them. aclose() keeps the synchronous engine and configuration of a session-scoped database.
+            db = lifecycle_module._database_manager()
+            if runtime_loop.is_open and db is not None and db.has_async_engine:
+                runtime_loop.run(db.aclose())
+
         attempt(shutdown)
         _AFTER_SHUTDOWN[:] = [entry for entry in _AFTER_SHUTDOWN if entry[1] is not after_shutdown]
         for callback in after_shutdown:
             attempt(callback)
         attempt(restore_signals)
+        attempt(release_async_engine)
         attempt(runtime_loop.close)
         attempt(lambda: setattr(lifecycle_module, "_async_setup_loop", None))
         attempt(container.reset)

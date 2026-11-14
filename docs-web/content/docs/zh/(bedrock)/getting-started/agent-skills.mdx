@@ -31,6 +31,16 @@ Bedrock agent skill 可用于多个 AI 编码助手。
 npx skills add https://github.com/maacck/bedrock-py
 ```
 
+### 匹配你的 Bedrock 版本
+
+上面的命令安装的是对应最新 `bedrock-core` 版本的技能。如果你的项目使用的是旧版本，请从对应的 release tag 安装技能，避免 AI 助手使用你的版本中不存在的 API：
+
+```bash
+npx skills add maacck/bedrock-py@v0.3.1  # 换成你的 bedrock-core 版本
+```
+
+每个技能都在 `SKILL.md` frontmatter 中记录了它所描述的版本（`bedrock` 为 `metadata.bedrock-core`，`bedrock-cli` 为 `metadata.bedrock-cli`）。`bedrock` 技能会要求 AI 助手将其与已安装的 `bedrock-core` 版本比较，不一致时以已安装的包和[更新日志](/docs/changelog)为准。站点顶部显示的版本就是这份文档所描述的 `bedrock-core` 版本。
+
 ## 技能会教会什么
 
 Bedrock agent skill 提供以下内容：

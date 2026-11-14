@@ -79,7 +79,7 @@ An explicit URL selects the connection URL; engine pool options still come from 
 | Entry point | Binds the session with |
 |-------------|------------------------|
 | Script, CLI command, custom worker, WebSocket handler, startup hook | `with db.session_scope():` or `@db.session_scope()` |
-| FastAPI HTTP request | `DbSessionMiddleware` / `AsyncDbSessionMiddleware` (`bedrock-fastapi`) |
+| HTTP request or task handled by an integration | The integration's middleware or task class, which opens one scope per request or task |
 | Test | `with db.session_scope():` in the test; the `db_session` fixture rolls it back |
 | Session managed by another framework | `db.set_session(...)` + `db.clear_session()` in `finally` |
 

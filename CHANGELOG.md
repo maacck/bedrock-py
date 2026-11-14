@@ -25,6 +25,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not override them inherits stubs returning `None`, so every `extend()` raises `CacheLockOwnershipError`.
   The built-in memory and Redis backends implement both. Migration: add the two methods to each custom
   backend; Redis-based ones can reuse a `GET` + `EXPIRE` Lua script like the built-in backend.
+
+### Added
+
+- **Release tooling**: `make release-version VERSION=X.Y.Z` synchronizes the root, core, and CLI package
+  versions through uv and regenerates the lockfile once. `PACKAGE=bedrock-fastapi` or `PACKAGE=bedrock-celery`
+  selects an independent integration release. Failed updates restore the selected manifests and lockfile;
+  dependency minimums, release notes, Git tags, and publishing remain explicit maintainer steps.
+- **CLI version metadata**: `bedrock_cli.__version__` reads the installed distribution version instead of
+  maintaining a separate hard-coded value.
+- **Cache locks**: `CacheLock.extend(expire=None)` and `aextend(expire=None)` renew a held lock. The
+  TTL is reset to `expire` seconds from now (default: the lock's own `expire`) only while the key still
+  holds this instance's token; otherwise they raise `CacheLockOwnershipError` and leave the other
+  owner's key untouched. Long tasks call it between steps instead of setting a large `expire` that
+  keeps the lock held long after a crash. There is no automatic background renewal.
+
+### Fixed
+
+- **Migrations**: autogeneration filters both reflected database objects and shared metadata
+  by the target module's table ownership. Imported foreign models no longer transfer ownership;
+  schema-qualified names and default-schema aliases are handled without mixing same-name tables.
+  First installation uses the same ownership rules, includes explicitly owned association tables,
+  and never creates every table when the target's owned-table set is empty.
+  A known owner on one mapper no longer hides unresolved models sharing that table: every
+  mapping must resolve to a loaded app unless the table has a valid explicit owner declaration.
+- **Cache locks (memory backend)**: `aadd()` and `acompare_and_delete()` now take the same thread lock as
+  `add()` and `compare_and_delete()`. Previously a lock acquired or released through `async with` in one
+  thread was not excluded from a `with` on the same lock name in another thread, so a release could
+  delete the key of a new owner.
+
+## [0.3.3] - 2026-11-09
+
+### Breaking changes
+
 - **Database query builder**: client-controlled field names are restricted to an allowlist.
   `filter_specs`, `sort_key`, and string `group_by` in `search_filter_sort_paginate()`,
   `asearch_filter_sort_paginate()`, and `build_query()` may only reference primary keys and the
@@ -71,61 +104,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Release tooling**: `make release-version VERSION=X.Y.Z` synchronizes the root, core, and CLI package
-  versions through uv and regenerates the lockfile once. `PACKAGE=bedrock-fastapi` or `PACKAGE=bedrock-celery`
-  selects an independent integration release. Failed updates restore the selected manifests and lockfile;
-  dependency minimums, release notes, Git tags, and publishing remain explicit maintainer steps.
-- **CLI version metadata**: `bedrock_cli.__version__` reads the installed distribution version instead of
-  maintaining a separate hard-coded value.
-- **Cache locks**: `CacheLock.extend(expire=None)` and `aextend(expire=None)` renew a held lock. The
-  TTL is reset to `expire` seconds from now (default: the lock's own `expire`) only while the key still
-  holds this instance's token; otherwise they raise `CacheLockOwnershipError` and leave the other
-  owner's key untouched. Long tasks call it between steps instead of setting a large `expire` that
-  keeps the lock held long after a crash. There is no automatic background renewal.
-- **Testing**: runtime-level pytest fixtures in `bedrock.testing` (enabled with
-  `pytest_plugins = ["bedrock.testing"]`):
-  - `bedrock_runtime` gives each test a fresh module registry that `bedrock.setup()`, `asetup()`,
-    `shutdown()` and `ashutdown()` act on, records lifecycle events as `LifecycleEvent(kind, module)`,
-    and on teardown shuts the registry's modules down, removes lifecycle-signal receivers added
-    during the test, resets the DI container and hooks, restores `os.environ`, and drops cached
-    `SettingsProxy` values. Backed by the `isolated_runtime()` context manager.
-  - `module_factory(name, *, manifest=None, bootstrap=None, models=None, files=None)` writes
-    importable temporary Bedrock modules and removes them after the test, including their mapped
-    models and association tables, so the next test can reuse the name. With `bedrock_runtime`,
-    the cleanup waits until the runtime has shut the modules down.
-  - `db_session` runs the test's database work on one connection inside an outer transaction that
-    is rolled back afterwards; `commit()` in service code (including `db.session_scope()`) commits a
-    savepoint. `rollback_session()` and `arollback_session()` provide the same isolation as context
-    managers, the async one for use in an async fixture. SQLite is supported.
-- **Lifecycle**: `bedrock.run_async(awaitable)` runs async code from synchronous code (Celery tasks, CLI
-  commands, scripts) on Bedrock's process-wide runtime loop, the loop synchronous `bedrock.setup()` runs async
-  hooks on. Clients opened by `on_load` hooks and the async database engine stay usable across calls, unlike
-  with `asyncio.run()`. The calling thread drives the loop and blocks; calls from several threads run one at a
-  time. It works without `setup()`, and raises `RuntimeError` inside a running event loop, after `asetup()` on
-  a loop that is still open, and from a thread that a coroutine on the runtime loop is waiting for.
-  `bedrock.shutdown()` and `ashutdown()` raise `RuntimeError` before shutting anything down when called from
-  work running on the runtime loop, which cannot close itself; call `shutdown()` after `run_async()` returns.
-- **Rate limit**: new `bedrock.contrib.rate_limit` module, a framework-agnostic token bucket (GCRA).
-  `RateLimitPolicy(name, limit, period)` lets `limit` units be spent at once and returns one every
-  `period / limit`. `rate_limit.hit(policy, key, cost=1)` / `ahit()` return
-  `RateLimitDecision(allowed, limit, remaining, retry_after, reset_after)` with durations in seconds; denied hits
-  consume nothing. `reset()` / `areset()` refill a bucket. Keys are hashed before storage. The built-in Redis
-  backend (extra `bedrock-core[rate-limit-redis]`, Redis 5+) evaluates each hit atomically in one Lua script
-  on the server clock; it is selected by `RATE_LIMIT_BACKEND` (default `redis`) and configured by
-  `RATE_LIMIT_REDIS_*`, independent of `CACHE_REDIS_*`. `register_backend()` / `register_backend_lazy()` add
-  replacement backends implementing `RateLimitBackend`. Errors: `InvalidRateLimitPolicyError`,
-  `InvalidRateLimitArgumentError`, `RateLimitPolicyConflictError`, `RateLimitBackendError` (no connection
-  details in the message), `RateLimitBackendNotConfiguredError`, `RateLimitCloseError`, all under
-  `RateLimitError`.
-
-### Changed
-
-- **Lifecycle**: the event loop that synchronous registry entrypoints run async hooks on is now process-wide
-  instead of one per `ModuleRegistry`. A registry no longer closes it when its last module shuts down;
-  `bedrock.shutdown()` closes it after every module and the database are released (and `ashutdown()` closes it
-  if synchronous code used it). Code that calls `registry.shutdown()` without `bedrock.shutdown()` leaves the
-  loop open until the next `bedrock.shutdown()` or interpreter exit; call `bedrock.shutdown()` to release it.
-
 - **Database**: `asearch_filter_sort_paginate()` in `bedrock.database.service`, the `AsyncSession`
   variant of `search_filter_sort_paginate()`. It takes the same arguments and returns the same
   `items`/`total`/`page_info` dictionary, so `async def` services can list with `db.asession`.
@@ -137,17 +115,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Migrations**: autogeneration filters both reflected database objects and shared metadata
-  by the target module's table ownership. Imported foreign models no longer transfer ownership;
-  schema-qualified names and default-schema aliases are handled without mixing same-name tables.
-  First installation uses the same ownership rules, includes explicitly owned association tables,
-  and never creates every table when the target's owned-table set is empty.
-  A known owner on one mapper no longer hides unresolved models sharing that table: every
-  mapping must resolve to a loaded app unless the table has a valid explicit owner declaration.
-- **Cache locks (memory backend)**: `aadd()` and `acompare_and_delete()` now take the same thread lock as
-  `add()` and `compare_and_delete()`. Previously a lock acquired or released through `async with` in one
-  thread was not excluded from a `with` on the same lock name in another thread, so a release could
-  delete the key of a new owner.
 
 - **Migrations**: a database URL containing percent-encoded characters, such as a password with
   `@` or `#`, no longer makes every migration command fail with `ValueError: invalid interpolation
@@ -169,6 +136,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or a SQL expression (`GroupBy`); type checkers no longer reject these documented forms.
 - **Migrations**: the `revision()` docstring no longer claims Bedrock writes dependency heads into
   `depends_on`; it never did.
+
+## [0.3.2] - 2026-11-09
+
+### Added
+
+- **Testing**: runtime-level pytest fixtures in `bedrock.testing` (enabled with
+  `pytest_plugins = ["bedrock.testing"]`):
+  - `bedrock_runtime` gives each test a `BedrockRuntime` with a fresh module `registry`, which `bedrock.setup()`, `asetup()`,
+    `shutdown()` and `ashutdown()` act on, records lifecycle events as `LifecycleEvent(kind, module)`,
+    and on teardown shuts the registry's modules down, removes lifecycle-signal receivers added
+    during the test, releases an async database engine used on the runtime loop before closing that loop (the
+    synchronous engine stays), resets the DI container and hooks, restores `os.environ`, and drops cached
+    `SettingsProxy` values. Backed by the `isolated_runtime()` context manager, which yields the same `BedrockRuntime`.
+  - `module_factory(name, *, manifest=None, bootstrap=None, models=None, files=None)` writes
+    importable temporary Bedrock modules and removes them after the test, including their mapped
+    models and association tables, so the next test can reuse the name. With `bedrock_runtime`,
+    the cleanup waits until the runtime has shut the modules down.
+  - `db_session` runs the test's database work on one connection inside an outer transaction that
+    is rolled back afterwards; `commit()` in service code (including `db.session_scope()`) commits a
+    savepoint. `rollback_session()` and `arollback_session()` provide the same isolation as context
+    managers, the async one for use in an async fixture. SQLite is supported.
+- **Lifecycle**: `bedrock.run_async(awaitable)` runs async code from synchronous code (Celery tasks, CLI
+  commands, scripts) on Bedrock's process-wide runtime loop, the loop synchronous `bedrock.setup()` runs async
+  hooks on. Clients opened by `on_load` hooks and the async database engine stay usable across calls, unlike
+  with `asyncio.run()`. The calling thread drives the loop and blocks; calls from several threads run one at a
+  time. It works without `setup()`, and raises `RuntimeError` inside a running event loop, after `asetup()` on
+  a loop that is still open, and from a thread that a coroutine on the runtime loop is waiting for.
+  `bedrock.shutdown()` and `ashutdown()` raise `RuntimeError` before shutting anything down when called from
+  work running on the runtime loop, which cannot close itself; call `shutdown()` after `run_async()` returns.
+- **Rate limit**: new `bedrock.contrib.rate_limit` module, a framework-agnostic token bucket (GCRA).
+  `RateLimitPolicy(name=..., limit=..., period=...)` lets `limit` units be spent at once and returns one every
+  `period / limit`. `rate_limit.hit(policy, key, cost=1)` / `ahit()` return
+  `RateLimitDecision` (fields `allowed`, `limit`, `remaining`, `retry_after`, `reset_after`) with durations in seconds; denied hits
+  consume nothing. `reset()` / `areset()` refill a bucket. Keys are hashed before storage. The built-in Redis
+  backend (extra `bedrock-core[rate-limit-redis]`, Redis 5+) evaluates each hit atomically in one Lua script
+  on the server clock; it is selected by `RATE_LIMIT_BACKEND` (default `redis`) and configured by
+  `RATE_LIMIT_REDIS_*`, independent of `CACHE_REDIS_*`. `register_backend()` / `register_backend_lazy()` add
+  replacement backends implementing `RateLimitBackend`. Errors: `InvalidRateLimitPolicyError`,
+  `InvalidRateLimitArgumentError`, `RateLimitPolicyConflictError`, `RateLimitBackendError` (no connection
+  details in the message), `RateLimitBackendNotConfiguredError`, `RateLimitCloseError`, all under
+  `RateLimitError`.
+
+### Changed
+
+- **Lifecycle**: the event loop that synchronous registry entrypoints run async hooks on is now process-wide
+  instead of one per `ModuleRegistry`. A registry no longer closes it when its last module shuts down;
+  `bedrock.shutdown()` closes it after every module and the database are released (and `ashutdown()` closes it
+  if synchronous code used it). Code that calls `registry.shutdown()` without `bedrock.shutdown()` leaves the
+  loop open until the next `bedrock.shutdown()` or interpreter exit; call `bedrock.shutdown()` to release it.
+
+### Documentation
+
+- **Versioning**: the `bedrock` and `bedrock-cli` skills record the version they describe in `metadata.bedrock-core` /
+  `metadata.bedrock-cli`, and the `bedrock` skill tells assistants to compare it with the installed
+  `bedrock-core` and trust the installed package and changelog when they differ. CI fails when a skill's version
+  differs from its package version. The docs site header shows the `bedrock-core` version it describes, and the
+  Agent Skills page explains how to install the skill matching an older release (`npx skills add
+  maacck/bedrock-py@vX.Y.Z`).
 
 ## [0.3.1] - 2026-11-08
 

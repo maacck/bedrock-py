@@ -6,11 +6,24 @@ description: >
   CLI commands, or any Bedrock-specific patterns. Also use when creating new Bedrock modules,
   debugging module lifecycle issues, writing bootstrap hooks, configuring database migrations,
   writing tests for Bedrock modules, or building applications on top of Bedrock. Trigger on: "python project dependencies contains 'bedrock-py'", "working on a Bedrock module", "writing a manifest.yaml", "using bedrock CLI commands", "testing a Bedrock module"
+metadata:
+  bedrock-core: "0.3.3"
 ---
 
 # Bedrock Application Development
 
 Bedrock is a modular Python framework for building applications with manifest-driven module loading, lifecycle orchestration, and clean architecture conventions. This skill teaches you how to use Bedrock to build maintainable, extensible applications.
+
+## Version Check
+
+This skill describes `bedrock-core` at the version in `metadata.bedrock-core` above. Before writing code, compare it with the version installed in the project:
+
+```bash
+uv run python -c "import importlib.metadata as m; print(m.version('bedrock-core'))"
+```
+
+- **Same version**: follow this skill.
+- **Different version**: tell the user, and treat the installed package as the source of truth. Bedrock is pre-1.0, so a minor release may break APIs. Before using an API from this skill, read the [CHANGELOG](https://github.com/maacck/bedrock-py/blob/main/CHANGELOG.md) sections between the two versions and check the installed `bedrock` source. The skill matching the installed version installs with `npx skills add maacck/bedrock-py@v<installed-version>`.
 
 ## Quick Reference
 
@@ -39,7 +52,6 @@ Test fixtures (isolated runtime, temporary modules, DB rollback): `pytest_plugin
 - **Understanding project structure** → Read `references/module-hierarchy.md`
 - **Understanding architecture / layer boundaries** → Read `references/architecture.md`
 - **Writing tests: isolated runtime, temporary modules, DB rollback** → Read `references/testing-guide.md`
-- **Running modules in Celery workers (`bedrock-celery`)** → Read `references/celery-guide.md`
 - **Using caching / distributed locks** → View `bedrock app playbook bedrock.contrib.cache`
 - **Instrumenting metrics** → View `bedrock app playbook bedrock.contrib.metric`
 - **Using file/object storage** → View `bedrock app playbook bedrock.contrib.storage`
@@ -492,7 +504,7 @@ Async tests: `await bedrock.asetup(...)` and `await bedrock_runtime.registry.ash
 4. **Don't recursively call `mark_ready()` or `shutdown()`** from lifecycle hooks or signal receivers
 5. **Don't register extensions via import-time side effects or accept import paths from requests** — register trusted paths in `on_load`
 6. **Don't hand-roll test isolation** — no `monkeypatch.setattr(lifecycle, "apps", ...)`, `db.set_session()` rollback fixtures, or hand-written packages on `sys.path`; use `bedrock_runtime`, `db_session`, and `module_factory`
-7. **Don't read `db.session` / `db.asession` without a bound session** — it raises `SessionNotBoundError`; services only read it, entry points bind it with `with db.session_scope():` / `@db.session_scope()` (async: `asession_scope`) or the FastAPI middleware; tests call such services inside `with db.session_scope():` (rolled back by `db_session`)
+7. **Don't read `db.session` / `db.asession` without a bound session** — it raises `SessionNotBoundError`; services only read it, entry points bind it with `with db.session_scope():` / `@db.session_scope()` (async: `asession_scope`) or an integration that binds one per request or task; tests call such services inside `with db.session_scope():` (rolled back by `db_session`)
 
 ## Commands Reference
 

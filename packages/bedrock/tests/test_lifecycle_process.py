@@ -307,6 +307,8 @@ class TestDatabaseReleasedAfterModules:
         assert [(f.module, f.phase) for f in caught.value.failures] == [("bedrock.database", "database_aclose")]
         assert "sync_connection_closed" in proc_state
         assert registry.all()[0].lifecycle_state is ModuleLifecycleState.SHUTDOWN
+        # Let the runtime's teardown release the engine the failed shutdown left open.
+        monkeypatch.delattr(db, "aclose")
 
     @pytest.mark.parametrize("mode", MODES)
     def test_never_initialized_database_is_a_no_op(

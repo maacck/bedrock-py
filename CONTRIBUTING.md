@@ -250,6 +250,9 @@ cd docs-web && npm run build
 1. Rename `## [Unreleased]` to `## [X.Y.Z] - YYYY-MM-DD` in `CHANGELOG.md`.
 2. Run `make release-version VERSION=X.Y.Z` to synchronize `pyproject.toml`,
    `packages/bedrock/pyproject.toml`, and `packages/bedrock-cli/pyproject.toml`, then regenerate `uv.lock` once.
+   Set the same version in `metadata.bedrock-core` of `skills/bedrock/SKILL.md` and
+   `metadata.bedrock-cli` of `skills/bedrock-cli/SKILL.md`; the `Skill versions` CI job fails until they match.
+   The docs site header reads the version from `packages/bedrock/pyproject.toml`.
 3. Raise `bedrock-core>=` in `packages/bedrock-cli/src/bedrock_cli/templates/workspace/pyproject.toml.j2`
    when generated projects need this release.
 4. Add a new minor line to the supported versions in `SECURITY.md`.

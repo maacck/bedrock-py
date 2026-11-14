@@ -8,10 +8,10 @@ Enable once in the project's root `conftest.py`:
 pytest_plugins = ["bedrock.testing"]
 ```
 
-| Fixture | Use for | Context manager behind it |
+| Fixture | Use for | API behind it |
 |---|---|---|
-| `bedrock_runtime` | Tests that call `bedrock.setup()` / `asetup()` or assert lifecycle order | `isolated_runtime()` |
-| `module_factory` | Temporary Bedrock modules (manifest, bootstrap, models, any file) | `ModuleFactory` |
+| `bedrock_runtime` | Tests that call `bedrock.setup()` / `asetup()` or assert lifecycle order; yields `BedrockRuntime(registry, events)` | `isolated_runtime()` context manager |
+| `module_factory` | Temporary Bedrock modules (manifest, bootstrap, models, any file) | `ModuleFactory(root)` class; without the fixture, put `root` on `sys.path` and call `cleanup()` |
 | `db_session` | Database writes that must not survive the test | `rollback_session()` / `arollback_session()` |
 | `clean_container`, `di_container`, `override_service` | DI isolation (`references/di-guide.md`) | — |
 | `clean_hooks`, `hook_registry`, `hook_namespace` | Hook isolation (`references/hooks-guide.md`) | — |
@@ -43,7 +43,9 @@ def test_orders_start_after_billing(bedrock_runtime, module_factory):
 - Teardown (pass or fail), every step attempted, first failure raised afterwards:
   1. `registry.shutdown()` if any module is not shut down;
   2. remove receivers connected to `bedrock.module.signals` during the test;
-  3. close Bedrock's runtime loop (the `bedrock.run_async()` loop), so the next test gets a fresh one;
+  3. if the runtime loop is open, `await db.aclose()` on it (pooled async connections are bound to that loop; the sync
+     engine and `db.init()` configuration stay), then close Bedrock's runtime loop (the `bedrock.run_async()` loop),
+     so the next test gets a fresh loop and a fresh async engine;
   4. `container.reset()` and `hooks.reset()`;
   5. restore `os.environ`;
   6. drop the cache of every `SettingsProxy` (also done at start, so `monkeypatch.setenv` reaches settings an earlier

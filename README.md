@@ -180,6 +180,7 @@ from sqlalchemy import Column, String, Integer
 
 class Product(BedrockModel):
     __tablename__ = "products"
+    __filterable_fields__ = ["name"]  # columns clients may filter, sort, or group by
 
     id = Column(Integer, primary_key=True)
     name = Column(String(100), nullable=False)

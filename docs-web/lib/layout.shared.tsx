@@ -15,6 +15,9 @@ export function baseOptions(locale: string): BaseLayoutProps {
         <span>
           {appName}
         </span>
+        <span className={'text-xs text-fd-muted-foreground'}>
+          v{process.env.BEDROCK_VERSION}
+        </span>
       </div>,
     },
 
