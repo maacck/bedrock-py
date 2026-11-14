@@ -53,6 +53,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `add()` and `compare_and_delete()`. Previously a lock acquired or released through `async with` in one
   thread was not excluded from a `with` on the same lock name in another thread, so a release could
   delete the key of a new owner.
+- **Cache locks (memory backend)**: synchronous and asynchronous reads, expiration cleanup,
+  and capacity eviction now share the thread lock used by acquisition, release, and renewal.
+  A reader's stale expiration decision can no longer delete a successfully renewed lock and
+  admit another holder. Async operations reuse the protected synchronous store operations;
+  async get-or-set providers run without holding the thread lock.
 
 ## [0.3.3] - 2026-11-09
 
