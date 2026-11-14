@@ -171,6 +171,10 @@ bedrock db revision myapp.users -m "custom index" --no-autogenerate
 - Branch label equals the import path (e.g., `myapp.users`)
 - Subsequent calls append to `<import_path>@head`
 
+Autogeneration compares only the target module's tables on both the database and model sides. Ordinary ORM models are owned by their defining module, not by modules importing them. Unmapped `Table` objects require `info={"bedrock_module": "myapp.users"}`. Missing, conflicting, or unloaded owners raise `MigrationError` before a revision is written; there is no all-tables fallback. See [Table Ownership](/docs/guides/database#table-ownership).
+
+A database table whose model was removed is not automatically assigned to this branch or dropped. Use `--no-autogenerate` and write a reviewed explicit migration for such a drop. Handwritten migrations and historical upgrade/downgrade execution do not require a current ownership snapshot.
+
 ---
 
 ### `bedrock db upgrade`
@@ -329,16 +333,18 @@ def789ghi012     abc123def456     myapp.users      add email verification
 
 ### `bedrock db uninstall`
 
-Rollback all migrations and prepare module for removal.
+Roll back the target app's applied revisions and prepare it for removal.
 
 ```bash
 bedrock db uninstall <app_import_path>
 ```
 
 **What it does:**
-1. Downgrades all migrations to base
-2. Removes entries from `alembic_version`
-3. Prepares module for safe removal from `INSTALLED_APPS`
+1. Downgrades the target app's applied revisions to its branch base
+2. Removes that branch's entries from `alembic_version`
+3. Allows removal of the module after its migration effects have been verified
+
+**Review existing scripts first.** A correct branch label does not restrict what `downgrade()` executes. First installation may have stamped a revision without running its `upgrade()`; uninstall still runs its `downgrade()`. Ownership filtering protects new autogeneration, not old contaminated scripts or arbitrary SQL. Back up and follow the [existing migration safety procedure](/docs/guides/database#existing-migration-safety) before uninstalling an affected app.
 
 **Example:**
 

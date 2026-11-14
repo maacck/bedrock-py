@@ -8,11 +8,21 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
+import sqlalchemy as sa
+from alembic import command
 from bedrock.cli.db import db_app
 from bedrock.database.migrations_manager import BranchRevisionStatus, MigrationError, MigrationsManager
 from bedrock.module.registry import ModuleRegistry
 from bedrock.testing.modules import ModuleFactory
 from typer.testing import CliRunner
+
+
+@pytest.fixture(autouse=True)
+def isolated_migration_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep models collected by other suites outside these migration databases."""
+    from bedrock.database.base import BedrockModel
+
+    monkeypatch.setattr(BedrockModel, "metadata", sa.MetaData())
 
 
 def _revision_a(name: str, rev: str = "mak111") -> str:
@@ -432,3 +442,476 @@ def test_unreadable_database_is_an_error_not_an_empty_branch(
     with pytest.raises(MigrationError):
         manager.ensure_schema("sec10_app")
     assert manager.check("sec10_app")[0].state == "unknown"
+
+
+def _model_source(class_name: str, table: str, extra: str = "") -> str:
+    """Define a model inside the temporary app that owns its table."""
+    return (
+        "from sqlalchemy import Column, Integer, String, ForeignKey, Table\n"
+        "from bedrock.database.base import BedrockModel\n\n"
+        f"class {class_name}(BedrockModel):\n"
+        f"    __tablename__ = {table!r}\n"
+        "    id = Column(Integer, primary_key=True)\n"
+        f"{extra}"
+    )
+
+
+def _migration_app(factory: ModuleFactory, name: str, models: str, files: dict[str, str] | None = None) -> str:
+    """Create a model-owning app with an empty, stampable initial revision."""
+    return factory(
+        name,
+        models=models,
+        files={
+            "migrations/initial.py": (
+                f"revision = '{name}0'\n"
+                "down_revision = None\n"
+                f"branch_labels = ('{name}',)\n"
+                "depends_on = None\n"
+                "def upgrade():\n    pass\n"
+                "def downgrade():\n    pass\n"
+            ),
+            **(files or {}),
+        },
+    )
+
+
+class TestTableOwnership:
+    """First installation creates only the tables actually owned by its app."""
+
+    def test_first_install_includes_declared_association_table(
+        self, module_factory: ModuleFactory, tmp_path: Path
+    ) -> None:
+        core = _migration_app(module_factory, "ow_core", _model_source("Account", "account"))
+        plugin = _migration_app(
+            module_factory,
+            "ow_plugin",
+            "from sqlalchemy import Table, Column, Integer, ForeignKey\n"
+            "from bedrock.database.base import BedrockModel\n"
+            "links = Table('links', BedrockModel.metadata,\n"
+            "    Column('user_id', Integer, ForeignKey('account.id'), primary_key=True),\n"
+            "    info={'bedrock_module': 'ow_plugin'})\n",
+        )
+        other = _migration_app(module_factory, "ow_other", _model_source("Other", "other"))
+        registry = ModuleRegistry()
+        registry.populate([core, plugin, other])
+        db_path = tmp_path / "owned.db"
+        manager = MigrationsManager(registry, _database_url(db_path))
+        manager.ensure_schema(core)
+        manager.ensure_schema(plugin)
+
+        assert _tables(db_path) == {"account", "links", "alembic_version"}
+        assert _versions(db_path) == {"ow_core0", "ow_plugin0"}
+
+    def test_first_install_uses_definition_owner(self, module_factory: ModuleFactory, tmp_path: Path) -> None:
+        core = _migration_app(module_factory, "ow_core", _model_source("Account", "account"))
+        plugin = _migration_app(
+            module_factory,
+            "ow_plugin",
+            _model_source("Tag", "tag") + "from ow_core.models import Account as ImportedAccount\n",
+        )
+        registry = ModuleRegistry()
+        registry.populate([core, plugin])
+        db_path = tmp_path / "imported.db"
+        MigrationsManager(registry, _database_url(db_path)).ensure_schema(plugin)
+        assert _tables(db_path) == {"tag", "alembic_version"}
+        assert _versions(db_path) == {"ow_plugin0"}
+
+    def test_first_install_includes_loaded_domain_models(self, module_factory: ModuleFactory, tmp_path: Path) -> None:
+        parent = _migration_app(
+            module_factory,
+            "ow_app",
+            "from .domain.models import Domain\nfrom .child.models import Child\n",
+            files={
+                "domain/__init__.py": "",
+                "domain/models.py": _model_source("Domain", "domain_table"),
+                "child/__init__.py": "",
+                "child/manifest.yaml": "title: Child\nversion: '1'\n",
+                "child/models.py": _model_source("Child", "child_table"),
+            },
+        )
+        neighbor = _migration_app(module_factory, "ow_application", _model_source("Neighbor", "neighbor"))
+        registry = ModuleRegistry()
+        registry.populate([parent, "ow_app.child", neighbor])
+        db_path = tmp_path / "domains.db"
+        MigrationsManager(registry, _database_url(db_path)).ensure_schema(parent)
+        assert _tables(db_path) == {"domain_table", "alembic_version"}
+
+    @pytest.mark.parametrize(
+        "case", ["missing", "nonstring", "empty", "unknown", "no_models", "conflict", "shared", "unloaded"]
+    )
+    def test_invalid_ownership_prevents_first_install(
+        self, module_factory: ModuleFactory, tmp_path: Path, case: str
+    ) -> None:
+        other = module_factory("ow_other")
+        if case in {"missing", "nonstring", "empty", "unknown", "no_models"}:
+            info = {
+                "missing": {},
+                "nonstring": {"bedrock_module": 1},
+                "empty": {"bedrock_module": ""},
+                "unknown": {"bedrock_module": "ow_missing"},
+                "no_models": {"bedrock_module": other},
+            }[case]
+            models = (
+                "from sqlalchemy import Table, Column, Integer\n"
+                "from bedrock.database.base import BedrockModel\n"
+                f"invalid = Table('invalid', BedrockModel.metadata, Column('id', Integer), info={info!r})\n"
+            )
+        else:
+            models = _model_source("Invalid", "invalid")
+            if case == "conflict":
+                models += "Invalid.__table__.info['bedrock_module'] = 'ow_other'\n"
+            elif case == "shared":
+                models += "class Foreign(Invalid):\n    __module__ = 'ow_other.models'\n"
+            else:
+                models += "Invalid.__module__ = 'unloaded.models'\n"
+        app = _migration_app(module_factory, "ow_invalid", models)
+        registry = ModuleRegistry()
+        registry.populate([app, other])
+        db_path = tmp_path / "invalid.db"
+        with pytest.raises(MigrationError, match="invalid"):
+            MigrationsManager(registry, _database_url(db_path)).ensure_schema(app)
+        assert _tables(db_path) == set()
+
+    def test_empty_models_do_not_create_foreign_tables(self, module_factory: ModuleFactory, tmp_path: Path) -> None:
+        core = _migration_app(module_factory, "ow_core", _model_source("Account", "account"))
+        empty = _migration_app(module_factory, "ow_empty", "")
+        registry = ModuleRegistry()
+        registry.populate([core, empty])
+        db_path = tmp_path / "empty.db"
+        MigrationsManager(registry, _database_url(db_path)).ensure_schema(empty)
+        assert _tables(db_path) == {"alembic_version"}
+        assert _versions(db_path) == {"ow_empty0"}
+
+    def test_inheritance_keeps_table_owners(self, module_factory: ModuleFactory, tmp_path: Path) -> None:
+        parent = _migration_app(
+            module_factory,
+            "ow_parent",
+            _model_source("Parent", "parent") + "class LocalChild(Parent):\n    pass\n",
+        )
+        child = _migration_app(
+            module_factory,
+            "ow_child",
+            "from sqlalchemy import Column, ForeignKey, Integer\n"
+            "from ow_parent.models import Parent\n"
+            "class Child(Parent):\n"
+            "    __tablename__ = 'child'\n"
+            "    id = Column(Integer, ForeignKey('parent.id'), primary_key=True)\n",
+        )
+        registry = ModuleRegistry()
+        registry.populate([parent, child])
+        db_path = tmp_path / "inheritance.db"
+        manager = MigrationsManager(registry, _database_url(db_path))
+        manager.ensure_schema(parent)
+        assert _tables(db_path) == {"parent", "alembic_version"}
+        manager.ensure_schema(child)
+        assert _tables(db_path) == {"parent", "child", "alembic_version"}
+
+    @pytest.mark.parametrize("operation", ["revision", "ensure_schema"])
+    @pytest.mark.parametrize("explicit_owner", [False, True])
+    def test_shared_table_requires_resolved_models_or_explicit_owner(
+        self, module_factory: ModuleFactory, tmp_path: Path, operation: str, explicit_owner: bool
+    ) -> None:
+        core = _migration_app(
+            module_factory,
+            "ow_core",
+            _model_source(
+                "Account",
+                "account",
+                "    __table_args__ = {'info': {'bedrock_module': 'ow_core'}}\n" if explicit_owner else "",
+            )
+            + "from ow_extension.models import ExtendedAccount\n",
+        )
+        extension = module_factory(
+            "ow_extension",
+            models=(
+                "from sqlalchemy import Column, String\n"
+                "from ow_core.models import Account\n"
+                "class ExtendedAccount(Account):\n"
+                "    extension_value = Column(String(30))\n"
+            ),
+        )
+        registry = ModuleRegistry()
+        registry.populate([core])
+        db_path = tmp_path / "shared.db"
+        manager = MigrationsManager(registry, _database_url(db_path))
+        scripts = module_factory.root / core / "migrations"
+        if operation == "revision":
+            command.stamp(manager._build_config(core), "heads")
+
+        def migrate() -> None:
+            if operation == "revision":
+                manager.revision(core, "add account")
+            else:
+                manager.ensure_schema(core)
+
+        if not explicit_owner:
+            with pytest.raises(MigrationError, match="ow_extension.models.ExtendedAccount"):
+                migrate()
+            assert {path.name for path in scripts.glob("*.py")} == {"initial.py"}
+            assert _tables(db_path) == ({"alembic_version"} if operation == "revision" else set())
+            if operation == "revision":
+                assert _versions(db_path) == {"ow_core0"}
+            return
+
+        migrate()
+        if operation == "revision":
+            manager.upgrade(core)
+        with sqlite3.connect(db_path) as connection:
+            assert [row[1] for row in connection.execute("PRAGMA table_info(account)")] == ["id", "extension_value"]
+
+        registry.install(extension)
+        with pytest.raises(MigrationError, match="multiple apps"):
+            manager.revision(core, "explicit owner cannot override a conflict")
+
+
+@pytest.fixture
+def schema_engine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[sa.Engine]:
+    """Use one real engine with a persistent attached SQLite schema."""
+    engine = sa.create_engine(_database_url(tmp_path / "schemas.db"))
+
+    @sa.event.listens_for(engine, "connect")
+    def attach(connection: sqlite3.Connection, _record: object) -> None:
+        connection.execute("ATTACH DATABASE ? AS archive", (str(tmp_path / "archive.db"),))
+
+    monkeypatch.setattr(sa, "create_engine", lambda *args, **kwargs: engine)
+    monkeypatch.setattr(sa, "engine_from_config", lambda *args, **kwargs: engine)
+    try:
+        yield engine
+    finally:
+        engine.dispose()
+
+
+class TestAutogenerateIsolation:
+    """Execute generated migrations to verify table ownership, not script formatting."""
+
+    def test_schema_qualified_names_stay_isolated(
+        self, module_factory: ModuleFactory, schema_engine: sa.Engine
+    ) -> None:
+        core = _migration_app(
+            module_factory, "ag_core", _model_source("Account", "account", "    name = Column(String)\n")
+        )
+        plugin = _migration_app(
+            module_factory,
+            "ag_plugin",
+            _model_source("ArchivedAccount", "account", "    __table_args__ = {'schema': 'archive'}\n"),
+        )
+        registry = ModuleRegistry()
+        registry.populate([core, plugin])
+        manager = MigrationsManager(registry, str(schema_engine.url))
+        command.stamp(manager._build_config(None), "heads")
+        with schema_engine.begin() as connection:
+            connection.execute(sa.text("CREATE TABLE account (id INTEGER NOT NULL PRIMARY KEY)"))
+            connection.execute(sa.text("INSERT INTO account (id) VALUES (42)"))
+        manager.revision(plugin, "create archive account")
+        manager.upgrade(plugin)
+        with schema_engine.connect() as connection:
+            assert sa.inspect(connection).get_table_names(schema="archive") == ["account"]
+            assert connection.execute(sa.text("SELECT id FROM account")).all() == [(42,)]
+            assert [column["name"] for column in sa.inspect(connection).get_columns("account")] == ["id"]
+        manager.downgrade(plugin, "-1")
+        with schema_engine.connect() as connection:
+            assert sa.inspect(connection).get_table_names(schema="archive") == []
+            assert connection.execute(sa.text("SELECT id FROM account")).all() == [(42,)]
+
+    @pytest.mark.parametrize("target", ["ag_core", "ag_plugin"])
+    @pytest.mark.parametrize("foreign_exists", [False, True])
+    def test_revision_only_changes_target_tables(
+        self, module_factory: ModuleFactory, tmp_path: Path, target: str, foreign_exists: bool
+    ) -> None:
+        core = _migration_app(module_factory, "ag_core", _model_source("Account", "account"))
+        plugin = _migration_app(module_factory, "ag_plugin", _model_source("Tag", "tag"))
+        registry = ModuleRegistry()
+        registry.populate([core, plugin])
+        db_path = tmp_path / "generate.db"
+        manager = MigrationsManager(registry, _database_url(db_path))
+        command.stamp(manager._build_config(None), "heads")
+        own, foreign = ("account", "tag") if target == core else ("tag", "account")
+        if foreign_exists:
+            with sqlite3.connect(db_path) as connection:
+                connection.execute(f"CREATE TABLE {foreign} (id INTEGER NOT NULL PRIMARY KEY)")
+                connection.execute(f"INSERT INTO {foreign} VALUES (42)")
+        manager.revision(target, "create owned table")
+        manager.upgrade(target)
+        expected = {"alembic_version", foreign} if foreign_exists else {"alembic_version"}
+        assert _tables(db_path) == expected | {own}
+        manager.downgrade(target, "-1")
+        assert _tables(db_path) == expected
+        assert _versions(db_path) == {"ag_core0", "ag_plugin0"}
+        if foreign_exists:
+            assert _sqlite_rows(db_path, f"SELECT id FROM {foreign}") == {42}
+
+    def test_imported_model_change_stays_outside_revision(self, module_factory: ModuleFactory, tmp_path: Path) -> None:
+        core = _migration_app(
+            module_factory, "ag_core", _model_source("Account", "account", "    name = Column(String)\n")
+        )
+        plugin = _migration_app(
+            module_factory,
+            "ag_plugin",
+            _model_source("Tag", "tag", "    name = Column(String(30), index=True)\n")
+            + "from ag_core.models import Account\n",
+        )
+        registry = ModuleRegistry()
+        registry.populate([core, plugin])
+        db_path = tmp_path / "columns.db"
+        manager = MigrationsManager(registry, _database_url(db_path))
+        command.stamp(manager._build_config(None), "heads")
+        with sqlite3.connect(db_path) as connection:
+            connection.execute("CREATE TABLE account (id INTEGER NOT NULL PRIMARY KEY)")
+            connection.execute("CREATE TABLE tag (id INTEGER NOT NULL PRIMARY KEY)")
+        manager.revision(plugin, "add tag name")
+        manager.upgrade(plugin)
+        with sqlite3.connect(db_path) as connection:
+            assert [row[1] for row in connection.execute("PRAGMA table_info(tag)")] == ["id", "name"]
+            assert [row[1] for row in connection.execute("PRAGMA table_info(account)")] == ["id"]
+            assert [row[1] for row in connection.execute("PRAGMA index_list(tag)")] == ["ix_tag_name"]
+        manager.downgrade(plugin, "-1")
+        with sqlite3.connect(db_path) as connection:
+            assert [row[1] for row in connection.execute("PRAGMA table_info(tag)")] == ["id"]
+            assert [row[1] for row in connection.execute("PRAGMA table_info(account)")] == ["id"]
+
+    def test_association_foreign_key_is_retained(self, module_factory: ModuleFactory, tmp_path: Path) -> None:
+        core = _migration_app(module_factory, "ag_core", _model_source("Account", "account"))
+        plugin = _migration_app(
+            module_factory,
+            "ag_plugin",
+            "from sqlalchemy import Table, Column, Integer, ForeignKey\n"
+            "from bedrock.database.base import BedrockModel\n"
+            "links = Table('links', BedrockModel.metadata,\n"
+            "    Column('user_id', Integer, ForeignKey('account.id'), primary_key=True),\n"
+            "    info={'bedrock_module': 'ag_plugin'})\n",
+        )
+        registry = ModuleRegistry()
+        registry.populate([core, plugin])
+        db_path = tmp_path / "foreign_key.db"
+        manager = MigrationsManager(registry, _database_url(db_path))
+        manager.ensure_schema(core)
+        command.stamp(manager._build_config(None), "heads")
+        manager.revision(plugin, "add account links")
+        manager.upgrade(plugin)
+        with sqlite3.connect(db_path) as connection:
+            assert [(row[2], row[3], row[4]) for row in connection.execute("PRAGMA foreign_key_list(links)")] == [
+                ("account", "user_id", "id")
+            ]
+        manager.downgrade(plugin, "-1")
+        assert _tables(db_path) == {"account", "alembic_version"}
+
+    @pytest.mark.parametrize("case", ["missing", "conflict", "duplicate_schema"])
+    def test_invalid_ownership_writes_no_revision(
+        self, module_factory: ModuleFactory, tmp_path: Path, case: str
+    ) -> None:
+        models = _model_source("Invalid", "invalid")
+        if case == "missing":
+            models += "unknown = Table('unknown', BedrockModel.metadata, Column('id', Integer))\n"
+        elif case == "conflict":
+            models += "Invalid.__table__.info['bedrock_module'] = 'ag_other'\n"
+        else:
+            models += (
+                "alias = Table('invalid', BedrockModel.metadata, Column('id', Integer),\n"
+                "    schema='main', info={'bedrock_module': 'ag_invalid'})\n"
+            )
+        app = _migration_app(module_factory, "ag_invalid", models)
+        other = _migration_app(module_factory, "ag_other", "")
+        registry = ModuleRegistry()
+        registry.populate([app, other])
+        db_path = tmp_path / "invalid_generation.db"
+        manager = MigrationsManager(registry, _database_url(db_path))
+        command.stamp(manager._build_config(None), "heads")
+        with pytest.raises(MigrationError):
+            manager.revision(app, "must not be written")
+        assert {p.name for p in (module_factory.root / app / "migrations").glob("*.py")} == {"initial.py"}
+        assert _versions(db_path) == {"ag_invalid0", "ag_other0"}
+        assert _tables(db_path) == {"alembic_version"}
+
+    def test_missing_autogenerate_scope_is_rejected(self, module_factory: ModuleFactory, tmp_path: Path) -> None:
+        app = _migration_app(module_factory, "ag_app", _model_source("Account", "account"))
+        registry = ModuleRegistry()
+        registry.populate([app])
+        manager = MigrationsManager(registry, _database_url(tmp_path / "missing_scope.db"))
+        cfg = manager._build_config(app)
+        command.stamp(cfg, "heads")
+        with pytest.raises(MigrationError):
+            command.revision(cfg, message="no scope", autogenerate=True, head=f"{app}@head")
+        assert {p.name for p in (module_factory.root / app / "migrations").glob("*.py")} == {"initial.py"}
+
+    def test_empty_module_generates_no_foreign_operations(self, module_factory: ModuleFactory, tmp_path: Path) -> None:
+        core = _migration_app(module_factory, "ag_core", _model_source("Account", "account"))
+        empty = _migration_app(module_factory, "ag_empty", "")
+        registry = ModuleRegistry()
+        registry.populate([core, empty])
+        db_path = tmp_path / "empty_generation.db"
+        manager = MigrationsManager(registry, _database_url(db_path))
+        command.stamp(manager._build_config(None), "heads")
+        manager.revision(empty, "no owned changes")
+        manager.upgrade(empty)
+        manager.uninstall(empty)
+        assert _tables(db_path) == {"alembic_version"}
+        assert _versions(db_path) == {"ag_core0"}
+
+    @pytest.mark.parametrize("schema", [None, "main"])
+    def test_default_schema_aliases_do_not_create_phantom_tables(
+        self, module_factory: ModuleFactory, tmp_path: Path, schema: str | None
+    ) -> None:
+        app = _migration_app(
+            module_factory,
+            "ag_app",
+            _model_source("Account", "account", f"    __table_args__ = {{'schema': {schema!r}}}\n"),
+        )
+        registry = ModuleRegistry()
+        registry.populate([app])
+        db_path = tmp_path / "default_schema.db"
+        manager = MigrationsManager(registry, _database_url(db_path))
+        manager.ensure_schema(app)
+        with sqlite3.connect(db_path) as connection:
+            connection.execute("INSERT INTO account VALUES (42)")
+        manager.revision(app, "no changes")
+        manager.upgrade(app)
+        manager.downgrade(app, "-1")
+        assert _sqlite_rows(db_path, "SELECT id FROM account") == {42}
+
+    def test_install_uninstall_preserves_foreign_data_and_revision(
+        self, module_factory: ModuleFactory, tmp_path: Path
+    ) -> None:
+        core = _migration_app(module_factory, "ag_core", _model_source("Account", "account"))
+        plugin = module_factory("ag_plugin", models=_model_source("Tag", "tag"), files={"migrations/__init__.py": ""})
+        registry = ModuleRegistry()
+        registry.populate([core, plugin])
+        db_path = tmp_path / "lifecycle.db"
+        manager = MigrationsManager(registry, _database_url(db_path))
+        manager.ensure_schema(core)
+        with sqlite3.connect(db_path) as connection:
+            connection.execute("INSERT INTO account VALUES (42)")
+        manager.revision(plugin, "initial plugin")
+        assert manager.ensure_schema(plugin) == "created"
+        assert _tables(db_path) == {"account", "tag", "alembic_version"}
+        manager.uninstall(plugin)
+        assert _tables(db_path) == {"account", "alembic_version"}
+        assert _sqlite_rows(db_path, "SELECT id FROM account") == {42}
+        assert _versions(db_path) == {"ag_core0"}
+
+    def test_removed_model_requires_explicit_drop(self, module_factory: ModuleFactory, tmp_path: Path) -> None:
+        app = _migration_app(module_factory, "ag_app", "")
+        registry = ModuleRegistry()
+        registry.populate([app])
+        db_path = tmp_path / "historical.db"
+        manager = MigrationsManager(registry, _database_url(db_path))
+        command.stamp(manager._build_config(None), "heads")
+        with sqlite3.connect(db_path) as connection:
+            connection.execute("CREATE TABLE removed (id INTEGER NOT NULL PRIMARY KEY)")
+            connection.execute("INSERT INTO removed VALUES (42)")
+        manager.revision(app, "no inferred drop")
+        manager.upgrade(app)
+        assert _sqlite_rows(db_path, "SELECT id FROM removed") == {42}
+        revision = manager.get_history(app)[0]["revision"]
+        (module_factory.root / app / "migrations" / "explicit.py").write_text(
+            "from alembic import op\nimport sqlalchemy as sa\n"
+            "revision = 'explicit_drop'\n"
+            f"down_revision = {revision!r}\nbranch_labels = None\ndepends_on = None\n"
+            "def upgrade():\n    op.drop_table('removed')\n"
+            "def downgrade():\n"
+            "    op.create_table('removed', sa.Column('id', sa.Integer, primary_key=True))\n",
+            encoding="utf-8",
+        )
+        manager.upgrade(app)
+        assert "removed" not in _tables(db_path)
+        manager.downgrade(app, "-1")
+        assert "removed" in _tables(db_path)

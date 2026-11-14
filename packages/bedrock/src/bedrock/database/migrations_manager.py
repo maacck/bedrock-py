@@ -8,9 +8,8 @@ It is responsible for:
   ``version_locations`` always reflects the currently installed apps.
 - Enforcing the convention that every app's branch label equals its import
   path (e.g. ``myerp.wms``), preventing cross-app version-tree pollution.
-- Injecting per-app context into ``env.py`` via
-  :attr:`~alembic.config.Config.attributes` so that ``include_name`` can
-  restrict autogenerate to only the tables owned by the target app.
+- Injecting a per-operation table ownership snapshot into ``env.py`` so both
+  reflected tables and shared metadata are restricted during autogenerate.
 
 All public operations (``revision``, ``upgrade``, ``downgrade``, ``heads``,
 ``current``, ``check``) accept an *app_import_path* and translate it into the
@@ -36,7 +35,7 @@ from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from alembic.util.exc import CommandError
-from sqlalchemy import create_engine, text
+from sqlalchemy import Table, create_engine, text
 from sqlalchemy.engine.url import make_url
 
 from ..exc import BedrockExc
@@ -148,6 +147,37 @@ class BranchOwnershipError(MigrationError):
         self.expected_label = expected_label
 
 
+def _normalize_table_owners(owners: dict[str, str], default_schema: str | None) -> dict[tuple[str | None, str], str]:
+    """Resolve metadata keys to unique physical table identities for a connection.
+
+    Args:
+        owners: Validated metadata table keys and their owning app paths.
+        default_schema: The connection's default schema, or None offline.
+
+    Returns:
+        Owners keyed by normalized schema and table name.
+
+    Raises:
+        MigrationError: If metadata changed or two declarations name one physical table.
+    """
+    from .base import BedrockModel
+
+    normalized: dict[tuple[str | None, str], str] = {}
+    for key, owner in owners.items():
+        table = BedrockModel.metadata.tables.get(key)
+        if table is None:
+            raise MigrationError(f"Table '{key}' disappeared after resolving ownership; retry with stable models.")
+        identity = (None if table.schema == default_schema else table.schema, table.name)
+        if identity in normalized:
+            raise MigrationError(
+                f"Table '{key}' has duplicate declarations for the default schema; "
+                "use one Table declaration per physical table.",
+                owner,
+            )
+        normalized[identity] = owner
+    return normalized
+
+
 class MigrationsManager:
     """Orchestrates Alembic operations across all installed Bedrock apps.
 
@@ -226,6 +256,8 @@ class MigrationsManager:
         """
         app = self._get_app(app_import_path)
         cfg = self._build_config(app_import_path)
+        if autogenerate:
+            cfg.attributes["bedrock_table_owners"] = self._resolve_table_owners()
         version_path = str(self._ensure_migrations_dir(app))
         branch_label = app_import_path
 
@@ -398,6 +430,75 @@ class MigrationsManager:
             log.debug("Failed to determine head revisions for branch '%s'", branch_label, exc_info=True)
             return False
 
+    def _resolve_table_owners(self) -> dict[str, str]:
+        """Resolve each shared metadata table to one loaded app.
+
+        Model definition packages determine ownership, not the modules importing
+        them. Unmapped tables must declare ``info['bedrock_module']`` explicitly.
+
+        Returns:
+            A per-operation snapshot of table keys and owning app import paths.
+
+        Raises:
+            MigrationError: If a table's owner is missing, invalid, or ambiguous.
+        """
+        from .base import BedrockModel
+
+        apps = {app.name: app for app in self._registry.all()}
+        names = sorted(apps, key=len, reverse=True)
+        candidates: dict[str, set[str]] = {}
+        definitions: dict[str, set[str]] = {}
+        unresolved: set[str] = set()
+        for mapper in BedrockModel.registry.mappers:
+            table = mapper.local_table
+            if not isinstance(table, Table) or BedrockModel.metadata.tables.get(table.key) is not table:
+                continue
+            model = mapper.class_
+            definitions.setdefault(table.key, set()).add(f"{model.__module__}.{model.__qualname__}")
+            owner = next(
+                (name for name in names if model.__module__ == name or model.__module__.startswith(name + ".")),
+                None,
+            )
+            if owner is not None:
+                candidates.setdefault(table.key, set()).add(owner)
+            else:
+                unresolved.add(table.key)
+
+        owners: dict[str, str] = {}
+        for key, table in sorted(BedrockModel.metadata.tables.items()):
+            inferred = candidates.get(key, set())
+            source = f"Table '{key}' (models: {sorted(definitions.get(key, set()))!r})"
+            if len(inferred) > 1:
+                raise MigrationError(
+                    f"{source} is mapped by multiple apps {sorted(inferred)!r}; "
+                    "keep all mappings of one table in its owning app."
+                )
+            owner = next(iter(inferred), None)
+            if "bedrock_module" in table.info:
+                declared = table.info["bedrock_module"]
+                if not isinstance(declared, str) or not declared or declared not in apps:
+                    raise MigrationError(f"{source} must declare info['bedrock_module'] as a loaded app import path.")
+                if owner is not None and declared != owner:
+                    raise MigrationError(
+                        f"{source} declares owner '{declared}' but its models belong to '{owner}'; "
+                        "make the declaration agree with the model's defining app."
+                    )
+                owner = declared
+            elif key in unresolved:
+                raise MigrationError(
+                    f"{source} includes models without a loaded owning app; load each defining app "
+                    "or declare info['bedrock_module'] explicitly for this table."
+                )
+            if owner is None:
+                raise MigrationError(
+                    f"{source} has no owning app; load its defining app or declare "
+                    "info['bedrock_module'] on an unmapped Table."
+                )
+            if apps[owner].models_module is None:
+                raise MigrationError(f"{source} belongs to '{owner}', which must provide a models module.", owner)
+            owners[key] = owner
+        return owners
+
     def _create_tables_and_stamp(self, cfg: Config, app: "AppConfig") -> None:
         """Create all tables for *app* and stamp the branch at head.
 
@@ -419,32 +520,21 @@ class MigrationsManager:
 
         branch_label = app.name
 
-        # Collect the table objects owned by this app from the shared metadata.
-        if app.models_module is not None:
-            owned_table_names = {
-                obj.__tablename__
-                for obj in vars(app.models_module).values()
-                if (
-                    isinstance(obj, type)
-                    and issubclass(obj, BedrockModel)
-                    and obj is not BedrockModel
-                    and hasattr(obj, "__tablename__")
-                )
-            }
-            tables = [
-                BedrockModel.metadata.tables[name] for name in owned_table_names if name in BedrockModel.metadata.tables
-            ]
-        else:
-            tables = []
+        owners = self._resolve_table_owners()
+        tables = [BedrockModel.metadata.tables[key] for key, owner in owners.items() if owner == branch_label]
 
         engine = create_engine(self._database_url)
         try:
-            BedrockModel.metadata.create_all(engine, tables=tables or None)
+            with engine.begin() as connection:
+                _normalize_table_owners(owners, connection.dialect.default_schema_name)
+                if tables:
+                    BedrockModel.metadata.create_all(connection, tables=tables)
+        except MigrationError:
+            raise
         except Exception as exc:
-            engine.dispose()
             raise MigrationError(f"Failed to create tables for '{branch_label}': {exc}", branch_label) from exc
-
-        engine.dispose()
+        finally:
+            engine.dispose()
 
         # Stamp so Alembic knows this branch is at head.
         try:
