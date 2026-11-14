@@ -16,15 +16,17 @@ if TYPE_CHECKING:
 class CacheLock:
     """Distributed lock backed by the configured cache backend.
 
-    The lock uses cache-level atomic add and compare-and-delete operations so
-    it can coordinate work across multiple processes when the active backend
-    supports those guarantees (for example, Redis).
+    The lock uses cache-level atomic add, compare-and-expire, and
+    compare-and-delete operations so it can coordinate work across multiple
+    processes when the active backend supports those guarantees (for example,
+    Redis).
 
     Args:
         cache_service: Cache service used to talk to the configured backend.
         name: Logical lock name within the configured prefix namespace.
         expire: Lock TTL in seconds. The lock is automatically released by the
-            backend when this TTL expires.
+            backend when this TTL expires unless the holder renews it with
+            :meth:`extend` or :meth:`aextend`.
         blocking: Whether :meth:`acquire` and :meth:`aacquire` should wait for
             the lock when it is already held.
         blocking_timeout: Maximum number of seconds to wait while acquiring the
@@ -238,6 +240,47 @@ class CacheLock:
             token,
         )
         if not released:
+            raise CacheLockOwnershipError(f"Lock '{self._key}' is no longer owned by this instance.")
+
+    def _extend_args(self, expire: int | None) -> tuple[bytes, int]:
+        if self._token is None:
+            raise CacheLockOwnershipError(f"Lock '{self._key}' is not currently acquired.")
+        ttl = self._expire if expire is None else expire
+        if ttl <= 0:
+            raise ValueError("Cache lock expire must be greater than zero.")
+        return self._token, ttl
+
+    def extend(self, expire: int | None = None) -> None:
+        """Reset the lock TTL while this instance still owns the lock.
+
+        The new TTL counts from now; it replaces the remaining TTL instead of
+        adding to it.
+
+        Args:
+            expire: New TTL in seconds. ``None`` reuses the lock's ``expire``.
+
+        Raises:
+            CacheLockOwnershipError: If this instance has not acquired the
+                lock, or the lock key expired or now belongs to another owner.
+            ValueError: If *expire* is not greater than zero.
+        """
+        token, ttl = self._extend_args(expire)
+        if not self._cache_service.get_backend().compare_and_expire(self._key, token, ttl):
+            raise CacheLockOwnershipError(f"Lock '{self._key}' is no longer owned by this instance.")
+
+    async def aextend(self, expire: int | None = None) -> None:
+        """Reset the lock TTL asynchronously while this instance still owns the lock.
+
+        Args:
+            expire: New TTL in seconds. ``None`` reuses the lock's ``expire``.
+
+        Raises:
+            CacheLockOwnershipError: If this instance has not acquired the
+                lock, or the lock key expired or now belongs to another owner.
+            ValueError: If *expire* is not greater than zero.
+        """
+        token, ttl = self._extend_args(expire)
+        if not await self._cache_service.get_backend().acompare_and_expire(self._key, token, ttl):
             raise CacheLockOwnershipError(f"Lock '{self._key}' is no longer owned by this instance.")
 
     def locked(self) -> bool:

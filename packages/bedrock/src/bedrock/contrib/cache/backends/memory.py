@@ -67,17 +67,7 @@ class InMemoryBackend(CacheBackend):
 
     def get(self, key: str, default: bytes | None = None) -> bytes | None:
         """Retrieve a cached value by key."""
-        entry = self._store.get(key)
-        if entry is None:
-            return default
-        if entry.is_expired:
-            del self._store[key]
-            return default
-        return entry.value
-
-    async def aget(self, key: str, default: bytes | None = None) -> bytes | None:
-        """Asynchronous variant of :meth:`get`."""
-        async with self._lock:
+        with self._sync_lock:
             entry = self._store.get(key)
             if entry is None:
                 return default
@@ -86,22 +76,14 @@ class InMemoryBackend(CacheBackend):
                 return default
             return entry.value
 
+    async def aget(self, key: str, default: bytes | None = None) -> bytes | None:
+        """Asynchronous variant of :meth:`get`."""
+        async with self._lock:
+            return self.get(key, default)
+
     def get_with_ttl(self, key: str) -> tuple[bytes | None, int | None]:
         """Retrieve a cached value along with its remaining TTL."""
-        entry = self._store.get(key)
-        if entry is None:
-            return None, None
-        if entry.is_expired:
-            del self._store[key]
-            return None, None
-        if entry.expires_at is None:
-            return entry.value, None
-        remaining = int(entry.expires_at - time.monotonic())
-        return entry.value, max(remaining, 0)
-
-    async def aget_with_ttl(self, key: str) -> tuple[bytes | None, int | None]:
-        """Asynchronous variant of :meth:`get_with_ttl`."""
-        async with self._lock:
+        with self._sync_lock:
             entry = self._store.get(key)
             if entry is None:
                 return None, None
@@ -113,6 +95,11 @@ class InMemoryBackend(CacheBackend):
             remaining = int(entry.expires_at - time.monotonic())
             return entry.value, max(remaining, 0)
 
+    async def aget_with_ttl(self, key: str) -> tuple[bytes | None, int | None]:
+        """Asynchronous variant of :meth:`get_with_ttl`."""
+        async with self._lock:
+            return self.get_with_ttl(key)
+
     def set(
         self,
         key: str,
@@ -123,9 +110,10 @@ class InMemoryBackend(CacheBackend):
     ) -> None:
         """Store a value in the cache."""
         expires_at = self._resolve_expires_at(ex=ex, px=px, ea=ea)
-        self._store[key] = CacheEntry(value=value, expires_at=expires_at)
-        if self._settings.max_size > 0 and len(self._store) > self._settings.max_size:
-            self._evict()
+        with self._sync_lock:
+            self._store[key] = CacheEntry(value=value, expires_at=expires_at)
+            if self._settings.max_size > 0 and len(self._store) > self._settings.max_size:
+                self._evict()
 
     async def aset(
         self,
@@ -136,11 +124,8 @@ class InMemoryBackend(CacheBackend):
         ea: float | None = None,
     ) -> None:
         """Asynchronous variant of :meth:`set`."""
-        expires_at = self._resolve_expires_at(ex=ex, px=px, ea=ea)
         async with self._lock:
-            self._store[key] = CacheEntry(value=value, expires_at=expires_at)
-            if self._settings.max_size > 0 and len(self._store) > self._settings.max_size:
-                self._evict_locked()
+            self.set(key, value, ex=ex, px=px, ea=ea)
 
     def add(
         self,
@@ -172,32 +157,11 @@ class InMemoryBackend(CacheBackend):
         ea: float | None = None,
     ) -> bool:
         """Asynchronous variant of :meth:`add`."""
-        expires_at = self._resolve_expires_at(ex=ex, px=px, ea=ea)
-        async with self._lock:
-            entry = self._store.get(key)
-            if entry is not None and not entry.is_expired:
-                return False
-            if entry is not None and entry.is_expired:
-                del self._store[key]
-            self._store[key] = CacheEntry(value=value, expires_at=expires_at)
-            if self._settings.max_size > 0 and len(self._store) > self._settings.max_size:
-                self._evict_locked()
-            return True
+        return self.add(key, value, ex=ex, px=px, ea=ea)
 
     def delete(self, key: str) -> bool:
         """Remove a key from the cache."""
-        entry = self._store.get(key)
-        if entry is None:
-            return False
-        if entry.is_expired:
-            del self._store[key]
-            return False
-        del self._store[key]
-        return True
-
-    async def adelete(self, key: str) -> bool:
-        """Asynchronous variant of :meth:`delete`."""
-        async with self._lock:
+        with self._sync_lock:
             entry = self._store.get(key)
             if entry is None:
                 return False
@@ -206,6 +170,11 @@ class InMemoryBackend(CacheBackend):
                 return False
             del self._store[key]
             return True
+
+    async def adelete(self, key: str) -> bool:
+        """Asynchronous variant of :meth:`delete`."""
+        async with self._lock:
+            return self.delete(key)
 
     def compare_and_delete(self, key: str, expected: bytes) -> bool:
         """Delete a key only when its current value matches *expected*."""
@@ -223,53 +192,36 @@ class InMemoryBackend(CacheBackend):
 
     async def acompare_and_delete(self, key: str, expected: bytes) -> bool:
         """Asynchronous variant of :meth:`compare_and_delete`."""
-        async with self._lock:
+        return self.compare_and_delete(key, expected)
+
+    def compare_and_expire(self, key: str, expected: bytes, ex: int) -> bool:
+        """Reset a key's TTL to *ex* seconds only when its current value matches *expected*."""
+        with self._sync_lock:
             entry = self._store.get(key)
-            if entry is None:
+            if entry is None or entry.value != expected:
                 return False
             if entry.is_expired:
                 del self._store[key]
                 return False
-            if entry.value != expected:
-                return False
-            del self._store[key]
+            entry.expires_at = self._resolve_expires_at(ex=ex)
             return True
+
+    async def acompare_and_expire(self, key: str, expected: bytes, ex: int) -> bool:
+        """Asynchronous variant of :meth:`compare_and_expire`."""
+        return self.compare_and_expire(key, expected, ex)
 
     def exists(self, key: str) -> bool:
         """Check whether a key exists in the cache."""
-        entry = self._store.get(key)
-        if entry is None:
-            return False
-        if entry.is_expired:
-            del self._store[key]
-            return False
-        return True
+        return self.get(key) is not None
 
     async def aexists(self, key: str) -> bool:
         """Asynchronous variant of :meth:`exists`."""
         async with self._lock:
-            entry = self._store.get(key)
-            if entry is None:
-                return False
-            if entry.is_expired:
-                del self._store[key]
-                return False
-            return True
+            return self.exists(key)
 
     def clear(self, prefix: str | None = None) -> int:
         """Remove all entries from the cache, optionally filtered by prefix."""
-        if prefix is None:
-            count = len(self._store)
-            self._store.clear()
-            return count
-        to_delete = [k for k in self._store if k.startswith(prefix)]
-        for k in to_delete:
-            del self._store[k]
-        return len(to_delete)
-
-    async def aclear(self, prefix: str | None = None) -> int:
-        """Asynchronous variant of :meth:`clear`."""
-        async with self._lock:
+        with self._sync_lock:
             if prefix is None:
                 count = len(self._store)
                 self._store.clear()
@@ -279,22 +231,16 @@ class InMemoryBackend(CacheBackend):
                 del self._store[k]
             return len(to_delete)
 
+    async def aclear(self, prefix: str | None = None) -> int:
+        """Asynchronous variant of :meth:`clear`."""
+        async with self._lock:
+            return self.clear(prefix)
+
     # -- Batch operations -------------------------------------------------
 
     def get_many(self, keys: list[str]) -> dict[str, bytes]:
         """Retrieve multiple keys in one call."""
-        result: dict[str, bytes] = {}
-        for key in keys:
-            entry = self._store.get(key)
-            if entry is not None and not entry.is_expired:
-                result[key] = entry.value
-            elif entry is not None and entry.is_expired:
-                del self._store[key]
-        return result
-
-    async def aget_many(self, keys: list[str]) -> dict[str, bytes]:
-        """Asynchronous variant of :meth:`get_many`."""
-        async with self._lock:
+        with self._sync_lock:
             result: dict[str, bytes] = {}
             for key in keys:
                 entry = self._store.get(key)
@@ -303,6 +249,11 @@ class InMemoryBackend(CacheBackend):
                 elif entry is not None and entry.is_expired:
                     del self._store[key]
             return result
+
+    async def aget_many(self, keys: list[str]) -> dict[str, bytes]:
+        """Asynchronous variant of :meth:`get_many`."""
+        async with self._lock:
+            return self.get_many(keys)
 
     def set_many(
         self,
@@ -354,7 +305,7 @@ class InMemoryBackend(CacheBackend):
     ) -> bytes | None:
         """Asynchronous variant of :meth:`get_or_set`."""
         async with self._lock:
-            value = await self._aget_locked(key)
+            value = self.get(key)
             if value is not None:
                 return value
             if callable(default_provider):
@@ -364,54 +315,44 @@ class InMemoryBackend(CacheBackend):
                     value = default_provider()
             else:
                 value = default_provider
-            await self._aset_locked(key, value, ex=ex, px=px, ea=ea)
+            self.set(key, value, ex=ex, px=px, ea=ea)
             return value
 
     # -- Key listing ------------------------------------------------------
 
     def list(self, prefix: str, limit: int = 100) -> list[str]:
         """List cache keys matching a prefix."""
-        return [k for k in self._store if k.startswith(prefix)][:limit]
+        with self._sync_lock:
+            return [k for k in self._store if k.startswith(prefix)][:limit]
 
     async def alist(self, prefix: str, limit: int = 100) -> list[str]:
         """Asynchronous variant of :meth:`list`."""
         async with self._lock:
-            return [k for k in self._store if k.startswith(prefix)][:limit]
+            return self.list(prefix, limit)
 
     # -- Counters ---------------------------------------------------------
 
     def incr(self, key: str, delta: int = 1) -> int:
         """Increment a numeric cache value."""
-        entry = self._store.get(key)
-        if entry is None or entry.is_expired:
-            if entry is not None and entry.is_expired:
-                del self._store[key]
-            self.set(key, str(delta).encode())
-            return delta
-        try:
-            current = self._decode_int(entry.value)
-        except ValueError as err:
-            raise ValueError(f"Value for key '{key}' is not an integer.") from err
-        new_value = current + delta
-        self.set(key, str(new_value).encode())
-        return new_value
-
-    async def aincr(self, key: str, delta: int = 1) -> int:
-        """Asynchronous variant of :meth:`incr`."""
-        async with self._lock:
+        with self._sync_lock:
             entry = self._store.get(key)
             if entry is None or entry.is_expired:
                 if entry is not None and entry.is_expired:
                     del self._store[key]
-                await self._aset_locked(key, str(delta).encode())
+                self.set(key, str(delta).encode())
                 return delta
             try:
                 current = self._decode_int(entry.value)
             except ValueError as err:
                 raise ValueError(f"Value for key '{key}' is not an integer.") from err
             new_value = current + delta
-            await self._aset_locked(key, str(new_value).encode())
+            self.set(key, str(new_value).encode())
             return new_value
+
+    async def aincr(self, key: str, delta: int = 1) -> int:
+        """Asynchronous variant of :meth:`incr`."""
+        async with self._lock:
+            return self.incr(key, delta)
 
     def decr(self, key: str, delta: int = 1) -> int:
         """Decrement a numeric cache value."""
@@ -437,42 +378,8 @@ class InMemoryBackend(CacheBackend):
 
     # -- Internal helpers -------------------------------------------------
 
-    def _aget_locked(self, key: str) -> bytes | None:
-        """Get a value (caller holds lock)."""
-        entry = self._store.get(key)
-        if entry is None:
-            return None
-        if entry.is_expired:
-            del self._store[key]
-            return None
-        return entry.value
-
-    async def _aset_locked(
-        self,
-        key: str,
-        value: bytes,
-        ex: int | None = None,
-        px: int | None = None,
-        ea: float | None = None,
-    ) -> None:
-        """Set a value (caller holds lock)."""
-        expires_at = self._resolve_expires_at(ex=ex, px=px, ea=ea)
-        self._store[key] = CacheEntry(value=value, expires_at=expires_at)
-        if self._settings.max_size > 0 and len(self._store) > self._settings.max_size:
-            self._evict_locked()
-
     def _evict(self) -> None:
-        """Remove expired entries, then oldest entries if needed."""
-        expired = [k for k, v in self._store.items() if v.is_expired]
-        for k in expired:
-            del self._store[k]
-        if len(self._store) > self._settings.max_size:
-            keys_to_remove = list(self._store.keys())[: self._settings.max_size // 2]
-            for k in keys_to_remove:
-                del self._store[k]
-
-    def _evict_locked(self) -> None:
-        """Same as _evict but caller holds the lock."""
+        """Remove expired entries, then oldest entries; caller holds ``_sync_lock``."""
         expired = [k for k, v in self._store.items() if v.is_expired]
         for k in expired:
             del self._store[k]

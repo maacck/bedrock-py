@@ -51,6 +51,8 @@ Register extensions in `bootstrap.py:on_load` with `register_backend(name, backe
 
 Backends live in a `bedrock.provider.ProviderCatalog[CacheBackend]` that imports built-in paths on demand. `configure()` translates an unknown name, a failed import (the message names the install requirement, e.g. `bedrock-core[cache-redis]`), or an object that does not implement `CacheBackend` to `BackendNotConfiguredError` with the provider error as the cause. Other constructor errors propagate unchanged. The catalog does not own instances; the service does.
 
+Custom backends must implement atomic `compare_and_expire(key: str, expected: bytes, ex: int) -> bool` and `acompare_and_expire(...)` for lock renewal. Reset the TTL to `ex` seconds only while the stored value matches `expected`; return `False` without mutation for a missing or differently owned key. Inheriting the `CacheBackend` protocol's stubs is not an implementation: they return `None`, so renewal raises `CacheLockOwnershipError`. The built-in memory and Redis backends supply both methods.
+
 ## Core API
 
 `cache` is a `CacheService`. Expiration uses `ex` (seconds), `px` (milliseconds), or `ea` (Unix timestamp) — mutually exclusive. Omit all three to store without expiry.
@@ -135,7 +137,7 @@ All inherit from `CacheError` (`BedrockExc`):
 | `CacheClearRequiresPrefixError` | Redis `clear()` with empty `key_prefix` and no `prefix=` |
 | `CacheLockError` | Same `CacheLock` instance acquired twice |
 | `CacheLockAcquisitionError` | `with` / `async with` could not acquire |
-| `CacheLockOwnershipError` | `release()` when not held, expired, or stolen |
+| `CacheLockOwnershipError` | `release()` / `extend()` when not held, expired, or stolen |
 | `CacheConnectionError` | Reserved for connection failures |
 | `CacheSerializationError` | Reserved for coder failures |
 | `ValueError` | `type_`+`coder`, bad lock/slot/namespace params |
@@ -148,7 +150,7 @@ Details: `references/exceptions.md`.
 - Shut down through one family: `bedrock.shutdown()` or `await bedrock.ashutdown()`. A sync `shutdown()` inside a running event loop raises `ModuleAsyncRequiredError` when Redis async clients are open.
 - Don't call Redis `clear()` without `CACHE_REDIS_KEY_PREFIX` or an explicit `prefix=`.
 - Don't use the in-memory backend for cross-process locks.
-- Don't hold a lock longer than `expire` — the key vanishes and `release()` raises `CacheLockOwnershipError`.
+- Don't hold a lock longer than `expire` without calling `extend()` — the key vanishes and `release()` raises `CacheLockOwnershipError`.
 - Don't pass both `type_` and `coder`.
 - Don't concatenate raw cache keys. Use `namespace` / `slot`.
 - Don't import `bedrock.cache`. Canonical path is `bedrock.contrib.cache`.

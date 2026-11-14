@@ -1,6 +1,6 @@
 # Distributed Locks
 
-`cache.lock(...)` returns a `CacheLock` backed by the active cache backend. Acquisition uses atomic `add`; release uses compare-and-delete of a per-acquire token.
+`cache.lock(...)` returns a `CacheLock` backed by the active cache backend. Acquisition uses atomic `add`; renewal uses compare-and-expire and release uses compare-and-delete of a per-acquire token.
 
 Cross-process exclusion requires Redis. The in-memory backend only coordinates threads/tasks in **this** process.
 
@@ -71,6 +71,17 @@ if lock.acquire():
             ...
 ```
 
+## Renewal
+
+`extend(expire=None)` / `aextend(expire=None)` reset the TTL of a held lock to `expire` seconds from now (`None` = the lock's `expire`). The TTL is replaced, not added to. Use it for tasks whose duration has no fixed upper bound instead of a large `expire` that keeps the lock held long after a crash.
+
+```python
+with cache.lock("import:42", expire=60) as lock:
+    for batch in batches:
+        process(batch)
+        lock.extend()  # raises CacheLockOwnershipError if the lock was lost
+```
+
 `acquire(blocking=..., blocking_timeout=..., sleep=...)` overrides the instance defaults for that call.
 
 ## API
@@ -79,6 +90,7 @@ if lock.acquire():
 |--------|------------------|
 | `acquire(...)` / `aacquire(...)` | `True` if owned, `False` if not. Raises `CacheLockError` if **this instance** already holds it. |
 | `release()` / `arelease()` | Raises `CacheLockOwnershipError` if not acquired, or if the stored token no longer matches. |
+| `extend(expire=None)` / `aextend(expire=None)` | Reset the TTL. Raises `CacheLockOwnershipError` if not acquired, or if the stored token no longer matches (the other owner's key is untouched). `ValueError` if `expire <= 0`. |
 | `locked()` / `alocked()` | Whether the lock **key** exists (any holder). |
 | `key` | Fully qualified cache key. |
 
@@ -88,7 +100,8 @@ if lock.acquire():
 - Two instances with the same `name` contend for the same key.
 - `release()` first forgets the local token, then compare-and-deletes. If the key expired or another writer overwrote it, you get `CacheLockOwnershipError`.
 - `locked()` is not "I hold it"; it is "the key exists".
-- Keep the critical section shorter than `expire`. There is no watchdog / auto-extend.
+- Keep the critical section shorter than `expire`, or call `extend()` between steps. There is no watchdog / auto-extend: a hung task stops renewing and the lock expires.
+- A failed `extend()` keeps the local token, so the `with` exit still attempts `release()`; that compare-and-delete fails without touching the other owner's key and raises `CacheLockOwnershipError`.
 
 ## Anti-patterns
 

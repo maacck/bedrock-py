@@ -5,6 +5,60 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.4] - 2026-11-14
+
+### Breaking changes
+
+- **Migration table ownership**: autogeneration and first-install table creation now reject
+  missing, conflicting, or unloaded table owners with `MigrationError`. Ordinary ORM models
+  are inferred from their defining package and need no annotation. Unmapped association
+  `Table` objects must declare `info={"bedrock_module": "myapp.module"}`; any explicit ORM
+  declaration must agree with its defining module. Load the owning module and provide its
+  `models` module; keep mappings of one shared table in one module. No database ownership
+  table or backfill is needed. Tables whose models were removed require explicit drop
+  migrations. Existing generated scripts are not rewritten: audit both upgrade and downgrade
+  before installing, rolling back, or uninstalling affected modules, including stamped revisions.
+- **Cache backend protocol**: custom backends registered with `register_backend()` must implement
+  `compare_and_expire(key, expected, ex) -> bool` and `acompare_and_expire(...)`: reset the key's TTL to
+  `ex` seconds only when its value equals `expected`, atomically, and return whether it did.
+  A structural backend without them fails `CacheService.configure()`; a `CacheBackend` subclass that does
+  not override them inherits stubs returning `None`, so every `extend()` raises `CacheLockOwnershipError`.
+  The built-in memory and Redis backends implement both. Migration: add the two methods to each custom
+  backend; Redis-based ones can reuse a `GET` + `EXPIRE` Lua script like the built-in backend.
+
+### Added
+
+- **Release tooling**: `make release-version VERSION=X.Y.Z` synchronizes the root, core, and CLI package
+  versions through uv and regenerates the lockfile once. `PACKAGE=bedrock-fastapi` or `PACKAGE=bedrock-celery`
+  selects an independent integration release. Failed updates restore the selected manifests and lockfile;
+  dependency minimums, release notes, Git tags, and publishing remain explicit maintainer steps.
+- **CLI version metadata**: `bedrock_cli.__version__` reads the installed distribution version instead of
+  maintaining a separate hard-coded value.
+- **Cache locks**: `CacheLock.extend(expire=None)` and `aextend(expire=None)` renew a held lock. The
+  TTL is reset to `expire` seconds from now (default: the lock's own `expire`) only while the key still
+  holds this instance's token; otherwise they raise `CacheLockOwnershipError` and leave the other
+  owner's key untouched. Long tasks call it between steps instead of setting a large `expire` that
+  keeps the lock held long after a crash. There is no automatic background renewal.
+
+### Fixed
+
+- **Migrations**: autogeneration filters both reflected database objects and shared metadata
+  by the target module's table ownership. Imported foreign models no longer transfer ownership;
+  schema-qualified names and default-schema aliases are handled without mixing same-name tables.
+  First installation uses the same ownership rules, includes explicitly owned association tables,
+  and never creates every table when the target's owned-table set is empty.
+  A known owner on one mapper no longer hides unresolved models sharing that table: every
+  mapping must resolve to a loaded app unless the table has a valid explicit owner declaration.
+- **Cache locks (memory backend)**: `aadd()` and `acompare_and_delete()` now take the same thread lock as
+  `add()` and `compare_and_delete()`. Previously a lock acquired or released through `async with` in one
+  thread was not excluded from a `with` on the same lock name in another thread, so a release could
+  delete the key of a new owner.
+- **Cache locks (memory backend)**: synchronous and asynchronous reads, expiration cleanup,
+  and capacity eviction now share the thread lock used by acquisition, release, and renewal.
+  A reader's stale expiration decision can no longer delete a successfully renewed lock and
+  admit another holder. Async operations reuse the protected synchronous store operations;
+  async get-or-set providers run without holding the thread lock.
+
 ## [0.3.3] - 2026-11-09
 
 ### Breaking changes
@@ -65,6 +119,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `is_head` is a `bool`, as the CLI already used it.
 
 ### Fixed
+
 
 - **Migrations**: a database URL containing percent-encoded characters, such as a password with
   `@` or `#`, no longer makes every migration command fail with `ValueError: invalid interpolation

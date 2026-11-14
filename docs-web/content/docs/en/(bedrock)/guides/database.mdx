@@ -535,6 +535,35 @@ Bedrock wraps Alembic with per-module branching. Each app gets its own Alembic b
 
 For the complete migration CLI reference, see [CLI Reference — Database Commands](/docs/guides/cli#database-commands-bedrock-db).
 
+### Table Ownership
+
+Autogeneration and first-install table creation resolve ownership for every table in the shared metadata. Ordinary ORM models need no extra declaration: the model's defining Python package selects the longest matching loaded Bedrock module import path. Models in imported domain packages are included; importing or re-exporting another module's model does not transfer ownership. Import needed domain models from `models.py`; Bedrock does not discover unimported model files.
+
+Unmapped `Table` objects, such as association tables, declare their owner through SQLAlchemy's `info` dictionary. For example, in `myapp.tags.models`, after the users module has defined `users` in the shared metadata:
+
+```python
+from sqlalchemy import Column, ForeignKey, Integer, String, Table
+from bedrock.database import BedrockModel
+
+user_labels = Table(
+    "user_labels",
+    BedrockModel.metadata,
+    Column("user_id", Integer, ForeignKey("users.id"), primary_key=True),
+    Column("label", String(50), primary_key=True),
+    info={"bedrock_module": "myapp.tags"},
+)
+```
+
+Declare `myapp.users` in the tags module's manifest `depends_on`. Cross-module foreign keys retain access to the complete metadata, but do not grant ownership of their referenced tables. Cross-branch migration ordering remains the developer's responsibility.
+
+An ORM model may also declare `__table_args__ = {"info": {"bedrock_module": "myapp.tags"}}`; this must agree with its defining module. Missing ownership, invalid declarations, unloaded owners, owners without a `models` module, and conflicting mappings raise `MigrationError` before writing a revision or creating/stamping the first-install schema. There is no fallback to all tables. Keep all mappings of one table in one module: same-module single-table inheritance is supported, cross-module single-table mappings are rejected, and joined-table inheritance assigns each local table separately.
+
+Every mapped class sharing a table must resolve to an owner; one resolved class does not cover an unresolved class. A valid explicit table declaration can supply missing ownership, but cannot override a known conflict between loaded modules.
+
+Ownership is a per-operation snapshot, not a database ownership table or a global registration hook. Table identities include schema; explicit and implicit default schemas refer to the same physical table, and duplicate declarations of that physical table are rejected. Reflection is restricted to the target's schemas and tables, and metadata objects are filtered too. An empty owned-table set creates no tables.
+
+When a model is removed, the remaining database table's historical owner cannot be inferred. It is not automatically claimed or dropped: write a reviewed explicit migration with `bedrock db revision <app> -m "drop obsolete table" --no-autogenerate`. Historical upgrade/downgrade, manual revisions, and offline SQL rendering do not require a current ownership snapshot. Raw Alembic calls without Bedrock's managed context retain the full metadata view and are outside this isolation guarantee.
+
 ### Programmatic Usage
 
 ```python
@@ -561,11 +590,23 @@ history = migrations.get_history("myapp.users")
 
 ### Branch Ownership
 
-Each app's migrations directory is audited before operations. If a revision file declares a branch label that doesn't match the app's import path, a `BranchOwnershipError` is raised. This prevents cross-app version-tree pollution.
+Each app's migrations directory is audited before operations. If a revision file declares a branch label that doesn't match the app's import path, a `BranchOwnershipError` is raised. This prevents cross-app version-tree pollution, not arbitrary table operations inside a correctly labelled script. Autogeneration filters are not a script execution sandbox.
 
 ### First Install
 
 When the app's branch has no applied database revision, `ensure_schema()` creates its tables from SQLAlchemy metadata and stamps the branch at head. This avoids running migration scripts for a first installation even when revision files exist.
+
+First installation uses the same table ownership rules as autogeneration. It creates only owned tables; an empty set skips table creation while preserving the existing stamp behavior. A successful installation does not prove a historical script is safe to roll back: its `upgrade()` may never have run.
+
+### Existing Migration Safety
+
+The fix does not rewrite already generated scripts. Before installing, upgrading, rolling back, or uninstalling an affected module:
+
+1. Pause these operations, back up the database and migration files, and record both `alembic_version` and the actual schema/data state in every deployed environment.
+2. Review both `upgrade()` and `downgrade()` in core and plugin branches, including tables, columns, indexes, constraints, and raw SQL. Correct branch labels are not evidence of safe table operations.
+3. Regenerate or correct an unpublished revision only after confirming no environment has applied or stamped it. For published/applied/stamped revisions, coordinate a reviewed repair across deployments; do not casually delete revisions, change their IDs, or stamp base. A new revision alone cannot neutralize a dangerous older downgrade that uninstall will still reach.
+4. After a failed upgrade, inspect residual DDL even if no revision was recorded. If data was already deleted, restore it through verified backups or database recovery; recreating tables does not restore rows.
+5. Verify the actual install/upgrade/uninstall paths on an isolated copy of production data before resuming operations.
 
 ### Migration Lock
 

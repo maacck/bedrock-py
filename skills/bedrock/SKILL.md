@@ -7,7 +7,7 @@ description: >
   debugging module lifecycle issues, writing bootstrap hooks, configuring database migrations,
   writing tests for Bedrock modules, or building applications on top of Bedrock. Trigger on: "python project dependencies contains 'bedrock-py'", "working on a Bedrock module", "writing a manifest.yaml", "using bedrock CLI commands", "testing a Bedrock module"
 metadata:
-  bedrock-core: "0.3.3"
+  bedrock-core: "0.3.4"
 ---
 
 # Bedrock Application Development
@@ -273,6 +273,8 @@ class UserModel(BedrockModel):
     email: Mapped[str] = mapped_column(String(255), unique=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 ```
+
+**Migration ownership:** Ordinary ORM models need no new annotation: their defining package selects the longest matching loaded Bedrock module, including imported domain packages. Importing another module's model does not transfer ownership. Unmapped association `Table` objects must declare `info={"bedrock_module": "myapp.tags"}`. Autogeneration and first installation reject missing, conflicting, or unloaded owners with `MigrationError`; they never fall back to all tables. See [Migration table ownership](references/database-guide.md#table-ownership) for schema, inheritance, and raw-table examples. These rules do not repair old migration scripts or sandbox `downgrade()`; review old scripts before uninstalling.
 
 `BedrockModel` provides these methods on all instances:
 - `.dict()` — Serialize to dict

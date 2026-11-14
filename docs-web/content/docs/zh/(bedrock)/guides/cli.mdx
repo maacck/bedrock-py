@@ -171,6 +171,10 @@ bedrock db revision myapp.users -m "custom index" --no-autogenerate
 - 分支标签等于导入路径（例如 `myapp.users`）
 - 后续调用会追加到 `<import_path>@head`
 
+自动生成会在数据库侧和模型侧同时限制为目标 module 的表。普通 ORM 模型归定义它的 module，而不归导入它的 module。无 ORM 映射的 `Table` 必须声明 `info={"bedrock_module": "myapp.users"}`。归属缺失、冲突或 owner 未加载时，在写出 revision 前抛出 `MigrationError`，不会回退到全部表。参见[表归属](/docs/guides/database#表归属)。
+
+数据库中已删除模型的旧表不会被自动认领到当前分支或自动删除。需要删除时，使用 `--no-autogenerate` 编写经过审查的显式迁移。手写迁移和历史升级／回滚执行不要求当前表归属快照。
+
 ---
 
 ### `bedrock db upgrade`
@@ -329,16 +333,18 @@ def789ghi012     abc123def456     myapp.users      add email verification
 
 ### `bedrock db uninstall`
 
-回滚所有迁移，并为移除模块做好准备。
+回滚目标应用已应用的版本，为移除该应用做好准备。
 
 ```bash
 bedrock db uninstall <app_import_path>
 ```
 
 **执行内容：**
-1. 将所有迁移回退到 base
-2. 从 `alembic_version` 中移除条目
-3. 为从 `INSTALLED_APPS` 中安全移除模块做好准备
+1. 将目标应用已应用的版本回退到该分支的 base
+2. 从 `alembic_version` 中移除该分支的条目
+3. 核实迁移执行结果后，才移除模块
+
+**先审查已有脚本。** 正确的分支标签并不限制 `downgrade()` 执行什么。首次安装可能只 stamp 了版本而没有运行其 `upgrade()`，卸载仍会执行其中的 `downgrade()`。归属过滤保护新的自动生成，不会修复旧污染脚本或拦截任意 SQL。卸载受影响应用前，先备份并遵循[已有迁移的安全处置](/docs/guides/database#已有迁移的安全处置)。
 
 **示例：**
 

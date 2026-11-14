@@ -137,6 +137,10 @@ bedrock db revision <app> -m "description" [--autogenerate | --no-autogenerate]
 
 Autogeneration defaults to enabled. The first revision creates the app's branch root; subsequent revisions append to that branch.
 
+Autogeneration filters both database reflection and shared metadata to tables owned by the target module. Ordinary ORM models use their defining package, including loaded domain packages; importing a foreign model does not transfer ownership. Unmapped `Table` objects declare `info={"bedrock_module": "myapp.users"}`. Missing, conflicting, or unloaded owners raise `MigrationError` without writing a revision. See [Table Ownership](database-guide.md#table-ownership).
+
+When a model has been removed, its old database table is not automatically claimed or dropped. Use `--no-autogenerate` to author a reviewed explicit drop migration. Historical scripts and manual revisions do not depend on a current ownership snapshot.
+
 **Examples**:
 ```bash
 bedrock db revision myapp.users -m "add users table"
@@ -232,6 +236,8 @@ Downgrade the app's migration branch to base before removing the module.
 ```bash
 bedrock db uninstall myapp.users
 ```
+
+Review both directions of existing scripts before uninstalling. Branch selection does not sandbox table operations, and first installation may stamp a revision without executing its upgrade. New generation filters do not repair old destructive downgrades. Back up, check applied/stamped revisions and actual schema state, and follow [Existing Migration Safety](database-guide.md#existing-migration-safety); adding a new revision alone cannot neutralize an older dangerous downgrade.
 
 ---
 
