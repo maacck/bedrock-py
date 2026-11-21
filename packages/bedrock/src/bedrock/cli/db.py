@@ -13,7 +13,6 @@ Usage::
     bedrock db downgrade myerp.wms -1
     bedrock db downgrade myerp.wms base
     bedrock db downgrade myerp.auth base --load myerp.orders --cascade
-    bedrock db uninstall myerp.wms --load myerp.orders --cascade
     bedrock db heads myerp.wms
     bedrock db current myerp.wms
     bedrock db check myerp.wms
@@ -135,13 +134,13 @@ def _print_revisions(revisions: tuple[str, ...]) -> None:
 # ---------------------------------------------------------------------------
 
 
-@db_app.command()
+@db_app.command(rich_help_panel="Write migration scripts")
 def revision(
     app_import_path: Annotated[str, typer.Argument(help="Import path of the target app, e.g. 'myerp.wms'.")],
     message: Annotated[str, typer.Option("-m", "--message", help="Short description for this revision.")],
     autogenerate: Annotated[bool, typer.Option(help="Autogenerate migration from model diff.")] = True,
 ) -> None:
-    """Create a new migration revision for *APP_IMPORT_PATH*.
+    """Write a draft migration script for *APP_IMPORT_PATH* without updating the database.
 
     The revision is named ``NNNN_<slug>`` and chained after the app's current head.
     Dependencies on other modules' migrations are recorded automatically.
@@ -159,7 +158,7 @@ def revision(
     _console.print(f"[bold green]✓[/bold green] Revision created for [bold]{escape(app_import_path)}[/bold].")
 
 
-@db_app.command()
+@db_app.command(rich_help_panel="Apply or roll back migrations")
 def upgrade(
     app_import_path: Annotated[str, typer.Argument(help="Import path of the target app, e.g. 'myerp.wms'.")],
     target: Annotated[
@@ -184,7 +183,7 @@ def upgrade(
     _print_steps(steps)
 
 
-@db_app.command()
+@db_app.command(rich_help_panel="Apply or roll back migrations")
 def downgrade(
     app_import_path: Annotated[str, typer.Argument(help="Import path of the target app, e.g. 'myerp.wms'.")],
     target: Annotated[
@@ -214,7 +213,7 @@ def downgrade(
     _print_steps(steps)
 
 
-@db_app.command()
+@db_app.command(rich_help_panel="Inspect migration state")
 def heads(
     app_import_path: Annotated[str, typer.Argument(help="Import path of the target app, e.g. 'myerp.wms'.")],
 ) -> None:
@@ -232,7 +231,7 @@ def heads(
     _print_revisions(revisions)
 
 
-@db_app.command()
+@db_app.command(rich_help_panel="Inspect migration state")
 def current(
     app_import_path: Annotated[str, typer.Argument(help="Import path of the target app, e.g. 'myerp.wms'.")],
 ) -> None:
@@ -252,7 +251,7 @@ def current(
     _print_revisions(revisions)
 
 
-@db_app.command()
+@db_app.command(rich_help_panel="Inspect migration state")
 def check(
     app_import_path: Annotated[str, typer.Argument(help="Import path of the target app, e.g. 'myerp.wms'.")],
 ) -> None:
@@ -297,7 +296,7 @@ def check(
     _console.print("[bold green]✓[/bold green] All migration branches are at head.")
 
 
-@db_app.command()
+@db_app.command(rich_help_panel="Inspect migration state")
 def history(
     app_import_path: Annotated[str, typer.Argument(help="Import path of the target app, e.g. 'myerp.wms'.")],
 ) -> None:
@@ -337,36 +336,7 @@ def history(
     _console.print(table)
 
 
-@db_app.command()
-def uninstall(
-    app_import_path: Annotated[str, typer.Argument(help="Import path of the app to uninstall, e.g. 'myerp.wms'.")],
-    cascade: Annotated[bool, typer.Option("--cascade", help=_CASCADE_HELP)] = False,
-    load: Annotated[list[str] | None, typer.Option("--load", help=_LOAD_HELP)] = None,
-) -> None:
-    """Roll back every applied migration of *APP_IMPORT_PATH* before removing it from the project.
-
-    After this command the app has no rows left in ``bedrock_migrations`` and can be
-    removed from ``INSTALLED_APPS`` and its code deleted. Dependents are handled as in
-    ``downgrade``: load them with ``--load`` and pass ``--cascade`` to roll them back too.
-
-    Examples::
-
-        bedrock db uninstall myerp.wms
-        bedrock db uninstall myerp.auth --load myerp.orders --cascade
-    """
-    manager = _bootstrap_manager(app_import_path, *(load or ()))
-    try:
-        steps = manager.uninstall(app_import_path, cascade=cascade)
-    except MigrationError as exc:
-        _fail(exc)
-    _print_steps(steps)
-    _console.print(
-        f"[bold green]✓[/bold green] [bold]{escape(app_import_path)}[/bold] has no applied migrations. "
-        "You can now remove it from INSTALLED_APPS."
-    )
-
-
-@db_app.command()
+@db_app.command(rich_help_panel="Legacy adoption and ledger setup")
 def adopt(
     app_import_paths: Annotated[
         list[str], typer.Argument(help="Import paths of every module that has migrations, e.g. 'myerp.wms'.")
@@ -390,7 +360,7 @@ def adopt(
     _console.print(f"[bold green]✓[/bold green] Imported {count} baseline migration(s). No scripts were executed.")
 
 
-@db_app.command("init-ledger")
+@db_app.command("init-ledger", rich_help_panel="Legacy adoption and ledger setup")
 def init_ledger(
     app_import_paths: Annotated[list[str], typer.Argument(help="Root modules of a new, independent registry.")],
     adopted_ledger: Annotated[

@@ -150,12 +150,15 @@ def _create_run_app() -> typer.Typer:
 
     run_app = typer.Typer(
         cls=_AppCommandGroup,
-        help="Run a Bedrock application's commands",
+        help="Run a module's commands: bedrock run --app ROOT_MODULE COMMAND_MODULE COMMAND.",
     )
 
     @run_app.callback(invoke_without_command=True)
     def main(
-        ctx: typer.Context, app: str | None = typer.Option(None, "--app", "-a", help="Specify the module to load")
+        ctx: typer.Context,
+        app: str | None = typer.Option(
+            None, "--app", "-a", metavar="ROOT_MODULE", help="Load commands from this root and its dependencies."
+        ),
     ):
         if ctx.invoked_subcommand is None:
             click.echo(ctx.get_help())

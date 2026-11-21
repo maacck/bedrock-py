@@ -23,9 +23,10 @@ bedrock [OPTIONS] COMMAND [ARGS]
 | 组 | 用途 |
 |-------|---------|
 | `bedrock run` | 运行模块专属命令 |
-| `bedrock app` | 检查和管理模块 |
-| `bedrock manage` | 应用生命周期管理 |
-| `bedrock db` | 数据库迁移操作 |
+| `bedrock app` | 读取：`inspect`、`info`、`playbook`。写入：`install` |
+| `bedrock db` | 状态（只读）：`heads`、`current`、`check`、`history`。写入：`revision`、`upgrade`、`downgrade`、`adopt`、`init-ledger` |
+
+只有 `run`、`app`、`db` 三组。原 `bedrock manage` 组和 `bedrock db uninstall` 已移除。
 
 ## 模块命令（`bedrock app`）
 
@@ -97,7 +98,28 @@ Commands     commands:app
 安装 Bedrock 模块：确保数据库 schema 为最新，然后运行可选的安装生命周期钩子。
 
 ```bash
-bedrock app install <import_path>
+bedrock app install <TARGET> [--root ROOT] [--with-dependencies] [--skip-migrations]
+```
+
+| 选项 | 说明 |
+|--------|-------------|
+| `--root ROOT` | 要加载的根模块，只决定加载上下文，不会扩大安装范围。不传时以 TARGET 作为根加载 |
+| `--with-dependencies` | 同时按依赖顺序安装 TARGET 的 `depends_on` 闭包（每个一次），最后安装 TARGET |
+| `--skip-migrations` | 只跳过 schema 步骤；安装钩子仍会运行 |
+
+默认只安装 TARGET。安装依赖其他模块的模块时，不会运行这些依赖的钩子，除非传入 `--with-dependencies`；根模块和同级模块不会被隐式安装。
+
+**钩子不被追踪。** Bedrock 不记录模块是否已安装，每次运行都会对每个被安装的模块重复执行 `pre_install` → `install` → `post_install`，因此钩子必须幂等。
+
+```bash
+# 只安装 myapp.users
+bedrock app install myapp.users
+
+# 通过根模块 myapp 加载，安装 myapp.users 及其依赖
+bedrock app install myapp.users --root myapp --with-dependencies
+
+# 只运行钩子
+bedrock app install myapp.users --skip-migrations
 ```
 
 <Callout type="info">
@@ -346,39 +368,11 @@ Revision                Down Revision    Depends On                Message
 
 ---
 
-### `bedrock db uninstall`
+### 移除模块
 
-回滚目标应用已应用的版本，为移除该应用做好准备。
+`bedrock db uninstall` 已移除。要移除模块的 schema，使用 `bedrock db downgrade <app> base`（见上文 `bedrock db downgrade`）。
 
-```bash
-bedrock db uninstall <app_import_path>
-```
-
-**执行内容：**
-1. 按依赖的逆序，将目标应用已应用的全部版本回退到 base
-2. 每撤销一个版本，就从 `bedrock_migrations` 中移除对应的行
-3. 核实迁移执行结果后，才移除模块
-
-**先审查已有脚本。** 卸载会执行该 module 每个已应用版本的 `downgrade()`，包括此前版本编写的脚本。归属过滤保护新的自动生成，不会修复旧污染脚本或拦截任意 SQL。卸载受影响应用前，先备份并遵循[已有迁移的安全处置](/docs/guides/database#已有迁移的安全处置)。
-
-**示例：**
-
-```bash
-$ bedrock db uninstall myapp.users
-
-myapp.users:0002_add_email
-myapp.users:0001_initial
-✓ myapp.users has no applied migrations. You can now remove it from INSTALLED_APPS.
-```
-
-不带 `--cascade` 时，如果其他 module 已应用的迁移依赖该应用的迁移，卸载会失败且不做任何改动。加上 `--cascade` 会先回滚这些依赖方；依赖方尚未加载时，为每个依赖方加上 `--load <app>`（依赖方不会被自动加载）。未加载的依赖方，以及 `adopt` 导入的基线行，总会在第一条 DDL 之前阻止命令。
-
-**选项：**
-
-| 选项 | 说明 |
-|--------|-------------|
-| `--cascade` | 同时回滚已加载 module 中依赖该应用迁移的已应用迁移 |
-| `--load <app>` | 同时加载该 module，使其已应用的迁移可见；可重复 |
+**先审查已有脚本。** 回滚会执行该 module 每个已应用版本的 `downgrade()`，包括此前版本编写的脚本。归属过滤保护新的自动生成，不会修复旧污染脚本或拦截任意 SQL。回滚受影响应用前，先备份并遵循[已有迁移的安全处置](/docs/guides/database#已有迁移的安全处置)。
 
 ---
 
@@ -397,7 +391,7 @@ bedrock db adopt <app_import_path> [<app_import_path> ...]
 2. 为每个直到这些 head 的 revision 写入一行 `baseline`，然后原子发布该表。如果 `bedrock_migrations` 已存在，会报告数据库已初始化，不会重复导入。
 3. 原样保留 `alembic_version` 作为审计快照。不会执行任何迁移脚本。
 
-基线行假定 schema 已经就位，并受到保护：需要撤销基线行的 downgrade、uninstall 或 cascade 会在任何 DDL 执行之前失败。先备份，并遵循[接管已有数据库](/docs/guides/database#接管已有数据库)。
+基线行假定 schema 已经就位，并受到保护：需要撤销基线行的 downgrade 或 cascade 会在任何 DDL 执行之前失败。先备份，并遵循[接管已有数据库](/docs/guides/database#接管已有数据库)。
 
 **示例：**
 
@@ -433,60 +427,6 @@ $ bedrock db init-ledger myapp.billing --adopted-ledger bedrock_migrations
 
 ---
 
-## 应用管理（`bedrock manage`）
-
-用于管理应用生命周期的命令。
-
-### `bedrock manage install`
-
-安装当前 Bedrock 应用。
-
-```bash
-bedrock manage [-A ROOT_MODULE] install [OPTIONS]
-```
-
-**选项：**
-
-| 选项 | 简写 | 说明 |
-|--------|-------|-------------|
-| `--app` | | 安装指定的已加载模块（默认：所有已加载模块） |
-| `--skip-migrations` | | 跳过数据库迁移 |
-
-父级 `manage` 命令的 `-A ROOT_MODULE` 选项指定要加载的根模块；也可以设置 `BEDROCK_APP`。
-
-**对每个模块会执行的操作：**
-
-1. **数据库 schema** — 执行该 module 的迁移脚本直到 head（有 models 但没有迁移脚本时会失败）
-2. **安装前钩子** — 如果定义了 `installation.py:pre_install()` 就执行
-3. **安装钩子** — 如果定义了 `installation.py:install()` 就执行
-4. **安装后钩子** — 如果定义了 `installation.py:post_install()` 就执行
-
-**示例：**
-
-```bash
-# Install all modules
-bedrock manage install
-
-# Install specific module
-bedrock manage install --app myapp.users
-
-# Skip migrations
-bedrock manage install --skip-migrations
-```
-
-**示例输出：**
-
-```bash
-✓ Installing application...
-Installing app: myapp.users 0.1.0
-✓ Schema created (migrations applied).
-Running pre-install hook for myapp.users...
-Running post-install hook for myapp.users...
-✓ Application installed successfully.
-```
-
----
-
 ## 运行模块命令（`bedrock run`）
 
 执行模块专属 CLI 命令。
@@ -495,11 +435,13 @@ Running post-install hook for myapp.users...
 bedrock run --app <root_module> <module> <command> [ARGS]
 ```
 
+`--app` 加载根模块及其依赖闭包。`<module>` 是要执行其命令的已加载模块，`<command>` 是它的 Typer 命令。业务命令只能通过 `run` 访问；不存在 `bedrock manage` 组。
+
 **选项：**
 
 | 选项 | 简写 | 说明 |
 |--------|-------|-------------|
-| `--app` | `-a` | 要加载的模块（或设置 `BEDROCK_APP` 环境变量） |
+| `--app` | `-a` | 要加载的根模块（或设置 `BEDROCK_APP`） |
 
 ### 模块命令的工作方式
 
@@ -534,13 +476,13 @@ commands: commands:app
 
 ```bash
 # Run module command
-bedrock run --app myapp.users myapp.users create-user --name Alice --email alice@example.com
+bedrock run --app myapp myapp.users create-user --name Alice --email alice@example.com
 
 # List available commands
-bedrock run --app myapp.users myapp.users --help
+bedrock run --app myapp myapp.users --help
 
 # Use BEDROCK_APP environment variable
-export BEDROCK_APP=myapp.users
+export BEDROCK_APP=myapp
 bedrock run myapp.users create-user --name Bob --email bob@example.com
 ```
 
@@ -550,7 +492,7 @@ bedrock run myapp.users create-user --name Bob --email bob@example.com
 
 | 变量 | 说明 | 默认值 |
 |----------|-------------|---------|
-| `BEDROCK_APP` | `run` 和 `manage` 命令的默认根应用 | None |
+| `BEDROCK_APP` | `run` 命令的默认根应用 | None |
 | `DATABASE_SCHEMA` | 数据库名称或 SQLite 文件路径 | `bedrock.db` |
 
 ---
@@ -560,8 +502,8 @@ bedrock run myapp.users create-user --name Bob --email bob@example.com
 ### 项目初始化
 
 ```bash
-# 1. Install the application
-bedrock manage install
+# 1. 安装根模块及其全部依赖
+bedrock app install myapp --with-dependencies
 
 # 2. Verify modules
 bedrock app info myapp.users
@@ -590,11 +532,11 @@ bedrock db current myapp.users
 ### 移除模块
 
 ```bash
-# 1. Rollback migrations
-bedrock db uninstall myapp.users
+# 1. 回滚其迁移（若有其他模块依赖它，加上 --load <dependent> --cascade）
+bedrock db downgrade myapp.users base
 
-# 2. Remove from INSTALLED_APPS
-# 3. Delete module code
+# 2. 从根模块的 depends_on / INSTALLED_APPS 中移除
+# 3. 删除模块代码
 ```
 
 ### 调试模块问题

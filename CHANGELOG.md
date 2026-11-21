@@ -69,6 +69,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   table or backfill is needed. Tables whose models were removed require explicit drop
   migrations. Existing generated scripts are not rewritten: audit both upgrade and downgrade
   before installing, rolling back, or uninstalling affected modules.
+- **CLI command groups**: only `run`, `app`, and `db` remain.
+  - `bedrock manage` is removed, including dynamic registration of module commands. Business
+    commands run as `bedrock run --app ROOT MODULE COMMAND`.
+  - `bedrock manage -A ROOT install --app TARGET` becomes `bedrock app install TARGET --root ROOT`.
+    `bedrock manage install` with `BEDROCK_APP` set becomes
+    `bedrock app install "$BEDROCK_APP" --with-dependencies`.
+  - `bedrock app install TARGET [--root ROOT] [--with-dependencies] [--skip-migrations]` installs
+    only TARGET by default. `--root` selects the load context only. `--with-dependencies` installs
+    TARGET's manifest dependency closure once each, in dependency order. `--skip-migrations`
+    still skips the schema step only.
+  - `bedrock db uninstall <app> [--cascade] [--load <app>]` is removed; use
+    `bedrock db downgrade <app> base [--cascade] [--load <app>]`. `MigrationsManager.uninstall()` remains in Python.
+  - `bedrock-cli add submodule` is renamed `bedrock-cli add module`. Generated modules and
+    `bedrock-cli init` projects no longer include an empty `models.py`; add one when the module owns tables.
 - **Cache backend protocol**: custom backends registered with `register_backend()` must implement
   `compare_and_expire(key, expected, ex) -> bool` and `acompare_and_expire(...)`: reset the key's TTL to
   `ex` seconds only when its value equals `expected`, atomically, and return whether it did.

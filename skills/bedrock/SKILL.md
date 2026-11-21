@@ -513,7 +513,8 @@ See `references/cli-guide.md` for the complete CLI command reference.
 Key commands:
 `<module>` is app import path (e.g. `my_erp.oms`)
 - `bedrock run --app <app> <module> <command>` — Run a command from `<module>`'s Typer app (commands are grouped by module import path)
-- `bedrock manage install` — Install modules with migrations + hooks
+- `bedrock app install <module> [--root <app>] [--with-dependencies] [--skip-migrations]` — Install the target module (migrations + hooks); dependencies only with `--with-dependencies`
+- `bedrock db downgrade <module> base` — Roll a module back to base (replaces the removed `db uninstall`)
 - `bedrock db revision <module> -m "msg"` — Create migration
 - `bedrock db upgrade <module>` — Apply migrations (PostgreSQL/MySQL take a migration lock; SQLite is single-process)
 - `bedrock db check <module>` — Exit non-zero unless every loaded module is at head

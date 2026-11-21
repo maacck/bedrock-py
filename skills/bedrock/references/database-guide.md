@@ -321,7 +321,7 @@ mgr.downgrade("myproject.modules.users", target="base")
 
 Targets are resolved within the app: `head`, `base`, `+N`/`-N`, or a full local revision name such as `0002_add_email`. Anything else (`heads`, another app's revision, a numeric prefix) raises `MigrationError`. Upgrade runs the app's pending migrations together with the migrations they depend on and nothing else; downgrade undoes the app's applied descendants. `upgrade`, `downgrade` and `uninstall` return the executed `(app, revision)` steps in order. When applied revisions cannot be read, `ensure_schema` and `uninstall` raise `MigrationError` instead of treating the module as never applied; `check` reports `unknown`.
 
-Rollback is dependency-aware: if applied migrations of other modules depend on the ones being undone, `downgrade`/`uninstall` raise `MigrationError` and change nothing. `cascade=True` (`--cascade`) rolls those dependents back first; dependents that are not loaded are always an error (add `--load <app>`), and baseline rows from `adopt` cannot be rolled back. `heads()` and `current()` return tuples of revision names.
+Rollback is dependency-aware: if applied migrations of other modules depend on the ones being undone, `downgrade`/`uninstall` raise `MigrationError` and change nothing. `cascade=True` (`--cascade`) rolls those dependents back first; dependents that are not loaded are always an error (add `--load <app>`), and baseline rows from `adopt` cannot be rolled back. `heads()` and `current()` return tuples of revision names. To remove a module from the CLI use `bedrock db downgrade <app> base`; `bedrock db uninstall` no longer exists (`MigrationsManager.uninstall()` remains in Python).
 
 ### CLI Commands
 
@@ -333,7 +333,6 @@ bedrock db heads <app>
 bedrock db current <app>
 bedrock db check <app>
 bedrock db history <app>
-bedrock db uninstall <app> [--cascade] [--load <other-app>]
 bedrock db adopt <app> [<app> ...]
 bedrock db init-ledger <root> [<root> ...] --adopted-ledger <source-name>
 ```

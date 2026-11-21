@@ -29,7 +29,7 @@ bedrock-cli [OPTIONS] COMMAND [ARGS]
 | 命令               | 用途                                                                                                                                        |
 | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- |
 | `bedrock-cli init` | 初始化一个新的 Bedrock [项目](/docs/guides/module-hierarchy#project)                                                                        |
-| `bedrock-cli add`  | 向项目中添加 [子模块](/docs/guides/module-hierarchy#submodule) 和 [领域模块](/docs/guides/module-hierarchy#domain-module)                  |
+| `bedrock-cli add`  | 向项目中添加 [模块](/docs/guides/module-hierarchy#module) 和 [领域模块](/docs/guides/module-hierarchy#domain-module)                  |
 | `bedrock-cli gen`  | 使用模板从 SQLAlchemy 模型生成代码（可扩展）                                                                                                |
 
 ---
@@ -67,9 +67,8 @@ bedrock-cli init <name> [OPTIONS]
 └── src/<package>/
     ├── __init__.py
     ├── manifest.yaml       # Root module manifest
-    ├── models.py           # SQLAlchemy model stubs
     ├── bootstrap.py        # Lifecycle hooks (on_load, ready, on_shutdown)
-    ├── installation.py     # Installation hooks (pre_install, install, post_install, uninstall)
+    ├── installation.py     # Installation hooks (pre_install, install, post_install)
     └── exc.py              # Module exception base class
 ```
 
@@ -84,7 +83,6 @@ $ bedrock-cli init my-saas-app
 ✓ my-saas-app/README.md
 ✓ my-saas-app/src/my_saas_app/__init__.py
 ✓ my-saas-app/src/my_saas_app/manifest.yaml
-✓ my-saas-app/src/my_saas_app/models.py
 ✓ my-saas-app/src/my_saas_app/bootstrap.py
 ✓ my-saas-app/src/my_saas_app/installation.py
 ✓ my-saas-app/src/my_saas_app/exc.py
@@ -101,20 +99,20 @@ $ bedrock-cli init my-saas-app
 ```bash
 cd my-saas-app
 uv sync
-# Start adding submodules:
-bedrock-cli add submodule users src/my_saas_app
+# Start adding modules:
+bedrock-cli add module users src/my_saas_app
 ```
 
 ---
 
 ## 向项目添加内容（`bedrock-cli add`）
 
-### `bedrock-cli add submodule`
+### `bedrock-cli add module`
 
-生成一个新的 Bedrock [子模块](/docs/guides/module-hierarchy#submodule)——这是一个带有 `manifest.yaml` 的业务级模块，会参与 Bedrock 的生命周期。
+生成一个新的 Bedrock [模块](/docs/guides/module-hierarchy#module)——这是一个带有 `manifest.yaml` 的业务级模块，会参与 Bedrock 的生命周期。不会创建 `models.py`；模块拥有数据表时再自行添加。
 
 ```bash
-bedrock-cli add submodule <name> <path> [OPTIONS]
+bedrock-cli add module <name> <path> [OPTIONS]
 ```
 
 **参数：**
@@ -122,7 +120,7 @@ bedrock-cli add submodule <name> <path> [OPTIONS]
 | 参数   | 说明                                                      |
 | ------ | --------------------------------------------------------- |
 | `name` | snake_case 形式的模块名（例如 `inventory`、`user_auth`） |
-| `path` | 将创建子模块的目标目录                                    |
+| `path` | 将创建该模块的目标目录                                    |
 
 **选项：**
 
@@ -138,7 +136,6 @@ bedrock-cli add submodule <name> <path> [OPTIONS]
 <path>/<name>/
 ├── __init__.py
 ├── manifest.yaml       # Module identity (title, version)
-├── models.py           # SQLAlchemy model stubs
 ├── entities.py         # Pydantic entity stubs
 ├── exc.py              # Module exception class
 ├── bootstrap.py        # (optional) Lifecycle hooks
@@ -148,15 +145,14 @@ bedrock-cli add submodule <name> <path> [OPTIONS]
 **示例：**
 
 ```bash
-$ bedrock-cli add submodule inventory src/myapp
+$ bedrock-cli add module inventory src/myapp
 
 ? Include bootstrap.py (lifecycle hooks)? Yes
 ? Include installation.py (installation hooks)? No
 
-ℹ Generating submodule inventory in src/myapp/inventory
+ℹ Generating module inventory in src/myapp/inventory
 ✓ src/myapp/inventory/__init__.py
 ✓ src/myapp/inventory/manifest.yaml
-✓ src/myapp/inventory/models.py
 ✓ src/myapp/inventory/entities.py
 ✓ src/myapp/inventory/exc.py
 ✓ src/myapp/inventory/bootstrap.py
@@ -166,14 +162,14 @@ $ bedrock-cli add submodule inventory src/myapp
 
 ```bash
 # Skip prompts with explicit flags
-bedrock-cli add submodule payments src/myapp --bootstrap --no-installation
+bedrock-cli add module payments src/myapp --bootstrap --no-installation
 ```
 
 ---
 
 ### `bedrock-cli add domain`
 
-生成一个空白的 [领域模块](/docs/guides/module-hierarchy#domain-module) 骨架——它是子模块内部的代码组织单元。领域模块不包含 `manifest.yaml`。
+生成一个空白的 [领域模块](/docs/guides/module-hierarchy#domain-module) 骨架——它是模块内部的代码组织单元。领域模块不包含 `manifest.yaml`。
 
 ```bash
 bedrock-cli add domain <name> <path> [OPTIONS]
@@ -312,10 +308,10 @@ $ bedrock-cli gen router myapp.auth.models:User src/myapp/auth/user
 
 ```bash
 # This will fail if src/myapp/inventory/ already has files
-bedrock-cli add submodule inventory src/myapp
+bedrock-cli add module inventory src/myapp
 
 # Force overwrite
-bedrock-cli add submodule inventory src/myapp --overwrite
+bedrock-cli add module inventory src/myapp --overwrite
 ```
 
 ---
@@ -330,8 +326,8 @@ bedrock-cli init my-project
 cd my-project
 uv sync
 
-# 2. Add your first submodule
-bedrock-cli add submodule users src/my_project --bootstrap
+# 2. Add your first module
+bedrock-cli add module users src/my_project --bootstrap
 
 # 3. Add a domain module (blank scaffold)
 bedrock-cli add domain profile src/my_project/users
@@ -341,11 +337,11 @@ bedrock-cli gen entity my_project.users.models:User src/my_project/users/user
 bedrock-cli gen service my_project.users.models:User src/my_project/users/user
 ```
 
-### 向现有项目添加子模块
+### 向现有项目添加模块
 
 ```bash
-# Add submodule skeleton
-bedrock-cli add submodule billing src/my_project --bootstrap --installation
+# Add module skeleton
+bedrock-cli add module billing src/my_project --bootstrap --installation
 
 # Add domain modules within it
 bedrock-cli add domain invoice src/my_project/billing

@@ -3,7 +3,7 @@ title: CLI Reference
 description: Complete guide to Bedrock's command-line interface
 ---
 
-Bedrock provides a Typer-based CLI for managing modules, database migrations, and application lifecycle. The CLI is installed automatically with the `bedrock` package.
+Bedrock provides a Typer-based CLI for managing modules, database migrations, and running module commands. The CLI is installed automatically with the `bedrock` package.
 
 ## Overview
 
@@ -22,10 +22,11 @@ bedrock [OPTIONS] COMMAND [ARGS]
 
 | Group | Purpose |
 |-------|---------|
-| `bedrock run` | Run module-specific commands |
-| `bedrock app` | Inspect and manage modules |
-| `bedrock manage` | Application lifecycle management |
-| `bedrock db` | Database migration operations |
+| `bedrock run` | Run a module's own commands |
+| `bedrock app` | Read: `inspect`, `info`, `playbook`. Write: `install` |
+| `bedrock db` | Status (read-only): `heads`, `current`, `check`, `history`. Write: `revision`, `upgrade`, `downgrade`, `adopt`, `init-ledger` |
+
+Only `run`, `app`, and `db` exist. The former `bedrock manage` group and `bedrock db uninstall` were removed.
 
 ## Module Commands (`bedrock app`)
 
@@ -97,7 +98,30 @@ Commands     commands:app
 Install a Bedrock module: ensure its database schema is current, then run its optional installation lifecycle hooks.
 
 ```bash
-bedrock app install <import_path>
+bedrock app install <TARGET> [--root ROOT] [--with-dependencies] [--skip-migrations]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--root ROOT` | Root module to load. Selects the load context only; it never widens what is installed. Without it, TARGET is loaded as the root |
+| `--with-dependencies` | Also install TARGET's `depends_on` closure, once each, in dependency order, then TARGET |
+| `--skip-migrations` | Skip the schema step only; installation hooks still run |
+
+By default only TARGET is installed. Installing a module that depends on others does not run those dependencies' hooks unless you pass `--with-dependencies`; the root and sibling modules are never installed implicitly.
+
+**Scope.** `--with-dependencies` controls which modules' *schema step and hooks* run. It is separate from the migration closure: whenever the schema step runs for a module, Bedrock applies that module's migrations together with the migrations of other modules they depend on (the same scope as `bedrock db upgrade`), so a dependency's tables can be created even without `--with-dependencies`, but its `installation.py` hooks run only with it.
+
+**Hooks are not tracked.** Bedrock does not record that a module was installed. Every run repeats `pre_install` → `install` → `post_install` for each installed module, so hooks must be idempotent.
+
+```bash
+# Only myapp.users
+bedrock app install myapp.users
+
+# myapp.users and its dependencies, loaded through the root myapp
+bedrock app install myapp.users --root myapp --with-dependencies
+
+# Run hooks only
+bedrock app install myapp.users --skip-migrations
 ```
 
 <Callout type="info">
@@ -236,7 +260,7 @@ bedrock db downgrade <app_import_path> <target>
 | `-1` | Downgrade one step |
 | `<revision_name>` | Undo the app's applied descendants of this full revision name (the revision itself stays) |
 
-Only the specified app's revisions move; a target that is not a revision name of this app fails with an error. If applied migrations of other modules depend on what would be undone, the command fails and changes nothing. Pass `--cascade` to undo those dependents first; dependents whose modules are not loaded are always an error, so add `--load <app>` for each one. Baseline rows imported by `adopt` cannot be undone.
+Only the specified app's revisions move; a target that is not a revision name of this app fails with an error. If applied migrations of other modules depend on what would be undone, the command fails and changes nothing. Pass `--cascade` to undo those dependents first; dependents whose modules are not loaded are always an error, so add `--load <app>` for each one. Baseline rows imported by `adopt` cannot be undone. `downgrade <app> base` is the CLI way to remove a module's schema; there is no `bedrock db uninstall` command. Review the module's existing `downgrade()` scripts first (see [existing migration safety](/docs/guides/database#existing-migration-safety)); ownership filtering protects new autogeneration, not old scripts or arbitrary SQL.
 
 **Options:**
 
@@ -345,42 +369,6 @@ Revision                Down Revision    Depends On                Message
 
 ---
 
-### `bedrock db uninstall`
-
-Roll back the target app's applied revisions and prepare it for removal.
-
-```bash
-bedrock db uninstall <app_import_path>
-```
-
-**What it does:**
-1. Downgrades all of the target app's applied revisions to its base, in reverse dependency order
-2. Removes the matching rows from `bedrock_migrations` as each revision is undone
-3. Allows removal of the module after its migration effects have been verified
-
-**Review existing scripts first.** Uninstall runs every applied `downgrade()` of the module, including scripts written before this version. Ownership filtering protects new autogeneration, not old contaminated scripts or arbitrary SQL. Back up and follow the [existing migration safety procedure](/docs/guides/database#existing-migration-safety) before uninstalling an affected app.
-
-**Example:**
-
-```bash
-$ bedrock db uninstall myapp.users
-
-myapp.users:0002_add_email
-myapp.users:0001_initial
-✓ myapp.users has no applied migrations. You can now remove it from INSTALLED_APPS.
-```
-
-Without `--cascade`, uninstall fails and changes nothing when applied migrations of other modules depend on this app's. Add `--cascade` to roll those dependents back first, and `--load <app>` for each dependent that is not already loaded (dependents are never loaded automatically). Dependents that are not loaded, and baseline rows imported by `adopt`, always block the command before the first DDL statement.
-
-**Options:**
-
-| Option | Description |
-|--------|-------------|
-| `--cascade` | Also roll back applied migrations of loaded modules that depend on this app's |
-| `--load <app>` | Also load this module so its applied migrations are known; repeatable |
-
----
-
 ### `bedrock db adopt`
 
 Import a database created by an earlier Bedrock version (migrations recorded in Alembic's `alembic_version`) into `bedrock_migrations`.
@@ -396,7 +384,7 @@ Load every module that has migrations; each old head must belong to exactly one 
 2. Writes one `baseline` row for every revision up to those heads, then publishes the table atomically. If `bedrock_migrations` already exists it reports the database as initialised and does not import again.
 3. Leaves `alembic_version` untouched as an audit snapshot. No migration script is executed.
 
-Baseline rows assume the schema is already in place and are protected: a downgrade, uninstall, or cascade that would undo one fails before any DDL runs. Back up first and follow [Adopting an Existing Database](/docs/guides/database#adopting-an-existing-database).
+Baseline rows assume the schema is already in place and are protected: a downgrade or cascade that would undo one fails before any DDL runs. Back up first and follow [Adopting an Existing Database](/docs/guides/database#adopting-an-existing-database).
 
 **Example:**
 
@@ -432,73 +420,21 @@ $ bedrock db init-ledger myapp.billing --adopted-ledger bedrock_migrations
 
 ---
 
-## Application Management (`bedrock manage`)
-
-Commands for managing the application lifecycle.
-
-### `bedrock manage install`
-
-Install the current Bedrock application.
-
-```bash
-bedrock manage [-A ROOT_MODULE] install [OPTIONS]
-```
-
-**Options:**
-
-| Option | Short | Description |
-|--------|-------|-------------|
-| `--app` | | Install a specific loaded module (default: all loaded) |
-| `--skip-migrations` | | Skip database migrations |
-
-The parent `manage` command's `-A ROOT_MODULE` option selects the root module to load; alternatively set `BEDROCK_APP`.
-
-**What it does for each module:**
-
-1. **Database schema** — Runs the module's migration scripts up to head (fails if it has models but no scripts)
-2. **Pre-install hook** — Runs `installation.py:pre_install()` if defined
-3. **Install hook** — Runs `installation.py:install()` if defined
-4. **Post-install hook** — Runs `installation.py:post_install()` if defined
-
-**Examples:**
-
-```bash
-# Install all modules
-bedrock manage install
-
-# Install specific module
-bedrock manage install --app myapp.users
-
-# Skip migrations
-bedrock manage install --skip-migrations
-```
-
-**Example output:**
-
-```bash
-✓ Installing application...
-Installing app: myapp.users 0.1.0
-✓ Schema created (migrations applied).
-Running pre-install hook for myapp.users...
-Running post-install hook for myapp.users...
-✓ Application installed successfully.
-```
-
----
-
 ## Running Module Commands (`bedrock run`)
 
-Execute module-specific CLI commands.
+Execute a module's own CLI commands.
 
 ```bash
 bedrock run --app <root_module> <module> <command> [ARGS]
 ```
 
+`--app` loads the root module and its dependency closure. `<module>` is the loaded module whose commands you want, and `<command>` is one of its Typer commands. Business commands are only reachable through `run`; there is no `bedrock manage` group.
+
 **Options:**
 
 | Option | Short | Description |
 |--------|-------|-------------|
-| `--app` | `-a` | Module to load (or set `BEDROCK_APP` env var) |
+| `--app` | `-a` | Root module to load (or set `BEDROCK_APP`) |
 
 ### How Module Commands Work
 
@@ -533,13 +469,13 @@ commands: commands:app
 
 ```bash
 # Run module command
-bedrock run --app myapp.users myapp.users create-user --name Alice --email alice@example.com
+bedrock run --app myapp myapp.users create-user --name Alice --email alice@example.com
 
 # List available commands
-bedrock run --app myapp.users myapp.users --help
+bedrock run --app myapp myapp.users --help
 
 # Use BEDROCK_APP environment variable
-export BEDROCK_APP=myapp.users
+export BEDROCK_APP=myapp
 bedrock run myapp.users create-user --name Bob --email bob@example.com
 ```
 
@@ -549,7 +485,7 @@ bedrock run myapp.users create-user --name Bob --email bob@example.com
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `BEDROCK_APP` | Default root app for `run` and `manage` commands | None |
+| `BEDROCK_APP` | Default root app for `run` commands | None |
 | `DATABASE_SCHEMA` | Database name or SQLite file path | `bedrock.db` |
 
 ---
@@ -559,8 +495,8 @@ bedrock run myapp.users create-user --name Bob --email bob@example.com
 ### Initial Project Setup
 
 ```bash
-# 1. Install the application
-bedrock manage install
+# 1. Install the root module and everything it depends on
+bedrock app install myapp --with-dependencies
 
 # 2. Verify modules
 bedrock app info myapp.users
@@ -589,10 +525,10 @@ bedrock db current myapp.users
 ### Removing a Module
 
 ```bash
-# 1. Rollback migrations
-bedrock db uninstall myapp.users
+# 1. Roll back its migrations (add --load <dependent> --cascade if other modules depend on it)
+bedrock db downgrade myapp.users base
 
-# 2. Remove from INSTALLED_APPS
+# 2. Remove it from your root module's depends_on / INSTALLED_APPS
 # 3. Delete module code
 ```
 

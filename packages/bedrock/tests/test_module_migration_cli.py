@@ -138,9 +138,8 @@ class TestUpgradeOutput:
         listing = project.cli("--help")
         assert listing.returncode == 0
         assert "adopt" in listing.stdout
-        assert "Database migration commands for Bedrock modules." in listing.stdout
         assert "--cascade" in project.cli("downgrade", "--help").stdout
-        assert "--load" in project.cli("uninstall", "--help").stdout
+        assert "uninstall" not in listing.stdout
 
 
 class TestRollbackDependents:
@@ -192,12 +191,12 @@ class TestRollbackDependents:
         assert project.tables() == before_tables
         assert project.versions() == before_versions
 
-    def test_uninstall_follows_the_same_rules(self, project: _Project) -> None:
-        refused = project.cli("uninstall", "mc_auth", "--load", "mc_orders")
+    def test_downgrade_to_base_checks_dependents(self, project: _Project) -> None:
+        refused = project.cli("downgrade", "mc_auth", "base", "--load", "mc_orders")
         assert refused.returncode == 1
         self._unchanged(project)
 
-        done = project.cli("uninstall", "mc_auth", "--load", "mc_orders", "--cascade")
+        done = project.cli("downgrade", "mc_auth", "base", "--load", "mc_orders", "--cascade")
         assert done.returncode == 0, done.stdout + done.stderr
         assert _steps(done)[:3] == ["mc_orders:o1", "mc_auth:a2", "mc_auth:a1"]
         assert project.versions() == set()
@@ -294,12 +293,11 @@ class TestInitializedDbSettings:
         yield project
         db.close()
 
-    @pytest.mark.parametrize("command", ["db", "manage", "apps"])
+    @pytest.mark.parametrize("command", ["db", "app"])
     def test_applied_migrations_are_not_repeated(
         self, initialized: _Project, monkeypatch: pytest.MonkeyPatch, command: str
     ) -> None:
         from bedrock.cli import apps as cli_apps
-        from bedrock.cli import manage as cli_manage
 
         def run() -> None:
             registry = ModuleRegistry()
@@ -308,11 +306,9 @@ class TestInitializedDbSettings:
             if command == "db":
                 result = CliRunner().invoke(db_app, ["upgrade", "mc_auth"])
                 assert result.exit_code == 0, result.output
-            elif command == "manage":
-                registry.populate(["mc_auth"])
-                cli_manage.install(app=None, skip_migrations=False)
             else:
-                cli_apps.install("mc_auth", skip_migrations=False)
+                result = CliRunner().invoke(cli_apps.apps, ["install", "mc_auth"])
+                assert result.exit_code == 0, result.output
 
         run()
         initialized.sql("INSERT INTO a1 VALUES (42)")

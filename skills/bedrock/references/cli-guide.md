@@ -36,46 +36,39 @@ bedrock run --app myapp.users myapp.users list-users
 
 ---
 
-## bedrock manage install
+## bedrock app install
 
-Load an application and install all loaded modules, or select one loaded module.
+Install one module. By default only TARGET is installed; its dependencies are loaded but not installed.
 
 ### Usage
 
 ```bash
-bedrock manage [-A <module>] install [--app <module>] [--skip-migrations]
+bedrock app install TARGET [--root ROOT] [--with-dependencies] [--skip-migrations]
 ```
 
 ### Options
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `-A <module>` | `BEDROCK_APP` env var | Root module to load; belongs before `install` |
-| `--app <module>` | all loaded modules | Install only this loaded module |
-| `--skip-migrations` | false | Skip schema management |
+| `--root ROOT` | TARGET | Root module to load (load context only; does not widen what is installed) |
+| `--with-dependencies` | false | Also install TARGET's manifest dependency closure, each module once, in dependency order |
+| `--skip-migrations` | false | Skip schema management only; hooks still run |
 
 ### What Happens
 
-For each selected module:
+For each installed module:
 1. If it has models and migrations are not skipped, run its migration scripts up to head (a module with models but no scripts fails; generate `0001_initial` first).
 2. If `installation.py` defines `install()`, run optional `pre_install()`, then `install()`, then optional `post_install()`. Without `install()`, all three hooks are skipped.
 
 ### Examples
 
 ```bash
-bedrock manage install
-bedrock manage -A myapp.users install
-bedrock manage -A myapp.users install --app myapp.users --skip-migrations
+bedrock app install myapp.users
+bedrock app install myapp.users --root myapp --skip-migrations
+bedrock app install myapp --with-dependencies
 ```
 
----
-## bedrock app install
-
-Load the specified module and its dependencies, but install only the specified module. Schema and hook behavior matches `manage install` above.
-
-```bash
-bedrock app install myapp.users [--skip-migrations]
-```
+`bedrock manage` is removed. Former `bedrock manage -A ROOT install --app TARGET` is `bedrock app install TARGET --root ROOT`; former `bedrock manage install` with `BEDROCK_APP` set is `bedrock app install "$BEDROCK_APP" --with-dependencies`.
 
 ---
 
@@ -236,17 +229,17 @@ bedrock db history myapp.users
 
 ---
 
-## bedrock db uninstall
+## Removing a module (`bedrock db downgrade`)
 
-Roll back the app's applied migrations to base before removing the module.
+`bedrock db uninstall` is removed. Roll the app's applied migrations back to base before removing the module:
 
 ```bash
-bedrock db uninstall myapp.users [--cascade] [--load myapp.orders]
+bedrock db downgrade myapp.users base [--cascade] [--load myapp.orders]
 ```
 
-Without `--cascade`, uninstall fails and changes nothing when applied migrations of other modules depend on the app's. `--cascade` rolls those dependents back first; add `--load <app>` for each dependent that is not already loaded. Unloaded dependents and baseline rows imported by `adopt` always block the command before the first DDL statement.
+Without `--cascade`, the rollback fails and changes nothing when applied migrations of other modules depend on the app's. `--cascade` rolls those dependents back first; add `--load <app>` for each dependent that is not already loaded. Unloaded dependents and baseline rows imported by `adopt` always block the command before the first DDL statement.
 
-Review both directions of existing scripts before uninstalling: uninstall runs every applied `downgrade()`, and table operations are not sandboxed. New generation filters do not repair old destructive downgrades. Back up, check the applied revisions and actual schema state, and follow [Existing Migration Safety](database-guide.md#existing-migration-safety); adding a new revision alone cannot neutralize an older dangerous downgrade.
+Review both directions of existing scripts before rolling back: it runs every applied `downgrade()`, and table operations are not sandboxed. New generation filters do not repair old destructive downgrades. Back up, check the applied revisions and actual schema state, and follow [Existing Migration Safety](database-guide.md#existing-migration-safety); adding a new revision alone cannot neutralize an older dangerous downgrade.
 
 ---
 

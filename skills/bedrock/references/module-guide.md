@@ -479,7 +479,7 @@ if my_settings.DEBUG:
 ## Installation Hooks
 
 **File**: `installation.py` (optional)
-**Used by**: `bedrock manage install`
+**Used by**: `bedrock app install`
 
 ### Available Hooks
 
@@ -515,7 +515,7 @@ def post_install() -> None:
 ### Invocation
 
 ```bash
-bedrock manage -A myproject.modules.users install
+bedrock app install myproject.modules.users --root myproject
 ```
 
 ---

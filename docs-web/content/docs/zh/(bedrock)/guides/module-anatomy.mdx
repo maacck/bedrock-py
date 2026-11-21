@@ -27,7 +27,7 @@ bedrock_app/
 |------|----------|-------------|
 | `__init__.py` | 是 | 标准 Python 模块文件 |
 | `manifest.yaml` | 是 | 模块声明与元数据 |
-| `models.py` | 否 | 数据模型与持久化 |
+| `models.py` | 否 | 数据模型与持久化；模块没有数据表时不要创建 |
 | `entities.py` | 否 | 业务实体 |
 | `schemas.py` | 否 | API 输入/输出 schema（请求/响应 DTO） |
 | `service.py` | 否 | 业务逻辑层 |

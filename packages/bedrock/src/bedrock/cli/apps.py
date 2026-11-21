@@ -8,20 +8,28 @@ from dataclasses import dataclass, field
 from importlib import import_module
 from importlib.util import find_spec
 from pathlib import Path
+from typing import TYPE_CHECKING, Annotated
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
 from bedrock.utils import inspect_func
 
+from ..module.entities import AppConfig
 from ..module.exc import InvalidManifestError, InvalidModuleCallableError, ModuleError
 from ..module.manifest import build_app_config, load_manifest
 from ..utils.lazyload import load_optional_callable
 
+if TYPE_CHECKING:
+    from bedrock.database import MigrationsManager
+
+    from ..module.registry import ModuleRegistry
+
 apps = typer.Typer(
     rich_markup_mode="rich",
-    help="Manage Bedrock applications and modules.",
+    help="Inspect modules, read their playbooks, or run installation hooks.",
 )
 
 
@@ -286,6 +294,14 @@ def info(
     console.print(table)
 
 
+def _package_dir(import_path: str) -> Path:
+    """Return a module's package directory after validating its manifest, without importing its code."""
+    load_manifest(import_path)
+    spec = find_spec(import_path)
+    assert spec is not None and spec.origin is not None  # load_manifest raised otherwise
+    return Path(spec.origin).parent
+
+
 def _resolve_playbook_path(package_dir: Path, relative_path: str | None) -> Path:
     """Resolve a module playbook file path from a package directory.
 
@@ -340,8 +356,7 @@ def playbook(
     playbook_relative_path = path if isinstance(path, str) else None
 
     try:
-        app_config = build_app_config(module)
-        playbook_path = _resolve_playbook_path(app_config.package_dir, playbook_relative_path)
+        playbook_path = _resolve_playbook_path(_package_dir(module), playbook_relative_path)
         playbook_content = playbook_path.read_text(encoding="utf-8")
     except (InvalidManifestError, ModuleError, OSError, ValueError) as exc:
         console.print(f"[bold red]Error:[/bold red] {exc}")
@@ -350,48 +365,26 @@ def playbook(
     console.print(playbook_content, markup=False, highlight=False, end="")
 
 
-@apps.command()
-def install(
-    import_path: str = typer.Argument(..., help="Python import path of the module, e.g., ''bedrock.contrib.cache''."),
-    skip_migrations: bool = typer.Option(
-        False, "--skip-migrations", help="Skip running database migrations during installation."
-    ),
-) -> None:
-    """Install a Bedrock module.
+def _dependency_closure(registry: ModuleRegistry, target: str) -> list[str]:
+    """Return *target* and its transitive dependencies in dependency order, each module once."""
+    order: list[str] = []
+    seen: set[str] = set()
 
-    For the module this command:
+    def visit(name: str) -> None:
+        if name in seen:
+            return
+        seen.add(name)
+        for dependency in registry.get(name).manifest.depends_on:
+            visit(dependency)
+        order.append(name)
 
-    1. Ensures the database schema is up to date (create tables on first install,
-       upgrade if behind head).
-    2. Runs the optional ``installation.py`` lifecycle hooks
-       (``pre_install`` → ``install`` → ``post_install``).
+    visit(target)
+    return order
 
-    Args:
-        import_path: Python import path of the module.
-        skip_migrations: Skip database migrations if True.
 
-    Raises:
-        typer.Exit: If the module cannot be loaded or installation fails.
-    """
-    from bedrock.module import apps
-
-    console = Console()
-    apps.populate([import_path])
-
-    try:
-        app_config = apps.get(import_path)
-    except KeyError as exc:
-        console.print(f"[bold red]✗[/bold red] Module '{import_path}' not found.")
-        raise typer.Exit(1) from exc
-
+def _install_module(console: Console, app_config: AppConfig, manager: MigrationsManager | None) -> None:
+    """Run the schema step (unless *manager* is ``None``) and the installation hooks of one module."""
     console.print(f"[bold blue]Installing module:[/bold blue] {app_config.name} {app_config.manifest.version}")
-
-    if skip_migrations:
-        manager = None
-    else:
-        from .db import build_migrations_manager
-
-        manager = build_migrations_manager(apps)
 
     if manager is not None and app_config.models_module is not None:
         from bedrock.database import MigrationError
@@ -407,7 +400,7 @@ def install(
         except MigrationError as exc:
             console.print(f"[bold red]✗ Migration failed for {app_config.name}:[/bold red] {exc}")
             raise typer.Exit(1) from exc
-    elif manager is not None and app_config.models_module is None:
+    elif app_config.models_module is None:
         console.print(f"[dim]No models module for {app_config.name} — skipping schema step.[/dim]")
 
     if not os.path.exists(app_config.package_dir / "installation.py"):
@@ -438,6 +431,75 @@ def install(
         post_install()
 
     console.print("[bold green]✓[/bold green] Module installed successfully.")
+
+
+@apps.command()
+def install(
+    target: Annotated[str, typer.Argument(help="Import path of the module to install, e.g. 'myerp.wms'.")],
+    root: Annotated[
+        str | None,
+        typer.Option(
+            "--root",
+            help="Import path of the app to load for context; TARGET must be this app or one of its dependencies. "
+            "Defaults to TARGET. Selects what is loaded only, never what is installed.",
+        ),
+    ] = None,
+    with_dependencies: Annotated[
+        bool,
+        typer.Option(
+            "--with-dependencies",
+            help="Also install TARGET's dependencies, each once, in dependency order.",
+        ),
+    ] = False,
+    skip_migrations: Annotated[
+        bool,
+        typer.Option("--skip-migrations", help="Skip running database migrations during installation."),
+    ] = False,
+) -> None:
+    """Install the Bedrock module TARGET.
+
+    Only TARGET is installed unless ``--with-dependencies`` is given. For each installed
+    module this command:
+
+    1. Applies pending migration scripts, including required migration dependencies.
+       ``--skip-migrations`` skips only this step.
+    2. Runs the optional ``installation.py`` lifecycle hooks
+       (``pre_install`` → ``install`` → ``post_install``), even when the schema is already current.
+
+    Examples::
+
+        bedrock app install myerp.wms
+        bedrock app install myerp.wms --with-dependencies
+        bedrock app install myerp.wms --root myerp.app
+
+    Raises:
+        typer.Exit: If the module cannot be loaded, is not part of ROOT, or installation fails.
+    """
+    from bedrock.module import apps
+
+    console = Console()
+    root = root or target
+    try:
+        apps.populate([root])
+        if root != target and target not in _dependency_closure(apps, root):
+            raise KeyError(target)
+        names = _dependency_closure(apps, target) if with_dependencies else [target]
+        modules = [apps.get(name) for name in names]
+    except ModuleError as exc:
+        console.print(f"[bold red]✗[/bold red] {escape(str(exc))}")
+        raise typer.Exit(1) from exc
+    except KeyError as exc:
+        console.print(f"[bold red]✗[/bold red] Module '{escape(target)}' is not in '{escape(root)}' or its dependencies.")
+        raise typer.Exit(1) from exc
+
+    manager = None
+    if not skip_migrations and any(module.models_module is not None for module in modules):
+        from .db import build_migrations_manager
+
+        manager = build_migrations_manager(apps)
+
+    for module in modules:
+        _install_module(console, module, manager)
 
 
 __all__ = ["apps"]

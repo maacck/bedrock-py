@@ -605,13 +605,17 @@ history = migrations.get_history("myapp.users")
 
 ### 回滚
 
-`downgrade` 和 `uninstall` 按依赖的逆序撤销一个 module 的迁移。如果其他 module 已执行的迁移依赖它们，命令会抛出 `MigrationError`，列出这些迁移，并且不做任何改动。传入 `cascade=True`（CLI 为 `--cascade`）会先回滚依赖方。依赖方未加载时，即使指定 `cascade` 也一律报错：先加载这些 module（CLI 使用 `--load <app>`）并回滚它们。回滚不会影响无关 module，即使它们的 revision 名称相同。
+`downgrade` 按依赖的逆序撤销一个 module 的迁移。如果其他 module 已执行的迁移依赖它们，命令会抛出 `MigrationError`，列出这些迁移，并且不做任何改动。传入 `cascade=True`（CLI 为 `--cascade`）会先回滚依赖方。依赖方未加载时，即使指定 `cascade` 也一律报错：先加载这些 module（CLI 使用 `--load <app>`）并回滚它们。回滚不会影响无关 module，即使它们的 revision 名称相同。
+
+通过 CLI 移除 module 的 schema 使用 `bedrock db downgrade <app> base`；不存在 `bedrock db uninstall` 命令。Python 的 `MigrationsManager.uninstall()` 保留，等价于把该 module 回退到 base。
 
 ### 首次安装
 
 `ensure_schema()` 会把该 module 的迁移脚本连同其依赖的迁移执行到 head，并返回 `"created"`（该 module 的首次执行）、`"upgraded"` 或 `"up-to-date"`。它不再用 `create_all` 根据 metadata 建表并 stamp，因此有 models 但没有迁移脚本的 module 会抛出 `MigrationError`：先用 `bedrock db revision <app> -m "initial schema"` 生成初始迁移。
 
 表归属在生成 revision 时生效。安装成功现在意味着记录的脚本确实执行过，因此回滚会执行其 `upgrade()` 已运行过的脚本的 `downgrade()`。
+
+`bedrock app install <target>` 只对目标调用 `ensure_schema()`。无论是否传入 `--with-dependencies`，都会应用迁移闭包（目标的迁移，以及它们依赖的其他 module 的迁移）；`--with-dependencies` 额外对每个依赖执行其自身的 schema 步骤和安装钩子，`--skip-migrations` 只跳过 schema 步骤。
 
 ### 接管已有数据库
 
@@ -620,7 +624,7 @@ history = migrations.get_history("myapp.users")
 1. 暂停迁移命令，备份数据库、已部署的程序包和原始迁移脚本。记录每个环境的 `alembic_version` 以及真实的表结构和数据。
 2. 加载 `alembic_version` 中出现的每个 module，执行 `bedrock db adopt <app> ...`。每个旧 head 必须唯一归属于一个已加载的 module。Bedrock 通过该部署自身的 revision 图解析它；今天 manifest 中的依赖边不能证明历史上执行过什么。head 缺失、有歧义或历史无法解析时不会写入任何内容；修正脚本或已加载的 module 后重试。
 3. `adopt` 把每个直到这些 head 的 revision 以 `origin = 'baseline'` 行写入暂存表，核对后原子改名为 `bedrock_migrations`。旧的 `alembic_version` 表保留为审计快照。发布前中断只会留下暂存状态，可以重试；已发布的表不会被删除或重新导入。
-4. 基线行受保护。它们表示“假定已经存在”，而不是“由 Bedrock 执行过”：这些脚本不会被重放，需要撤销基线行的 downgrade、uninstall 或 cascade 会在第一条 DDL 之前失败。回滚到基线本身是允许的。疑似漏跑的数据迁移需要人工对账，接管不会重放它们。
+4. 基线行受保护。它们表示“假定已经存在”，而不是“由 Bedrock 执行过”：这些脚本不会被重放，需要撤销基线行的 downgrade 或 cascade 会在第一条 DDL 之前失败。回滚到基线本身是允许的。疑似漏跑的数据迁移需要人工对账，接管不会重放它们。
 5. 新版本写过数据库之后，不要把旧程序切回同一份数据。需要恢复时，把匹配的数据库、程序和迁移文件一起恢复；不要让旧代码重新读取 `alembic_version`。
 
 #### 接管前：只转换引用格式，不改写已发布历史
@@ -684,13 +688,13 @@ bedrock db init-ledger myapp.billing --adopted-ledger bedrock_migrations
 
 ### 已有迁移的安全处置
 
-Bedrock 不会重写已经生成的脚本。对受影响 module 执行升级、回滚或卸载前：
+Bedrock 不会重写已经生成的脚本。对受影响 module 执行升级或回滚前：
 
 1. 暂停这些操作，备份数据库与迁移文件，并记录每个部署环境的 `alembic_version`（或 `bedrock_migrations`）和真实表结构／数据状态。
 2. 审查核心与插件 module 中 `upgrade()`、`downgrade()` 两侧的表、列、索引、约束和原始 SQL。脚本声明了正确的 module 不是表操作安全的证据，自动生成过滤也不是迁移脚本执行沙箱。
-3. 只有确认所有环境都未应用，才能重新生成或修正未发布 revision。已发布／已应用的 revision 需要跨部署协调并审查修复，不要随意删除 revision 或修改名称。只追加一个新 revision 无法消除卸载时仍会执行的旧危险 downgrade。
+3. 只有确认所有环境都未应用，才能重新生成或修正未发布 revision。已发布／已应用的 revision 需要跨部署协调并审查修复，不要随意删除 revision 或修改名称。只追加一个新 revision 无法消除回滚时仍会执行的旧危险 downgrade。
 4. 升级中途失败后，即使没有记录 revision，也要检查残留 DDL。已经丢失的数据应通过经过验证的备份或数据库恢复机制恢复；重新建表不会恢复数据行。
-5. 在生产数据的隔离副本上验证实际安装／升级／卸载路径，再恢复操作。
+5. 在生产数据的隔离副本上验证实际安装／升级／回滚路径，再恢复操作。
 
 ### 迁移锁
 

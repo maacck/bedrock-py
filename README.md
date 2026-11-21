@@ -218,12 +218,12 @@ bedrock db history myapp.products
 # Module management
 bedrock app inspect <module>   # Validate manifest and bootstrap
 bedrock app info <module>      # Display module details
-bedrock app install <module>   # Run migrations and hooks
+bedrock app install <module> [--root <app>] [--with-dependencies] [--skip-migrations]  # Install target; migrations + hooks
 
 # Database migrations
 bedrock db revision <app> --message "description"
 bedrock db upgrade <app> [revision]
-bedrock db downgrade <app> <revision> [--cascade]
+bedrock db downgrade <app> <revision|base> [--cascade] [--load <app>]  # `base` removes a module's schema
 bedrock db heads <app>        # Show head revisions
 bedrock db current <app>      # Show applied revisions
 bedrock db history <app>      # Show migration history
@@ -231,7 +231,7 @@ bedrock db adopt <app> ...    # Import an Alembic-managed database once
 bedrock db init-ledger <root> ... --adopted-ledger <source>  # New independent registry after core adopt
 
 # Run module commands
-bedrock run <module> <command>  # Execute module-specific CLI
+bedrock run --app <root> <module> <command>  # Execute module-specific CLI
 ```
 
 ## Dependencies
