@@ -274,7 +274,7 @@ class UserModel(BedrockModel):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 ```
 
-**Migration ownership:** Ordinary ORM models need no new annotation: their defining package selects the longest matching loaded Bedrock module, including imported domain packages. Importing another module's model does not transfer ownership. Unmapped association `Table` objects must declare `info={"bedrock_module": "myapp.tags"}`. Autogeneration and first installation reject missing, conflicting, or unloaded owners with `MigrationError`; they never fall back to all tables. See [Migration table ownership](references/database-guide.md#table-ownership) for schema, inheritance, and raw-table examples. These rules do not repair old migration scripts or sandbox `downgrade()`; review old scripts before uninstalling.
+**Migration ownership:** Ordinary ORM models need no new annotation: their defining package selects the longest matching loaded Bedrock module, including imported domain packages. Importing another module's model does not transfer ownership. Unmapped association `Table` objects must declare `info={"bedrock_module": "myapp.tags"}`. Autogeneration rejects missing, conflicting, or unloaded owners with `MigrationError`; it never falls back to all tables. See [Migration table ownership](references/database-guide.md#table-ownership) for schema, inheritance, and raw-table examples. Migrations are recorded in `bedrock_migrations` keyed by `(app, revision)`; first install runs the scripts (a module with models and no scripts fails), cross-module `depends_on` entries are `app:revision` and written by `bedrock db revision`, and rollback of a depended-on module needs `--cascade`. These rules do not repair old migration scripts or sandbox `downgrade()`; review old scripts before uninstalling, and adopt Alembic-managed databases first (see [Adopting an Existing Database](references/database-guide.md#adopting-an-existing-database)).
 
 `BedrockModel` provides these methods on all instances:
 - `.dict()` — Serialize to dict
@@ -516,6 +516,8 @@ Key commands:
 - `bedrock manage install` — Install modules with migrations + hooks
 - `bedrock db revision <module> -m "msg"` — Create migration
 - `bedrock db upgrade <module>` — Apply migrations (PostgreSQL/MySQL take a migration lock; SQLite is single-process)
-- `bedrock db check <module>` — Exit non-zero unless every loaded branch is at head
+- `bedrock db check <module>` — Exit non-zero unless every loaded module is at head
+- `bedrock db adopt <module> ...` — Import the whole `alembic_version` baseline into the configured ledger (`bedrock_migrations`, or `DATABASE_MIGRATION_VERSION_TABLE`) once (required before other migration commands)
+- `bedrock db init-ledger <root> ... --adopted-ledger <source>` — Initialize an empty ledger for confirmed new independent modules after core adoption; no baseline is imported.
 - `bedrock app info <module>` — Inspect module
 - `bedrock app playbook <module>` — View module playbook

@@ -207,9 +207,9 @@ with db.session_scope() as session:
 **CLI for migrations:**
 
 ```bash
-bedrock db revision --message "add products table"
-bedrock db upgrade
-bedrock db history
+bedrock db revision myapp.products --message "add products table"
+bedrock db upgrade myapp.products
+bedrock db history myapp.products
 ```
 
 ## CLI commands
@@ -221,12 +221,14 @@ bedrock app info <module>      # Display module details
 bedrock app install <module>   # Run migrations and hooks
 
 # Database migrations
-bedrock db revision --message "description"
-bedrock db upgrade [revision]
-bedrock db downgrade [revision]
-bedrock db heads               # Show latest revisions
-bedrock db current             # Show current revision
-bedrock db history             # Show migration history
+bedrock db revision <app> --message "description"
+bedrock db upgrade <app> [revision]
+bedrock db downgrade <app> <revision> [--cascade]
+bedrock db heads <app>        # Show head revisions
+bedrock db current <app>      # Show applied revisions
+bedrock db history <app>      # Show migration history
+bedrock db adopt <app> ...    # Import an Alembic-managed database once
+bedrock db init-ledger <root> ... --adopted-ledger <source>  # New independent registry after core adopt
 
 # Run module commands
 bedrock run <module> <command>  # Execute module-specific CLI

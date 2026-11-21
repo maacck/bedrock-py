@@ -7,6 +7,8 @@ from bedrock import get_logger
 from bedrock.settings import settings
 from bedrock.utils.lazyload import load_optional_callable
 
+from .db import build_migrations_manager
+
 logger = get_logger()
 
 
@@ -25,28 +27,6 @@ def manage_callback(app: str | None = typer.Option(None, "-A", help="Specify the
 
 
 manage_app = typer.Typer(help="Manage Bedrock applications and modules", callback=manage_callback)
-
-
-def _bootstrap_migrations_manager():
-    """Build a :class:`~bedrock.database.MigrationsManager` from the current settings.
-
-    Returns:
-        A :class:`~bedrock.database.MigrationsManager` bound to the configured
-        database URL and the populated app registry.
-
-    Raises:
-        :class:`typer.Exit`: If the database is not configured.
-    """
-    from bedrock.database.config import DbSettings
-    from bedrock.database.migrations_manager import MigrationsManager
-    from bedrock.module import apps
-
-    settings = DbSettings()
-    return MigrationsManager(
-        registry=apps,
-        database_url=settings.SQLALCHEMY_DATABASE_URI,
-        lock_timeout=settings.MIGRATION_LOCK_TIMEOUT,
-    )
 
 
 @manage_app.command()
@@ -80,7 +60,7 @@ def install(
 
     modules_to_install = [apps.get(app)] if app else apps.all()
 
-    manager = None if skip_migrations else _bootstrap_migrations_manager()
+    manager = None if skip_migrations else build_migrations_manager(apps)
 
     for module in modules_to_install:
         console.print(f"[bold blue]Installing app:[/bold blue] {module.name} {module.manifest.version}")
@@ -89,12 +69,12 @@ def install(
         # Step 1: Database schema
         # ------------------------------------------------------------------
         if manager is not None and module.models_module is not None:
-            from bedrock.database.migrations_manager import MigrationError
+            from bedrock.database import MigrationError
 
             try:
                 status = manager.ensure_schema(module.name)
                 _status_labels = {
-                    "created": "[bold green]✓[/bold green] Schema created (tables initialised and stamped at head).",
+                    "created": "[bold green]✓[/bold green] Schema created (migrations applied).",
                     "upgraded": "[bold green]✓[/bold green] Schema upgraded to head.",
                     "up-to-date": "[dim]Schema already at head — no migration needed.[/dim]",
                 }

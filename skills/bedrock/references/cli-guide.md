@@ -57,7 +57,7 @@ bedrock manage [-A <module>] install [--app <module>] [--skip-migrations]
 ### What Happens
 
 For each selected module:
-1. If it has models and migrations are not skipped, ensure its schema is current (create tables and stamp head on first install, or upgrade if behind).
+1. If it has models and migrations are not skipped, run its migration scripts up to head (a module with models but no scripts fails; generate `0001_initial` first).
 2. If `installation.py` defines `install()`, run optional `pre_install()`, then `install()`, then optional `post_install()`. Without `install()`, all three hooks are skipped.
 
 ### Examples
@@ -135,7 +135,9 @@ Create a new database migration.
 bedrock db revision <app> -m "description" [--autogenerate | --no-autogenerate]
 ```
 
-Autogeneration defaults to enabled. The first revision creates the app's branch root; subsequent revisions append to that branch.
+Autogeneration defaults to enabled. Revisions are named `<number>_<slug>` (`0001_initial`, `0002_add_email`); the first creates the app's root, later ones follow its single head. The app must be at head, and dependencies on other modules are written automatically as qualified `app:revision` entries in `depends_on`.
+
+The generated file is a reviewable draft; commit it after review. Runtime ordering uses only the committed `depends_on` graph, never foreign keys.
 
 Autogeneration filters both database reflection and shared metadata to tables owned by the target module. Ordinary ORM models use their defining package, including loaded domain packages; importing a foreign model does not transfer ownership. Unmapped `Table` objects declare `info={"bedrock_module": "myapp.users"}`. Missing, conflicting, or unloaded owners raise `MigrationError` without writing a revision. See [Table Ownership](database-guide.md#table-ownership).
 
@@ -157,9 +159,11 @@ Apply migrations.
 bedrock db upgrade <app> [target]
 ```
 
-Only the specified app's migration branch is upgraded. Upgrade and downgrade take a PostgreSQL advisory lock or MySQL/MariaDB `GET_LOCK` and wait up to `DATABASE_MIGRATION_LOCK_TIMEOUT` seconds (default 30). SQLite migrations are not locked; run them from one process.
+Only the specified app's migrations run, together with the migrations they depend on in other modules. Each executed step is printed as `app:revision` (or `Nothing to do.`). Upgrade and downgrade take a PostgreSQL advisory lock or MySQL/MariaDB `GET_LOCK` and wait up to `DATABASE_MIGRATION_LOCK_TIMEOUT` seconds (default 30). SQLite migrations are not locked; run them from one process.
 
-**Targets**: `head` (default), `+N` (upgrade N steps), `<revision_id>`
+The CLI uses one ledger (`bedrock_migrations` by default). `DATABASE_MIGRATION_VERSION_TABLE` selects another (lowercase simple SQL identifier, at most 57 characters); no CLI flag exists. Never rename the table to switch ledgers.
+
+**Targets**: `head` (default), `+N` (upgrade N steps), or a full revision name of the app such as `0002_add_email`
 
 **Examples**:
 ```bash
@@ -177,19 +181,22 @@ Roll back migrations.
 bedrock db downgrade <app> <target>
 ```
 
-**Targets**: `-N` (downgrade N steps), `base` (empty), `<revision_id>`
+**Targets**: `-N` (downgrade N steps), `base` (empty), or a full revision name of the app (undoes its applied descendants; the revision stays)
+
+If applied migrations of other modules depend on what would be undone, the command fails and changes nothing. `--cascade` rolls those dependents back first; add `--load <app>` for each dependent module that is not already loaded (unloaded dependents are always an error). Baseline rows imported by `adopt` cannot be undone.
 
 **Examples**:
 ```bash
 bedrock db downgrade myapp.users -- -1
 bedrock db downgrade myapp.users base
+bedrock db downgrade myapp.users base --load myapp.orders --cascade
 ```
 
 ---
 
 ## bedrock db heads
 
-Show latest revision.
+Show the head revisions in the app's scripts, one per line.
 
 ```bash
 bedrock db heads myapp.users
@@ -199,7 +206,7 @@ bedrock db heads myapp.users
 
 ## bedrock db current
 
-Show current database revision.
+Show the applied revisions of the app, one per line (`-` when none).
 
 ```bash
 bedrock db current myapp.users
@@ -209,19 +216,19 @@ bedrock db current myapp.users
 
 ## bedrock db check
 
-Report each loaded branch's current and head revisions without changing the database. Exits non-zero when any branch is `behind` or `unknown`.
+Report each loaded module's current and head revisions without changing the database. Exits non-zero when any module is `behind` or `unknown`.
 
 ```bash
 bedrock db check myapp.users
 ```
 
-States: `at-head` (applied revisions match head), `behind` (an older revision is applied), `unknown` (nothing applied, no scripts, or the applied revision is not in the branch).
+States: `at-head` (applied revisions match the heads), `behind` (an older revision is applied), `unknown` (nothing applied, no scripts, or an applied revision has no script).
 
 ---
 
 ## bedrock db history
 
-Show migration history.
+Show migration history (revision, down revision, depends on, message).
 
 ```bash
 bedrock db history myapp.users
@@ -231,13 +238,37 @@ bedrock db history myapp.users
 
 ## bedrock db uninstall
 
-Downgrade the app's migration branch to base before removing the module.
+Roll back the app's applied migrations to base before removing the module.
 
 ```bash
-bedrock db uninstall myapp.users
+bedrock db uninstall myapp.users [--cascade] [--load myapp.orders]
 ```
 
-Review both directions of existing scripts before uninstalling. Branch selection does not sandbox table operations, and first installation may stamp a revision without executing its upgrade. New generation filters do not repair old destructive downgrades. Back up, check applied/stamped revisions and actual schema state, and follow [Existing Migration Safety](database-guide.md#existing-migration-safety); adding a new revision alone cannot neutralize an older dangerous downgrade.
+Without `--cascade`, uninstall fails and changes nothing when applied migrations of other modules depend on the app's. `--cascade` rolls those dependents back first; add `--load <app>` for each dependent that is not already loaded. Unloaded dependents and baseline rows imported by `adopt` always block the command before the first DDL statement.
+
+Review both directions of existing scripts before uninstalling: uninstall runs every applied `downgrade()`, and table operations are not sandboxed. New generation filters do not repair old destructive downgrades. Back up, check the applied revisions and actual schema state, and follow [Existing Migration Safety](database-guide.md#existing-migration-safety); adding a new revision alone cannot neutralize an older dangerous downgrade.
+
+---
+
+## bedrock db adopt
+
+Import a database whose migrations are recorded in Alembic's `alembic_version` into `bedrock_migrations`. Until it runs once, every other migration command refuses to run on that database.
+
+```bash
+bedrock db adopt myapp.users myapp.orders
+```
+
+Load every module that has migrations; each old head must belong to exactly one. Writes protected `baseline` rows and publishes the table atomically; no script is executed and `alembic_version` is left untouched. Back up first and follow [Adopting an Existing Database](database-guide.md#adopting-an-existing-database).
+
+---
+
+## bedrock db init-ledger
+
+```bash
+bedrock db init-ledger <root> [<root> ...] --adopted-ledger <source-name>
+```
+
+For genuinely new independent modules with no prior schema or history, `bedrock db init-ledger <root> --adopted-ledger <source>` creates the configured target table empty. It verifies the prior adoption read-only; no script runs and no baseline rows are copied. Back up and rehearse on a restored copy first.
 
 ---
 

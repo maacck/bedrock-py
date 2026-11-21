@@ -290,7 +290,6 @@ class TestInstallCommand:
 
         app_config = self._make_app_config()
         self._patch_apps_get(monkeypatch, app_config)
-        monkeypatch.setattr(cli_apps, "_bootstrap_migrations_manager", lambda: None)
         monkeypatch.setattr(cli_apps.os.path, "exists", lambda path: True)
         monkeypatch.setattr(
             cli_apps,
@@ -333,7 +332,7 @@ class TestInstallCommand:
         app_config.models_module = object()
 
         self._patch_apps_get(monkeypatch, app_config)
-        monkeypatch.setattr(cli_apps, "_bootstrap_migrations_manager", lambda: manager)
+        monkeypatch.setattr("bedrock.cli.db.build_migrations_manager", lambda registry: manager)
         monkeypatch.setattr(cli_apps.os.path, "exists", lambda path: True)
         monkeypatch.setattr(
             cli_apps,
@@ -348,7 +347,6 @@ class TestInstallCommand:
     def test_install_skips_hooks_when_no_installation_py(self, monkeypatch: pytest.MonkeyPatch) -> None:
         app_config = self._make_app_config()
         self._patch_apps_get(monkeypatch, app_config)
-        monkeypatch.setattr(cli_apps, "_bootstrap_migrations_manager", lambda: None)
         monkeypatch.setattr(cli_apps.os.path, "exists", lambda path: False)
 
         cli_apps.install("demo.app", skip_migrations=True)
@@ -356,7 +354,6 @@ class TestInstallCommand:
     def test_install_skips_hooks_when_no_install_function(self, monkeypatch: pytest.MonkeyPatch) -> None:
         app_config = self._make_app_config()
         self._patch_apps_get(monkeypatch, app_config)
-        monkeypatch.setattr(cli_apps, "_bootstrap_migrations_manager", lambda: None)
         monkeypatch.setattr(cli_apps.os.path, "exists", lambda path: True)
         monkeypatch.setattr(cli_apps, "load_optional_callable", lambda path: None)
 
@@ -370,7 +367,6 @@ class TestInstallCommand:
 
         app_config = self._make_app_config()
         self._patch_apps_get(monkeypatch, app_config)
-        monkeypatch.setattr(cli_apps, "_bootstrap_migrations_manager", lambda: None)
         monkeypatch.setattr(cli_apps.os.path, "exists", lambda path: True)
         monkeypatch.setattr(
             cli_apps,
@@ -392,7 +388,7 @@ class TestInstallCommand:
             cli_apps.install("nonexistent.app", skip_migrations=True)
 
     def test_install_raises_on_migration_failure(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from bedrock.database.migrations_manager import MigrationError
+        from bedrock.database import MigrationError
 
         manager = MagicMock()
         manager.ensure_schema.side_effect = MigrationError("schema failed")
@@ -401,7 +397,7 @@ class TestInstallCommand:
         app_config.models_module = object()
 
         self._patch_apps_get(monkeypatch, app_config)
-        monkeypatch.setattr(cli_apps, "_bootstrap_migrations_manager", lambda: manager)
+        monkeypatch.setattr("bedrock.cli.db.build_migrations_manager", lambda registry: manager)
 
         with pytest.raises(typer.Exit):
             cli_apps.install("demo.app", skip_migrations=False)

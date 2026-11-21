@@ -286,25 +286,6 @@ def info(
     console.print(table)
 
 
-def _bootstrap_migrations_manager():
-    """Build a MigrationsManager from the current settings."""
-    from bedrock.database import db
-    from bedrock.database.config import DbSettings
-    from bedrock.database.migrations_manager import MigrationsManager
-    from bedrock.module import apps
-
-    settings = DbSettings()
-    database_url = settings.SQLALCHEMY_DATABASE_URI
-
-    if db._database_url is not None:
-        database_url = db._database_url
-    return MigrationsManager(
-        registry=apps,
-        database_url=database_url,
-        lock_timeout=settings.MIGRATION_LOCK_TIMEOUT,
-    )
-
-
 def _resolve_playbook_path(package_dir: Path, relative_path: str | None) -> Path:
     """Resolve a module playbook file path from a package directory.
 
@@ -405,15 +386,20 @@ def install(
 
     console.print(f"[bold blue]Installing module:[/bold blue] {app_config.name} {app_config.manifest.version}")
 
-    manager = None if skip_migrations else _bootstrap_migrations_manager()
+    if skip_migrations:
+        manager = None
+    else:
+        from .db import build_migrations_manager
+
+        manager = build_migrations_manager(apps)
 
     if manager is not None and app_config.models_module is not None:
-        from bedrock.database.migrations_manager import MigrationError
+        from bedrock.database import MigrationError
 
         try:
             status = manager.ensure_schema(app_config.name)
             _status_labels = {
-                "created": "[bold green]✓[/bold green] Schema created (tables initialised and stamped at head).",
+                "created": "[bold green]✓[/bold green] Schema created (migrations applied).",
                 "upgraded": "[bold green]✓[/bold green] Schema upgraded to head.",
                 "up-to-date": "[dim]Schema already at head — no migration needed.[/dim]",
             }
