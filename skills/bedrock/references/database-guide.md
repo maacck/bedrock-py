@@ -189,7 +189,7 @@ finally:
 
 ## Migrations
 
-Bedrock uses per-app Alembic branches via `MigrationsManager`. Each app gets a branch label equal to its import path. Branch ownership prevents version-tree pollution; table ownership separately limits new autogeneration and first-install table creation. Neither mechanism sandboxes historical scripts.
+Bedrock runs migrations itself via `MigrationsManager`. Executed migrations are recorded in the `bedrock_migrations` table, keyed by `(app, revision)`; each app's scripts live in its own `migrations/` directory. Alembic is used only as a library to execute and autogenerate scripts. Table ownership limits autogeneration. It does not sandbox historical scripts.
 
 ### Setup
 
@@ -213,9 +213,9 @@ status = mgr.ensure_schema("myproject.modules.users")
 ```
 
 Behavior:
-- **No revisions applied**: Creates tables from SQLAlchemy metadata, stamps at head
-- **Behind head**: Runs `upgrade` to bring branch current
-- **At head**: No-op
+- Runs the module's migration scripts up to head, together with the migrations they depend on. It never uses `create_all` or stamps.
+- A module with models but no migration scripts raises `MigrationError`: run `bedrock db revision <app> -m "initial schema"` first.
+- Returns `"created"` when the module had no applied migrations and some ran, `"upgraded"` when migrations ran, `"up-to-date"` when none were pending.
 
 ### Creating Revisions
 
@@ -226,6 +226,10 @@ mgr.revision(
     autogenerate=True,  # default
 )
 ```
+
+New revisions are named `<number>_<slug>` (`0001_initial`, `0002_add_email_column`): the module's highest number plus one. Existing random IDs are kept; the next name continues from the old head. Generation requires the module to be at head with a single head, and writes qualified `app:revision` entries into `depends_on` for the modules it depends on (they must be direct manifest dependencies; bare names are rejected). `branch_labels` and `MigrationsManager(script_location=...)` no longer exist; scripts that still declare `branch_labels` load normally and the label is ignored.
+
+A generated revision is a reviewable draft: review, edit, and commit it. Runtime uses only the committed declared graph (`down_revision` plus qualified `depends_on`) and never infers ordering from foreign keys; add a missing `depends_on` by hand.
 
 ### Table Ownership
 
@@ -246,10 +250,10 @@ user_labels = Table(
 )
 ```
 
-Declare `myapp.users` in the tags module's manifest `depends_on`. Full metadata remains available for foreign keys, but referencing a table does not transfer ownership. Cross-branch migration ordering remains the developer's responsibility.
+Declare `myapp.users` in the tags module's manifest `depends_on`. Full metadata remains available for foreign keys, but referencing a table does not transfer ownership. Migration ordering between modules is recorded in the scripts' `depends_on` (see Creating Revisions).
 
 - An ORM model can assert an owner with `__table_args__ = {"info": {"bedrock_module": "myapp.tags"}}`; it must agree with the model's defining module.
-- Validate every table in shared metadata before autogeneration or first-install DDL/stamp. Missing/conflicting owners, invalid declarations, unloaded apps, and owners without a models module raise `MigrationError`. This is a compatibility tightening, not a silent skip.
+- Validate every table in shared metadata before autogeneration. Missing/conflicting owners, invalid declarations, unloaded apps, and owners without a models module raise `MigrationError`. This is a compatibility tightening, not a silent skip.
 - Validate every mapper sharing a table: a resolved model does not cover an unresolved model. A valid explicit table declaration can supply missing ownership, but cannot override known conflicts between loaded modules.
 - Same-module mappings of one table, including single-table inheritance, share an owner. Cross-module mappings of the same table are rejected. Joined-table inheritance resolves each local table separately.
 - Use schema-qualified identities. Explicit and implicit default schemas identify one physical table; duplicate declarations are rejected. Both reflection and metadata are filtered, including table-owned columns, indexes, constraints, and foreign keys.
@@ -258,15 +262,53 @@ Declare `myapp.users` in the tags module's manifest `depends_on`. Full metadata 
 
 ### Existing Migration Safety
 
-New filtering does not repair old contaminated scripts. First installation still creates owned tables and stamps head without executing upgrade; an empty owned set skips creation. A stamped revision's downgrade will run during uninstall even if its upgrade never ran.
+Bedrock does not rewrite old scripts, and new filtering does not repair old contaminated ones. Installation now executes the recorded scripts, so uninstall runs the `downgrade()` of scripts whose `upgrade()` really ran; databases adopted from `alembic_version` keep protected baseline rows instead (see below).
 
 Before installing, upgrading, rolling back, or uninstalling an affected module:
 
-1. Pause operations, back up the database and scripts, and inspect each environment's `alembic_version`, actual schema, and data.
-2. Review both upgrade and downgrade across core and plugin branches, including columns, indexes, constraints, and raw SQL. Correct branch labels do not prove safe table operations.
-3. Regenerate unpublished scripts only after confirming they were never applied or stamped anywhere. Coordinate repairs to published/applied/stamped history; do not casually delete revisions, change IDs, or stamp base. Appending a new revision alone cannot prevent an older destructive downgrade from running.
+1. Pause operations, back up the database and scripts, and inspect each environment's `alembic_version` (or `bedrock_migrations`), actual schema, and data.
+2. Review both upgrade and downgrade across core and plugin modules, including columns, indexes, constraints, and raw SQL. A script owned by the right module does not prove safe table operations.
+3. Regenerate unpublished scripts only after confirming they were never applied anywhere. Coordinate repairs to published/applied history; do not casually delete revisions or change their names. Appending a new revision alone cannot prevent an older destructive downgrade from running.
 4. Check residual DDL after failed upgrades even without an applied revision. Restore lost data from verified backups or database recovery, not create_all.
 5. Verify the actual install/upgrade/uninstall paths on an isolated production copy before resuming.
+
+### Adopting an Existing Database
+
+A database created by an earlier Bedrock version records migrations in `alembic_version`; every migration command (`upgrade`, `downgrade`, `ensure_schema`, `uninstall`) raises `MigrationError` until `bedrock db adopt <app> ...` (`mgr.adopt()`) runs once with every module loaded. Native Alembic CLI must not be used on Bedrock-managed databases afterward.
+
+1. During a maintenance window stop old migration entry points; back up the database, deployed package, and original scripts. Old heads are resolved through that deployment's own revision graph, not today's manifest edges. Suspected missed data migrations need manual reconciliation; adoption does not replay them.
+2. Each old head must belong to exactly one loaded module. A missing, ambiguous, or unresolvable head writes nothing.
+3. Adopt stages one `origin='baseline'` row per revision up to those heads, verifies it, and renames it atomically to `bedrock_migrations`. `alembic_version` stays as an audit snapshot. An interrupted run before publication leaves only staging state and can be retried; a published table is never dropped or re-imported.
+4. Baseline rows are protected: no script runs for them, and any downgrade, uninstall, or cascade that must undo one fails before the first DDL statement. Rolling back to the baseline itself is allowed.
+5. After the new version has written to the database, do not switch the old program back. Restore the matching database, program, and migration files together.
+
+Before adoption, align the script metadata in the new deployment copy: preserve every deployed `revision`, local `down_revision` (including merge parents), and operation body. Resolve a legacy bare cross-module `depends_on = "a12f"` against the original deployment and spell it `depends_on = ("myapp.auth:a12f",)` only if the owner is unique and a direct manifest dependency. Never infer historical edges from today's heads. On a restored database use normal `bedrock db history` before `adopt`, then compare `current`/`check` with the old position. The ledger records *all* direct parents; editing either kind of edge after adoption or execution blocks writes.
+
+### Adding a New Independent Registry After Adoption
+
+For genuinely new independent modules with no prior schema or history, `bedrock db init-ledger <root> --adopted-ledger <source>` creates the configured target table empty. It verifies the prior adoption read-only; no script runs and no baseline rows are copied. Back up and rehearse on a restored copy first.
+
+Preflight: pause migrations, take a verified backup (database, package, scripts), confirm the source is adopted and `alembic_version` still holds the old heads, load only the new registry's modules, rehearse on a restored copy. It refuses and writes nothing when: legacy table missing; source not a valid adopted ledger or lacks evidence for the old heads; source already has rows for a loaded module; a table owned by a loaded module's models already exists; the target or a source/target staging table exists. Never patch ledger rows to bypass a refusal.
+
+### Custom Version Table and Independent Module Sets
+
+Default ledger is `bedrock_migrations`; override with `MigrationsManager(..., version_table="...")` or host setting `DATABASE_MIGRATION_VERSION_TABLE`. Name: lowercase simple SQL identifier (`[a-z_][a-z0-9_]*`), at most 57 characters. The name and `<name>_adopt` (adopt staging) are reserved; a name must not end in `_adopt`.
+
+```python
+from bedrock.module.registry import ModuleRegistry
+
+billing, search = ModuleRegistry(), ModuleRegistry()
+billing.populate(["myproject.modules.billing"])
+search.populate(["myproject.modules.search"])
+
+MigrationsManager(billing, url, version_table="billing_migrations").ensure_schema("myproject.modules.billing")
+MigrationsManager(search, url, version_table="search_migrations").ensure_schema("myproject.modules.search")
+```
+
+- Programmatic independent registries, one ledger each, only when module sets own disjoint model tables and no migration depends on a module in another ledger (not checked across ledgers). All managers share the same database lock.
+- Host and CLI use one configured root set and one ledger via `DATABASE_MIGRATION_VERSION_TABLE` (no CLI flag, no manifest field): `DATABASE_MIGRATION_VERSION_TABLE=billing_migrations bedrock db upgrade myproject.modules.billing`.
+- Never rename a table to switch ledgers; a new name is a different, possibly empty ledger and applied migrations look pending.
+- `adopt` imports the *whole* legacy `alembic_version` baseline into the configured ledger; load every module first. A set owning only part of the legacy history cannot adopt it.
 
 ### Upgrade / Downgrade
 
@@ -277,26 +319,29 @@ mgr.downgrade("myproject.modules.users", target="-1")
 mgr.downgrade("myproject.modules.users", target="base")
 ```
 
-Targets are confined to the app's branch: `head`, `base`, and `+N`/`-N` are qualified as `<app>@<target>`, and a revision ID must belong to the app's branch. Anything else (`heads`, another app's revision) raises `MigrationError`. When the applied revisions cannot be read, `ensure_schema` and `uninstall` raise `MigrationError` instead of treating the branch as never applied; `check` reports `unknown`.
+Targets are resolved within the app: `head`, `base`, `+N`/`-N`, or a full local revision name such as `0002_add_email`. Anything else (`heads`, another app's revision, a numeric prefix) raises `MigrationError`. Upgrade runs the app's pending migrations together with the migrations they depend on and nothing else; downgrade undoes the app's applied descendants. `upgrade`, `downgrade` and `uninstall` return the executed `(app, revision)` steps in order. When applied revisions cannot be read, `ensure_schema` and `uninstall` raise `MigrationError` instead of treating the module as never applied; `check` reports `unknown`.
+
+Rollback is dependency-aware: if applied migrations of other modules depend on the ones being undone, `downgrade`/`uninstall` raise `MigrationError` and change nothing. `cascade=True` (`--cascade`) rolls those dependents back first; dependents that are not loaded are always an error (add `--load <app>`), and baseline rows from `adopt` cannot be rolled back. `heads()` and `current()` return tuples of revision names. To remove a module from the CLI use `bedrock db downgrade <app> base`; `bedrock db uninstall` no longer exists (`MigrationsManager.uninstall()` remains in Python).
 
 ### CLI Commands
 
 ```bash
 bedrock db revision <app> -m "description"
 bedrock db upgrade <app> [target]
-bedrock db downgrade <app> <target>
+bedrock db downgrade <app> <target> [--cascade] [--load <other-app>]
 bedrock db heads <app>
 bedrock db current <app>
 bedrock db check <app>
 bedrock db history <app>
-bedrock db uninstall <app>
+bedrock db adopt <app> [<app> ...]
+bedrock db init-ledger <root> [<root> ...] --adopted-ledger <source-name>
 ```
 
 The CLI populates the registry for `<app>` and builds its database URL from `DATABASE_` settings, so secret handling applies there too. Use `--` before a negative positional target, for example `bedrock db downgrade myproject.modules.users -- -1`.
 
-`upgrade` and `downgrade` (including `ensure_schema` and `uninstall`) take a PostgreSQL advisory lock or MySQL/MariaDB `GET_LOCK`. SQLite runs unlocked; migrate it from one process. The wait is `DATABASE_MIGRATION_LOCK_TIMEOUT`. A timeout raises `MigrationError`.
+`upgrade` and `downgrade` (including `ensure_schema` and `uninstall`) take a PostgreSQL advisory lock or MySQL/MariaDB `GET_LOCK`. SQLite runs unlocked; migrate it from one process. The wait is `DATABASE_MIGRATION_LOCK_TIMEOUT`. A timeout raises `MigrationError`. Each migration runs in its own transaction; scripts must not commit or use `autocommit_block()`, and MySQL/MariaDB cannot roll back failed DDL (compare the real schema before retrying).
 
-`bedrock db check <app>` prints each loaded branch's current and head revisions without changing the database. It exits non-zero when any branch is `behind` or `unknown` (including a database that has never been migrated).
+`bedrock db check <app>` prints each loaded module's current and head revisions without changing the database. It exits non-zero when any module is `behind` or `unknown` (including a database that has never been migrated).
 
 ### Migration Directory Layout
 
@@ -305,8 +350,8 @@ Each app stores migrations alongside its code:
 ```
 my_app/users/
 ├── migrations/
-│   ├── abc123_2025-01-15_add_users_table.py
-│   └── def456_2025-02-01_add_email_column.py
+│   ├── 0001_initial.py
+│   └── 0002_add_email_column.py
 ├── models.py
 └── manifest.yaml
 ```
@@ -670,6 +715,7 @@ Database settings use environment variables with the `DATABASE_` prefix. `DbSett
 | `DATABASE_POOL_SIZE` | `int` | `10` | Steady-state pool size. Must be `>= 1` (SQLAlchemy treats 0 as unlimited). |
 | `DATABASE_POOL_RECYCLE` | `int` | `1800` | Seconds before recycling a connection |
 | `DATABASE_MIGRATION_LOCK_TIMEOUT` | `float` | `30` | Seconds to wait for the migration lock. `0` does not wait. MySQL rounds a positive value up to whole seconds. |
+| `DATABASE_MIGRATION_VERSION_TABLE` | `str` | `"bedrock_migrations"` | Table that records applied migrations. Lowercase simple SQL identifier, at most 57 characters. |
 | `DATABASE_SCHEMA` | `str` | `"bedrock.db"` | Database name or file path |
 
 Defaults (`POOL_SIZE=10`, `MAX_CONNECTIONS=10`) cap a non-SQLite process at 10 connections. The previous engine left SQLAlchemy's implicit overflow of 10 in place (20 total). Raise `DATABASE_MAX_CONNECTIONS` to restore that capacity. SQLite ignores pool settings. The URL is built with `sqlalchemy.engine.URL.create`. `PASSWORD` is a `SecretStr`; the rendered URL is not part of settings `repr`.

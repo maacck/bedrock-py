@@ -3,21 +3,13 @@
 This file is optional — delete it if the module is not installable.
 """
 
-def pre_install() -> None:
-    """Run before database migrations."""
-    pass
+def pre_install(**kwargs: object) -> None:
+    """Run after schema setup and before install()."""
 
 
-def install() -> None:
+def install(**kwargs: object) -> None:
     """Run after migrations — seed data, etc."""
-    pass
 
 
-def post_install() -> None:
+def post_install(**kwargs: object) -> None:
     """Run after install()."""
-    pass
-
-
-def uninstall() -> None:
-    """Run during module uninstall."""
-    pass

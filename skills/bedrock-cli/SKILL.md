@@ -17,7 +17,7 @@ This skill describes `bedrock-cli` at the version in `metadata.bedrock-cli` abov
 ## When to Use
 
 - Scaffolding a new project with `bedrock-cli init`
-- Adding a submodule or domain module with `bedrock-cli add`
+- Adding a module or domain package with `bedrock-cli add`
 - Generating code from SQLAlchemy models with `bedrock-cli gen`
 - Working with `_bedrock_gen/<template>.py.j2` overrides
 - Preventing confusion between `bedrock-cli` and runtime `bedrock`
@@ -29,7 +29,7 @@ Do **not** use this skill for runtime migrations, module inspection, or lifecycl
 | Command | Purpose | Caveat |
 |---|---|---|
 | `bedrock-cli init <name>` | Scaffold a new project | Minimal starter |
-| `bedrock-cli add submodule <name> <path>` | Add a Bedrock module | Prefer explicit flags |
+| `bedrock-cli add module <name> <path>` | Add a Bedrock module | Prefer explicit flags |
 | `bedrock-cli add domain <name> <path>` | Add an internal domain package | No `manifest.yaml` |
 | `bedrock-cli gen <template> <model_ref> <path>` | Generate from a SQLAlchemy model | Run from project root |
 | `_bedrock_gen/<template>.py.j2` | Override/add generation templates | Checked before built-ins |
@@ -37,7 +37,7 @@ Do **not** use this skill for runtime migrations, module inspection, or lifecycl
 ## Core Workflow
 
 - `bedrock-cli` = scaffolding and generation
-- `bedrock` = runtime management (`app`, `manage`, `db`, `run`)
+- `bedrock` = runtime management (`app`, `db`, `run`)
 
 ### 1. Scaffold a project
 
@@ -57,7 +57,6 @@ my-saas-app/
 └── src/my_saas_app/
     ├── __init__.py
     ├── manifest.yaml
-    ├── models.py
     ├── bootstrap.py
     ├── installation.py
     └── exc.py
@@ -70,11 +69,11 @@ This is the CLI's starter scaffold, not the canonical project anatomy. It makes 
 Prefer explicit flags:
 
 ```bash
-bedrock-cli add submodule users src/my_saas_app --bootstrap --installation
+bedrock-cli add module users src/my_saas_app --bootstrap --installation
 bedrock-cli add domain profile src/my_saas_app/users
 ```
 
-- `add submodule` creates `__init__.py`, `manifest.yaml`, `models.py`, `entities.py`, `exc.py`, plus optional `bootstrap.py` and `installation.py`; omitted flags prompt interactively with a default of no
+- `add module` creates `__init__.py`, `manifest.yaml`, `entities.py`, `exc.py`, plus optional `bootstrap.py` and `installation.py`; omitted flags prompt interactively with a default of no. It creates no `models.py`: add one only when the module owns tables
 - `add domain` creates `__init__.py`, `entities.py`, `service.py`, and `exc.py`; it is an internal domain package, not a Bedrock module
 - Generated files are starters: follow `docs/bedrock-anatomy.md`, adding a module `service.py` for business logic and removing optional placeholders for concerns the module does not own.
 
@@ -85,7 +84,7 @@ bedrock-cli gen entity my_saas_app.users.models:User src/my_saas_app/users/profi
 bedrock-cli gen service my_saas_app.users.models:User src/my_saas_app/users/profile --overwrite
 ```
 
-- Define `User` in `my_saas_app.users.models` first; the scaffold's `models.py` contains no model.
+- Define `User` in `my_saas_app.users.models` first; the scaffold creates no `models.py`.
 - Run from project root so `.` and `./src` are importable; the model's dependencies must also be installed.
 - `model_ref` must be `<module.path>:<ClassName>`
 - Built-ins are `entity` and `service`

@@ -291,7 +291,7 @@ def adjust(
 
 ## 步骤 9：运行命令
 
-使用 `bedrock run` 执行模块命令：
+使用 `bedrock run --app ROOT MODULE COMMAND` 执行模块命令。`--app` 是要加载的根模块，`MODULE` 是要运行其命令的模块，`COMMAND` 是该模块的 Typer 命令（这里根模块和模块都是 `inventory`）：
 
 ```bash
 # Add a product

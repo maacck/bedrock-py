@@ -1,17 +1,17 @@
-"""Tests for migration locks and the read-only db check command."""
+"""Tests for module-scoped migrations: locks, targets, cross-app safety, ownership, and generation."""
 
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import closing, contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 import sqlalchemy as sa
-from alembic import command
 from bedrock.cli.db import db_app
-from bedrock.database.migrations_manager import BranchRevisionStatus, MigrationError, MigrationsManager
+from bedrock.database import BranchRevisionStatus, MigrationError, MigrationsManager
 from bedrock.module.registry import ModuleRegistry
 from bedrock.testing.modules import ModuleFactory
 from typer.testing import CliRunner
@@ -177,7 +177,7 @@ class TestMigrationLockSelection:
         def fail_create(*_args: object, **_kwargs: object) -> None:
             raise AssertionError("SQLite migrations must not open a lock connection")
 
-        monkeypatch.setattr("bedrock.database.migrations_manager.create_engine", fail_create)
+        monkeypatch.setattr("bedrock.database.migration.manager.create_engine", fail_create)
         manager = _manager("sqlite+pysqlite:///orders.db")
 
         with manager._migration_lock():
@@ -201,41 +201,30 @@ class TestMigrationLockSelection:
         with pytest.raises(MigrationError, match="MySQL migration lock"):
             manager._acquire_dialect_lock(connection, "mysql")
 
-    def test_upgrade_and_downgrade_hold_the_lock(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Upgrade and downgrade run inside the migration lock."""
+    def test_upgrade_and_downgrade_hold_the_lock(
+        self, module_factory: ModuleFactory, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Scripts run only while the migration lock is held."""
 
-        events: list[object] = []
+        log = tmp_path / "events.log"
+        monkeypatch.setenv("MIGRATION_LOG", str(log))
 
         @contextmanager
         def lock(self: MigrationsManager) -> Iterator[None]:
-            events.append("enter")
+            _log_event("enter")
             yield
-            events.append("exit")
-
-        def upgrade(_cfg: object, target: str) -> None:
-            events.append(("upgrade", target))
-
-        def downgrade(_cfg: object, target: str) -> None:
-            events.append(("downgrade", target))
+            _log_event("exit")
 
         monkeypatch.setattr(MigrationsManager, "_migration_lock", lock)
-        monkeypatch.setattr(MigrationsManager, "_get_app", lambda self, app: object())
-        monkeypatch.setattr(MigrationsManager, "_build_config", lambda self, app: object())
-        monkeypatch.setattr("bedrock.database.migrations_manager.command.upgrade", upgrade)
-        monkeypatch.setattr("bedrock.database.migrations_manager.command.downgrade", downgrade)
-        manager = _manager("sqlite+pysqlite:///orders.db")
+        app = _chain_app(module_factory, "lk_app", {"r1": _logging_script("r1")})
+        registry = ModuleRegistry()
+        registry.populate([app])
+        manager = MigrationsManager(registry, _database_url(tmp_path / "lock.db"))
 
-        manager.upgrade("mak111_head")
-        manager.downgrade("mak111_head", "-1")
+        manager.upgrade(app)
+        manager.downgrade(app, "base")
 
-        assert events == [
-            "enter",
-            ("upgrade", "mak111_head@head"),
-            "exit",
-            "enter",
-            ("downgrade", "mak111_head@-1"),
-            "exit",
-        ]
+        assert log.read_text().split() == ["enter", "upgrade", "exit", "enter", "downgrade", "exit"]
 
 
 class TestDbCheck:
@@ -335,22 +324,101 @@ class TestDbCheck:
         if db_path.exists():
             with sqlite3.connect(db_path) as connection:
                 tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
-            assert "alembic_version" not in tables
+            assert "bedrock_migrations" not in tables
+
+
+def _query(db_path: Path, sql: str) -> list[tuple[object, ...]]:
+    """Return every row of *sql* run on a fresh connection to *db_path*."""
+
+    with closing(sqlite3.connect(db_path)) as connection:
+        return [tuple(row) for row in connection.execute(sql)]
 
 
 def _sqlite_rows(db_path: Path, query: str) -> set[str]:
     """Return the first column of *query* run against *db_path*."""
 
-    with sqlite3.connect(db_path) as connection:
-        return {row[0] for row in connection.execute(query)}
+    return {row[0] for row in _query(db_path, query)}
 
 
-def _versions(db_path: Path) -> set[str]:
-    return _sqlite_rows(db_path, "SELECT version_num FROM alembic_version")
+def _versions(db_path: Path) -> set[tuple[str, str]]:
+    """Return the executed ``(app, revision)`` keys."""
+
+    return {
+        (str(app), str(revision)) for app, revision in _query(db_path, "SELECT app, revision FROM bedrock_migrations")
+    }
+
+
+def _keys(app: str, *revisions: str) -> set[tuple[str, str]]:
+    return {(app, revision) for revision in revisions}
 
 
 def _tables(db_path: Path) -> set[str]:
     return _sqlite_rows(db_path, "SELECT name FROM sqlite_master WHERE type = 'table'")
+
+
+def _snapshot(db_path: Path) -> tuple[set[str], list[tuple[object, ...]]]:
+    """Capture every table name and version row so a refused command can prove it wrote nothing."""
+
+    rows = _query(db_path, "SELECT app, revision, parents, origin FROM bedrock_migrations ORDER BY app, revision")
+    return _tables(db_path), rows
+
+
+def _execute(db_path: Path, sql: str) -> None:
+    with closing(sqlite3.connect(db_path)) as connection:
+        connection.execute(sql)
+        connection.commit()
+
+
+def _log_event(event: str) -> None:
+    import os
+
+    with open(os.environ["MIGRATION_LOG"], "a", encoding="utf-8") as log:
+        log.write(event + "\n")
+
+
+def _script(
+    rev: str,
+    down: str | None,
+    depends_on: tuple[str, ...] = (),
+    *,
+    table: str | None = None,
+    fail: str | None = None,
+) -> str:
+    """A revision that creates (and drops) *table*, optionally raising after the DDL of one direction."""
+
+    table = table or rev
+    boom = "    raise RuntimeError('boom')\n"
+    return (
+        "from alembic import op\nimport sqlalchemy as sa\n"
+        f"revision = {rev!r}\ndown_revision = {down!r}\ndepends_on = {depends_on!r}\n"
+        f"def upgrade():\n    op.create_table({table!r}, sa.Column('id', sa.Integer, primary_key=True))\n"
+        f"{boom if fail == 'upgrade' else ''}"
+        f"def downgrade():\n    op.drop_table({table!r})\n"
+        f"{boom if fail == 'downgrade' else ''}"
+    )
+
+
+def _logging_script(rev: str) -> str:
+    """A DDL-free revision that records which direction ran."""
+
+    return (
+        "import os\n"
+        f"revision = {rev!r}\ndown_revision = None\ndepends_on = ()\n"
+        "def _log(event):\n    with open(os.environ['MIGRATION_LOG'], 'a') as log:\n        log.write(event + '\\n')\n"
+        "def upgrade():\n    _log('upgrade')\n"
+        "def downgrade():\n    _log('downgrade')\n"
+    )
+
+
+def _chain_app(factory: ModuleFactory, name: str, scripts: Mapping[str, str], depends_on: tuple[str, ...] = ()) -> str:
+    """Create a module whose migrations are *scripts* (revision to source)."""
+
+    return factory(
+        name,
+        manifest={"title": name, "version": "0.1.0", "depends_on": list(depends_on)},
+        models="",
+        files={f"migrations/{rev}.py": src for rev, src in scripts.items()},
+    )
 
 
 @pytest.fixture
@@ -390,9 +458,9 @@ class TestMigrationTargets:
     def test_downgrade_to_base_leaves_other_branches(self, two_apps: tuple[MigrationsManager, Path]) -> None:
         manager, db_path = two_apps
 
-        manager.downgrade("sec02_a", "base")
+        assert manager.downgrade("sec02_a", "base") == [("sec02_a", "sec02ab"), ("sec02_a", "sec02aa")]
 
-        assert _versions(db_path) == {"sec02bb"}
+        assert _versions(db_path) == _keys("sec02_b", "sec02ba", "sec02bb")
         assert "sec02_b" in _tables(db_path)
         assert "sec02_a" not in _tables(db_path)
 
@@ -401,7 +469,15 @@ class TestMigrationTargets:
 
         manager.downgrade("sec02_a", "-1")
 
-        assert _versions(db_path) == {"sec02aa", "sec02bb"}
+        assert _versions(db_path) == _keys("sec02_a", "sec02aa") | _keys("sec02_b", "sec02ba", "sec02bb")
+
+    def test_relative_upgrade_runs_only_the_requested_count(self, two_apps: tuple[MigrationsManager, Path]) -> None:
+        manager, db_path = two_apps
+        manager.downgrade("sec02_a", "base")
+
+        assert manager.upgrade("sec02_a", "+1") == [("sec02_a", "sec02aa")]
+
+        assert _versions(db_path) == _keys("sec02_a", "sec02aa") | _keys("sec02_b", "sec02ba", "sec02bb")
 
     @pytest.mark.parametrize(
         ("method", "target"),
@@ -412,6 +488,8 @@ class TestMigrationTargets:
             ("upgrade", "sec02bb"),
             ("downgrade", "sec02_a@sec02ba"),
             ("upgrade", "sec02_a@sec02bb"),
+            ("upgrade", "+1"),
+            ("downgrade", "-3"),
         ],
     )
     def test_targets_outside_the_app_branch_are_rejected(
@@ -422,18 +500,18 @@ class TestMigrationTargets:
         with pytest.raises(MigrationError):
             getattr(manager, method)("sec02_a", target)
 
-        assert _versions(db_path) == {"sec02ab", "sec02bb"}
+        assert _versions(db_path) == _keys("sec02_a", "sec02aa", "sec02ab") | _keys("sec02_b", "sec02ba", "sec02bb")
 
 
-def test_percent_encoded_database_url_reaches_alembic(populate: Callable[..., ModuleRegistry], tmp_path: Path) -> None:
-    """URL-encoded characters (as in an encoded password) survive Alembic's config interpolation."""
+def test_percent_encoded_database_url_is_used_verbatim(populate: Callable[..., ModuleRegistry], tmp_path: Path) -> None:
+    """URL-encoded characters (as in an encoded password) reach the engine unchanged."""
 
     registry = populate(("sec03_app", "sec03"))
     db_path = tmp_path / "encoded.db"
 
     MigrationsManager(registry, f"{_database_url(db_path)}?timeout=%32%30").upgrade("sec03_app")
 
-    assert _versions(db_path) == {"sec03b"}
+    assert _versions(db_path) == _keys("sec03_app", "sec03a", "sec03b")
 
 
 def test_unreadable_database_is_an_error_not_an_empty_branch(
@@ -451,6 +529,318 @@ def test_unreadable_database_is_an_error_not_an_empty_branch(
     assert manager.check("sec10_app")[0].state == "unknown"
 
 
+@dataclass
+class _World:
+    """Three cross-dependent apps over one SQLite database."""
+
+    factory: ModuleFactory
+    db_path: Path
+    auth: str
+    orders: str
+    billing: str
+
+    def manager(self, *roots: str) -> MigrationsManager:
+        """A manager whose registry loads only *roots* and their manifest dependencies."""
+
+        registry = ModuleRegistry()
+        registry.populate(list(roots))
+        return MigrationsManager(registry, _database_url(self.db_path))
+
+    def write(self, app: str, rev: str, down: str | None, depends_on: tuple[str, ...] = (), **options: str) -> None:
+        """Write (or overwrite) one revision script of *app*."""
+
+        path = self.factory.root / app / "migrations" / f"{rev}.py"
+        path.write_text(_script(rev, down, depends_on, **options), encoding="utf-8")
+
+    def migrate(self, *apps: str) -> MigrationsManager:
+        """Upgrade *apps* (default: all three) with everything loaded."""
+
+        manager = self.manager(self.auth, self.orders, self.billing)
+        for app in apps or (self.auth, self.orders, self.billing):
+            manager.upgrade(app)
+        return manager
+
+
+@pytest.fixture
+def world(module_factory: ModuleFactory, tmp_path: Path) -> _World:
+    """auth (a1 -> a2); orders (o1) and billing (b1) each depend on auth:a2."""
+
+    auth = _chain_app(module_factory, "ms_auth", {"a1": _script("a1", None), "a2": _script("a2", "a1")})
+    dependency = (f"{auth}:a2",)
+    orders = _chain_app(module_factory, "ms_orders", {"o1": _script("o1", None, dependency)}, depends_on=(auth,))
+    billing = _chain_app(module_factory, "ms_billing", {"b1": _script("b1", None, dependency)}, depends_on=(auth,))
+    return _World(module_factory, tmp_path / "world.db", auth, orders, billing)
+
+
+class TestModuleScopedMigrations:
+    """Apps share one version table but only the requested app (and its prerequisites) ever moves."""
+
+    def test_unrelated_apps_with_same_revision_name_are_independent(
+        self, module_factory: ModuleFactory, tmp_path: Path
+    ) -> None:
+        left = _chain_app(module_factory, "ind_left", {"0001_initial": _script("0001_initial", None, table="left_t")})
+        right = _chain_app(
+            module_factory, "ind_right", {"0001_initial": _script("0001_initial", None, table="right_t")}
+        )
+        registry = ModuleRegistry()
+        registry.populate([left, right])
+        db_path = tmp_path / "independent.db"
+        manager = MigrationsManager(registry, _database_url(db_path))
+        manager.upgrade(left)
+        manager.upgrade(right)
+        _execute(db_path, "INSERT INTO right_t VALUES (7)")
+        before_right = _query(db_path, "SELECT * FROM bedrock_migrations WHERE app = 'ind_right'")
+
+        assert manager.downgrade(left, "base") == [(left, "0001_initial")]
+
+        assert _versions(db_path) == _keys(right, "0001_initial")
+        assert _tables(db_path) == {"right_t", "bedrock_migrations"}
+        assert _sqlite_rows(db_path, "SELECT id FROM right_t") == {7}
+        assert _query(db_path, "SELECT * FROM bedrock_migrations") == before_right
+
+    def test_partial_registry_upgrade_keeps_unloaded_rows(self, world: _World) -> None:
+        world.migrate()
+        world.write(world.orders, "o2", "o1", (f"{world.auth}:a2",))
+
+        assert world.manager(world.orders).upgrade(world.orders) == [(world.orders, "o2")]
+
+        assert _versions(world.db_path) == (
+            _keys(world.auth, "a1", "a2") | _keys(world.orders, "o1", "o2") | _keys(world.billing, "b1")
+        )
+        assert {"o2", "b1"} <= _tables(world.db_path)
+
+    def test_upgrade_runs_only_the_prerequisites_it_needs(self, world: _World) -> None:
+        world.write(world.auth, "a3", "a2")
+        world.manager(world.auth).upgrade(world.auth, "a1")
+
+        assert world.manager(world.orders).upgrade(world.orders) == [(world.auth, "a2"), (world.orders, "o1")]
+
+        assert _versions(world.db_path) == _keys(world.auth, "a1", "a2") | _keys(world.orders, "o1")
+        assert "a3" not in _tables(world.db_path)
+
+    def test_rollback_is_blocked_by_dependents_unless_cascade(self, world: _World) -> None:
+        manager = world.manager(world.orders)
+        manager.upgrade(world.auth)
+        manager.upgrade(world.orders)
+        before = _snapshot(world.db_path)
+
+        with pytest.raises(MigrationError, match=f"{world.orders}:o1"):
+            manager.downgrade(world.auth, "a1")
+        assert _snapshot(world.db_path) == before
+
+        assert manager.downgrade(world.auth, "a1", cascade=True) == [(world.orders, "o1"), (world.auth, "a2")]
+
+        assert _versions(world.db_path) == _keys(world.auth, "a1")
+        assert _tables(world.db_path) == {"a1", "bedrock_migrations"}
+
+    @pytest.mark.parametrize("cascade", [False, True])
+    def test_rollback_with_unloaded_dependent_is_always_refused(self, world: _World, cascade: bool) -> None:
+        world.migrate()
+        before = _snapshot(world.db_path)
+
+        with pytest.raises(MigrationError, match=f"{world.billing}:b1"):
+            world.manager(world.orders).downgrade(world.auth, "a1", cascade=cascade)
+
+        assert _snapshot(world.db_path) == before
+
+    def test_cascade_follows_dependents_transitively(self, module_factory: ModuleFactory, tmp_path: Path) -> None:
+        base = _chain_app(module_factory, "tr_base", {"t1": _script("t1", None)})
+        mid = _chain_app(module_factory, "tr_mid", {"m1": _script("m1", None, (f"{base}:t1",))}, depends_on=(base,))
+        top = _chain_app(module_factory, "tr_top", {"p1": _script("p1", None, (f"{mid}:m1",))}, depends_on=(mid,))
+        db_path = tmp_path / "transitive.db"
+
+        def manager(*roots: str) -> MigrationsManager:
+            registry = ModuleRegistry()
+            registry.populate(list(roots))
+            return MigrationsManager(registry, _database_url(db_path))
+
+        everything = manager(base, mid, top)
+        for app in (base, mid, top):
+            everything.upgrade(app)
+        before = _snapshot(db_path)
+
+        with pytest.raises(MigrationError, match=f"{mid}:m1"):
+            everything.downgrade(base, "base")
+        with pytest.raises(MigrationError, match=f"{top}:p1"):
+            manager(mid).downgrade(base, "base", cascade=True)
+        assert _snapshot(db_path) == before
+
+        assert everything.downgrade(base, "base", cascade=True) == [(top, "p1"), (mid, "m1"), (base, "t1")]
+        assert _tables(db_path) == {"bedrock_migrations"}
+        assert _versions(db_path) == set()
+
+    def test_missing_script_of_an_executed_migration_is_an_error(self, world: _World) -> None:
+        world.migrate()
+        (world.factory.root / world.orders / "migrations" / "o1.py").unlink()
+        before = _snapshot(world.db_path)
+
+        with pytest.raises(MigrationError, match="o1"):
+            world.manager(world.orders).upgrade(world.orders)
+
+        assert _snapshot(world.db_path) == before
+
+    @pytest.mark.parametrize(
+        ("executed", "rewritten"),
+        [(("ms_auth:a2",), ()), ((), ("ms_auth:a2",))],
+        ids=["dependency-removed", "dependency-added"],
+    )
+    def test_changed_dependencies_of_executed_migration_are_rejected(
+        self, world: _World, executed: tuple[str, ...], rewritten: tuple[str, ...]
+    ) -> None:
+        world.write(world.orders, "o1", None, executed)
+        world.migrate(world.auth, world.orders)
+        world.write(world.orders, "o1", None, rewritten)
+        world.write(world.orders, "o2", "o1", (f"{world.auth}:a2",))
+        before = _snapshot(world.db_path)
+        manager = world.manager(world.orders)
+
+        with pytest.raises(MigrationError, match="o1"):
+            manager.upgrade(world.orders)
+        with pytest.raises(MigrationError, match="o1"):
+            manager.downgrade(world.orders, "base")
+
+        assert _snapshot(world.db_path) == before
+
+    def test_removed_local_parent_blocks_cascade_before_first_step(self, world: _World) -> None:
+        world.write(world.orders, "o2", "o1")
+        world.migrate(world.auth, world.orders)
+        world.write(world.orders, "o2", None)
+        manager = world.manager(world.orders)
+        before = _snapshot(world.db_path)
+        with pytest.raises(MigrationError, match="Dependency drift.*o2"):
+            manager.downgrade(world.auth, "base", cascade=True)
+        assert _snapshot(world.db_path) == before
+
+
+class TestBaselineProtection:
+    """Baseline rows record imported positions, not scripts that ran, so nothing may undo them."""
+
+    @pytest.fixture
+    def baselined(self, world: _World) -> _World:
+        world.migrate(world.auth, world.orders)
+        _execute(world.db_path, "INSERT INTO a1 VALUES (7)")
+        return world
+
+    def _mark(self, world: _World, app: str, rev: str) -> None:
+        _execute(
+            world.db_path,
+            f"UPDATE bedrock_migrations SET origin = 'baseline' WHERE app = '{app}' AND revision = '{rev}'",
+        )
+
+    @pytest.mark.parametrize("operation", ["downgrade", "uninstall"])
+    def test_rollback_through_a_baseline_writes_nothing(self, baselined: _World, operation: str) -> None:
+        self._mark(baselined, baselined.auth, "a1")
+        before = _snapshot(baselined.db_path)
+        manager = baselined.manager(baselined.orders)
+
+        with pytest.raises(MigrationError, match="(?i)baseline"):
+            if operation == "downgrade":
+                manager.downgrade(baselined.auth, "base", cascade=True)
+            else:
+                manager.uninstall(baselined.auth, cascade=True)
+
+        assert _snapshot(baselined.db_path) == before
+        assert _sqlite_rows(baselined.db_path, "SELECT id FROM a1") == {7}
+
+    def test_cascade_reaching_a_baseline_writes_nothing(self, baselined: _World) -> None:
+        self._mark(baselined, baselined.orders, "o1")
+        before = _snapshot(baselined.db_path)
+
+        with pytest.raises(MigrationError, match="(?i)baseline"):
+            baselined.manager(baselined.orders).downgrade(baselined.auth, "a1", cascade=True)
+
+        assert _snapshot(baselined.db_path) == before
+
+    def test_rolling_back_to_the_baseline_itself_is_allowed(self, baselined: _World) -> None:
+        self._mark(baselined, baselined.auth, "a1")
+
+        steps = baselined.manager(baselined.orders).downgrade(baselined.auth, "a1", cascade=True)
+
+        assert steps == [(baselined.orders, "o1"), (baselined.auth, "a2")]
+        assert _versions(baselined.db_path) == _keys(baselined.auth, "a1")
+        assert _sqlite_rows(baselined.db_path, "SELECT id FROM a1") == {7}
+
+    def test_apps_outside_the_baseline_closure_still_roll_back(self, baselined: _World) -> None:
+        self._mark(baselined, baselined.auth, "a1")
+
+        assert baselined.manager(baselined.orders).downgrade(baselined.orders, "base") == [(baselined.orders, "o1")]
+
+        assert _versions(baselined.db_path) == _keys(baselined.auth, "a1", "a2")
+
+
+class TestMigrationFailures:
+    """A failing script leaves neither its DDL nor its version row behind on SQLite."""
+
+    @pytest.mark.parametrize("direction", ["upgrade", "downgrade"])
+    def test_failed_script_rolls_back_ddl_and_version_row(
+        self, module_factory: ModuleFactory, tmp_path: Path, direction: str
+    ) -> None:
+        app = _chain_app(module_factory, "rb_app", {"r1": _script("r1", None), "r2": _script("r2", "r1")})
+        registry = ModuleRegistry()
+        registry.populate([app])
+        db_path = tmp_path / "rollback.db"
+        manager = MigrationsManager(registry, _database_url(db_path))
+        script = module_factory.root / app / "migrations" / "r2.py"
+        if direction == "upgrade":
+            script.write_text(_script("r2", "r1", fail="upgrade"), encoding="utf-8")
+            with pytest.raises((MigrationError, RuntimeError)):
+                manager.upgrade(app)
+            assert _versions(db_path) == _keys(app, "r1")
+            assert _tables(db_path) == {"r1", "bedrock_migrations"}
+        else:
+            manager.upgrade(app)
+            script.write_text(_script("r2", "r1", fail="downgrade"), encoding="utf-8")
+            with pytest.raises((MigrationError, RuntimeError)):
+                manager.downgrade(app, "-1")
+            assert _versions(db_path) == _keys(app, "r1", "r2")
+            assert _tables(db_path) == {"r1", "r2", "bedrock_migrations"}
+
+
+class TestEnsureSchema:
+    """Installation runs the module's migrations; it never fabricates schema."""
+
+    def test_ensure_schema_requires_scripts(self, module_factory: ModuleFactory, tmp_path: Path) -> None:
+        app = _model_app(module_factory, "es_models", _model_source("Account", "account"))
+        registry = ModuleRegistry()
+        registry.populate([app])
+        db_path = tmp_path / "no_scripts.db"
+
+        with pytest.raises(MigrationError, match="migration scripts"):
+            MigrationsManager(registry, _database_url(db_path)).ensure_schema(app)
+
+        assert _tables(db_path) == set()
+
+    def test_ensure_schema_statuses(self, module_factory: ModuleFactory, tmp_path: Path) -> None:
+        app = _chain_app(module_factory, "es_chain", {"r1": _script("r1", None)})
+        registry = ModuleRegistry()
+        registry.populate([app])
+        db_path = tmp_path / "statuses.db"
+        manager = MigrationsManager(registry, _database_url(db_path))
+
+        assert manager.ensure_schema(app) == "created"
+        assert manager.ensure_schema(app) == "up-to-date"
+        (module_factory.root / app / "migrations" / "r2.py").write_text(_script("r2", "r1"), encoding="utf-8")
+        assert manager.ensure_schema(app) == "upgraded"
+
+        assert _tables(db_path) == {"r1", "r2", "bedrock_migrations"}
+
+    @pytest.mark.parametrize("method", ["upgrade", "downgrade", "ensure_schema", "uninstall"])
+    def test_legacy_alembic_state_requires_adopt(
+        self, populate: Callable[..., ModuleRegistry], tmp_path: Path, method: str
+    ) -> None:
+        registry = populate(("lg_app", "lg"))
+        db_path = tmp_path / "legacy.db"
+        _execute(db_path, "CREATE TABLE alembic_version (version_num VARCHAR(32) PRIMARY KEY)")
+        _execute(db_path, "INSERT INTO alembic_version VALUES ('lgb')")
+        manager = MigrationsManager(registry, _database_url(db_path))
+        args = ("lg_app", "base") if method == "downgrade" else ("lg_app",)
+
+        with pytest.raises(MigrationError, match="adopt"):
+            getattr(manager, method)(*args)
+
+        assert _tables(db_path) == {"alembic_version"}
+
+
 def _model_source(class_name: str, table: str, extra: str = "") -> str:
     """Define a model inside the temporary app that owns its table."""
     return (
@@ -463,8 +853,19 @@ def _model_source(class_name: str, table: str, extra: str = "") -> str:
     )
 
 
+def _model_app(
+    factory: ModuleFactory,
+    name: str,
+    models: str,
+    files: dict[str, str] | None = None,
+    manifest: dict[str, object] | None = None,
+) -> str:
+    """Create a model-owning app that has no migration scripts yet."""
+    return factory(name, models=models, files=files, manifest=manifest)
+
+
 def _migration_app(factory: ModuleFactory, name: str, models: str, files: dict[str, str] | None = None) -> str:
-    """Create a model-owning app with an empty, stampable initial revision."""
+    """Create a model-owning app whose only revision is an empty script in the legacy format (with branch_labels)."""
     return factory(
         name,
         models=models,
@@ -482,14 +883,65 @@ def _migration_app(factory: ModuleFactory, name: str, models: str, files: dict[s
     )
 
 
+def _install(manager: MigrationsManager, *apps: str) -> None:
+    """Generate each app's initial migration from its models, then run it."""
+    for app in apps:
+        manager.revision(app, "initial schema")
+        manager.ensure_schema(app)
+
+
+def _head_keys(manager: MigrationsManager, *apps: str) -> set[tuple[str, str]]:
+    return {(app, manager.heads(app)[0]) for app in apps}
+
+
+def _baseline(manager: MigrationsManager, *apps: str) -> None:
+    """Execute each app's empty initial revision so later revisions start from head."""
+    for app in apps:
+        manager.upgrade(app)
+
+
+def test_disjoint_registries_on_one_database(module_factory: ModuleFactory, tmp_path: Path) -> None:
+    core = _model_app(module_factory, "scope_core", _model_source("Account", "accounts"))
+    plugin = _model_app(module_factory, "scope_plugin", _model_source("Tag", "tags"))
+    core_registry, plugin_registry = ModuleRegistry(), ModuleRegistry()
+    core_registry.populate([core])
+    plugin_registry.populate([plugin])
+    db_path = tmp_path / "shared.db"
+    core_mgr = MigrationsManager(core_registry, _database_url(db_path))
+    plugin_mgr = MigrationsManager(plugin_registry, _database_url(db_path), version_table="plugin_migrations")
+    core_mgr.revision(core, "initial")
+    plugin_mgr.revision(plugin, "initial")
+    assert core_mgr.ensure_schema(core) == "created"
+    assert _tables(db_path) == {"accounts", "bedrock_migrations"}
+    assert plugin_mgr.current(plugin) == ()
+    assert plugin_mgr.upgrade(plugin) == [(plugin, "0001_initial")]
+    assert _tables(db_path) == {"accounts", "tags", "bedrock_migrations", "plugin_migrations"}
+    assert plugin_mgr.uninstall(plugin) == [(plugin, "0001_initial")]
+    assert core_mgr.current(core) == ("0001_initial",)
+    assert _tables(db_path) == {"accounts", "bedrock_migrations", "plugin_migrations"}
+    assert _versions(db_path) == {(core, "0001_initial")}
+    assert not _sqlite_rows(db_path, "SELECT revision FROM plugin_migrations")
+
+
+@pytest.mark.parametrize("reserved", ["plugin_versions", "plugin_versions_adopt"])
+def test_autogenerate_rejects_custom_ledger_model(module_factory: ModuleFactory, tmp_path: Path, reserved: str) -> None:
+    plugin = _model_app(module_factory, "bad_plugin", _model_source("Bad", reserved))
+    registry = ModuleRegistry()
+    registry.populate([plugin])
+    manager = MigrationsManager(registry, _database_url(tmp_path / "bad.db"), version_table="plugin_versions")
+    with pytest.raises(MigrationError, match="reserved"):
+        manager.revision(plugin, "initial")
+    assert not (module_factory.root / plugin / "migrations").exists()
+
+
 class TestTableOwnership:
-    """First installation creates only the tables actually owned by its app."""
+    """Generated initial migrations create only the tables actually owned by their app."""
 
     def test_first_install_includes_declared_association_table(
         self, module_factory: ModuleFactory, tmp_path: Path
     ) -> None:
-        core = _migration_app(module_factory, "ow_core", _model_source("Account", "account"))
-        plugin = _migration_app(
+        core = _model_app(module_factory, "ow_core", _model_source("Account", "account"))
+        plugin = _model_app(
             module_factory,
             "ow_plugin",
             "from sqlalchemy import Table, Column, Integer, ForeignKey\n"
@@ -498,20 +950,19 @@ class TestTableOwnership:
             "    Column('user_id', Integer, ForeignKey('account.id'), primary_key=True),\n"
             "    info={'bedrock_module': 'ow_plugin'})\n",
         )
-        other = _migration_app(module_factory, "ow_other", _model_source("Other", "other"))
+        other = _model_app(module_factory, "ow_other", _model_source("Other", "other"))
         registry = ModuleRegistry()
         registry.populate([core, plugin, other])
         db_path = tmp_path / "owned.db"
         manager = MigrationsManager(registry, _database_url(db_path))
-        manager.ensure_schema(core)
-        manager.ensure_schema(plugin)
+        _install(manager, core, plugin)
 
-        assert _tables(db_path) == {"account", "links", "alembic_version"}
-        assert _versions(db_path) == {"ow_core0", "ow_plugin0"}
+        assert _tables(db_path) == {"account", "links", "bedrock_migrations"}
+        assert _versions(db_path) == _head_keys(manager, core, plugin)
 
     def test_first_install_uses_definition_owner(self, module_factory: ModuleFactory, tmp_path: Path) -> None:
-        core = _migration_app(module_factory, "ow_core", _model_source("Account", "account"))
-        plugin = _migration_app(
+        core = _model_app(module_factory, "ow_core", _model_source("Account", "account"))
+        plugin = _model_app(
             module_factory,
             "ow_plugin",
             _model_source("Tag", "tag") + "from ow_core.models import Account as ImportedAccount\n",
@@ -519,12 +970,14 @@ class TestTableOwnership:
         registry = ModuleRegistry()
         registry.populate([core, plugin])
         db_path = tmp_path / "imported.db"
-        MigrationsManager(registry, _database_url(db_path)).ensure_schema(plugin)
-        assert _tables(db_path) == {"tag", "alembic_version"}
-        assert _versions(db_path) == {"ow_plugin0"}
+        manager = MigrationsManager(registry, _database_url(db_path))
+        _install(manager, plugin)
+
+        assert _tables(db_path) == {"tag", "bedrock_migrations"}
+        assert _versions(db_path) == _head_keys(manager, plugin)
 
     def test_first_install_includes_loaded_domain_models(self, module_factory: ModuleFactory, tmp_path: Path) -> None:
-        parent = _migration_app(
+        parent = _model_app(
             module_factory,
             "ow_app",
             "from .domain.models import Domain\nfrom .child.models import Child\n",
@@ -536,17 +989,18 @@ class TestTableOwnership:
                 "child/models.py": _model_source("Child", "child_table"),
             },
         )
-        neighbor = _migration_app(module_factory, "ow_application", _model_source("Neighbor", "neighbor"))
+        neighbor = _model_app(module_factory, "ow_application", _model_source("Neighbor", "neighbor"))
         registry = ModuleRegistry()
         registry.populate([parent, "ow_app.child", neighbor])
         db_path = tmp_path / "domains.db"
-        MigrationsManager(registry, _database_url(db_path)).ensure_schema(parent)
-        assert _tables(db_path) == {"domain_table", "alembic_version"}
+        _install(MigrationsManager(registry, _database_url(db_path)), parent)
+
+        assert _tables(db_path) == {"domain_table", "bedrock_migrations"}
 
     @pytest.mark.parametrize(
         "case", ["missing", "nonstring", "empty", "unknown", "no_models", "conflict", "shared", "unloaded"]
     )
-    def test_invalid_ownership_prevents_first_install(
+    def test_invalid_ownership_prevents_first_revision(
         self, module_factory: ModuleFactory, tmp_path: Path, case: str
     ) -> None:
         other = module_factory("ow_other")
@@ -571,31 +1025,34 @@ class TestTableOwnership:
                 models += "class Foreign(Invalid):\n    __module__ = 'ow_other.models'\n"
             else:
                 models += "Invalid.__module__ = 'unloaded.models'\n"
-        app = _migration_app(module_factory, "ow_invalid", models)
+        app = _model_app(module_factory, "ow_invalid", models)
         registry = ModuleRegistry()
         registry.populate([app, other])
         db_path = tmp_path / "invalid.db"
         with pytest.raises(MigrationError, match="invalid"):
-            MigrationsManager(registry, _database_url(db_path)).ensure_schema(app)
-        assert _tables(db_path) == set()
+            MigrationsManager(registry, _database_url(db_path)).revision(app, "initial schema")
+        assert list((module_factory.root / app / "migrations").glob("*.py")) == []
+        assert not _tables(db_path) - {"bedrock_migrations"}
 
     def test_empty_models_do_not_create_foreign_tables(self, module_factory: ModuleFactory, tmp_path: Path) -> None:
-        core = _migration_app(module_factory, "ow_core", _model_source("Account", "account"))
-        empty = _migration_app(module_factory, "ow_empty", "")
+        core = _model_app(module_factory, "ow_core", _model_source("Account", "account"))
+        empty = _model_app(module_factory, "ow_empty", "")
         registry = ModuleRegistry()
         registry.populate([core, empty])
         db_path = tmp_path / "empty.db"
-        MigrationsManager(registry, _database_url(db_path)).ensure_schema(empty)
-        assert _tables(db_path) == {"alembic_version"}
-        assert _versions(db_path) == {"ow_empty0"}
+        manager = MigrationsManager(registry, _database_url(db_path))
+        _install(manager, empty)
+
+        assert _tables(db_path) == {"bedrock_migrations"}
+        assert _versions(db_path) == _head_keys(manager, empty)
 
     def test_inheritance_keeps_table_owners(self, module_factory: ModuleFactory, tmp_path: Path) -> None:
-        parent = _migration_app(
+        parent = _model_app(
             module_factory,
             "ow_parent",
             _model_source("Parent", "parent") + "class LocalChild(Parent):\n    pass\n",
         )
-        child = _migration_app(
+        child = _model_app(
             module_factory,
             "ow_child",
             "from sqlalchemy import Column, ForeignKey, Integer\n"
@@ -608,17 +1065,16 @@ class TestTableOwnership:
         registry.populate([parent, child])
         db_path = tmp_path / "inheritance.db"
         manager = MigrationsManager(registry, _database_url(db_path))
-        manager.ensure_schema(parent)
-        assert _tables(db_path) == {"parent", "alembic_version"}
-        manager.ensure_schema(child)
-        assert _tables(db_path) == {"parent", "child", "alembic_version"}
+        _install(manager, parent)
+        assert _tables(db_path) == {"parent", "bedrock_migrations"}
+        _install(manager, child)
+        assert _tables(db_path) == {"parent", "child", "bedrock_migrations"}
 
-    @pytest.mark.parametrize("operation", ["revision", "ensure_schema"])
     @pytest.mark.parametrize("explicit_owner", [False, True])
-    def test_shared_table_requires_resolved_models_or_explicit_owner(
-        self, module_factory: ModuleFactory, tmp_path: Path, operation: str, explicit_owner: bool
+    def test_known_shared_table_owners_cannot_be_overridden(
+        self, module_factory: ModuleFactory, tmp_path: Path, explicit_owner: bool
     ) -> None:
-        core = _migration_app(
+        core = _model_app(
             module_factory,
             "ow_core",
             _model_source(
@@ -641,34 +1097,31 @@ class TestTableOwnership:
         registry.populate([core])
         db_path = tmp_path / "shared.db"
         manager = MigrationsManager(registry, _database_url(db_path))
-        scripts = module_factory.root / core / "migrations"
-        if operation == "revision":
-            command.stamp(manager._build_config(core), "heads")
 
-        def migrate() -> None:
-            if operation == "revision":
-                manager.revision(core, "add account")
-            else:
-                manager.ensure_schema(core)
-
-        if not explicit_owner:
-            with pytest.raises(MigrationError, match="ow_extension.models.ExtendedAccount"):
-                migrate()
-            assert {path.name for path in scripts.glob("*.py")} == {"initial.py"}
-            assert _tables(db_path) == ({"alembic_version"} if operation == "revision" else set())
-            if operation == "revision":
-                assert _versions(db_path) == {"ow_core0"}
-            return
-
-        migrate()
-        if operation == "revision":
-            manager.upgrade(core)
-        with sqlite3.connect(db_path) as connection:
-            assert [row[1] for row in connection.execute("PRAGMA table_info(account)")] == ["id", "extension_value"]
+        with pytest.raises(MigrationError, match="multiple apps"):
+            manager.revision(core, "initial schema")
+        assert list((module_factory.root / core / "migrations").glob("*.py")) == []
+        assert not _tables(db_path) - {"bedrock_migrations"}
 
         registry.install(extension)
         with pytest.raises(MigrationError, match="multiple apps"):
             manager.revision(core, "explicit owner cannot override a conflict")
+
+    def test_external_model_cannot_be_claimed_by_target(self, module_factory: ModuleFactory, tmp_path: Path) -> None:
+        target = _model_app(module_factory, "ow_target", _model_source("Local", "local"))
+        other = _model_app(
+            module_factory,
+            "ow_billing",
+            _model_source("Invoice", "invoice", "    __table_args__ = {'info': {'bedrock_module': 'ow_target'}}\n"),
+        )
+        registry = ModuleRegistry()
+        registry.populate([target])
+        ModuleRegistry().populate([other])
+        db_path = tmp_path / "external.db"
+        with pytest.raises(MigrationError, match="declares owner 'ow_target'.*belong to 'ow_billing'"):
+            MigrationsManager(registry, _database_url(db_path)).revision(target, "initial")
+        assert not list((module_factory.root / target / "migrations").glob("*.py"))
+        assert not _tables(db_path)
 
 
 @pytest.fixture
@@ -680,8 +1133,7 @@ def schema_engine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[s
     def attach(connection: sqlite3.Connection, _record: object) -> None:
         connection.execute("ATTACH DATABASE ? AS archive", (str(tmp_path / "archive.db"),))
 
-    monkeypatch.setattr(sa, "create_engine", lambda *args, **kwargs: engine)
-    monkeypatch.setattr(sa, "engine_from_config", lambda *args, **kwargs: engine)
+    monkeypatch.setattr("bedrock.database.migration.manager.create_engine", lambda *args, **kwargs: engine)
     try:
         yield engine
     finally:
@@ -705,7 +1157,7 @@ class TestAutogenerateIsolation:
         registry = ModuleRegistry()
         registry.populate([core, plugin])
         manager = MigrationsManager(registry, str(schema_engine.url))
-        command.stamp(manager._build_config(None), "heads")
+        _baseline(manager, core, plugin)
         with schema_engine.begin() as connection:
             connection.execute(sa.text("CREATE TABLE account (id INTEGER NOT NULL PRIMARY KEY)"))
             connection.execute(sa.text("INSERT INTO account (id) VALUES (42)"))
@@ -731,7 +1183,7 @@ class TestAutogenerateIsolation:
         registry.populate([core, plugin])
         db_path = tmp_path / "generate.db"
         manager = MigrationsManager(registry, _database_url(db_path))
-        command.stamp(manager._build_config(None), "heads")
+        _baseline(manager, core, plugin)
         own, foreign = ("account", "tag") if target == core else ("tag", "account")
         if foreign_exists:
             with sqlite3.connect(db_path) as connection:
@@ -739,11 +1191,11 @@ class TestAutogenerateIsolation:
                 connection.execute(f"INSERT INTO {foreign} VALUES (42)")
         manager.revision(target, "create owned table")
         manager.upgrade(target)
-        expected = {"alembic_version", foreign} if foreign_exists else {"alembic_version"}
+        expected = {"bedrock_migrations", foreign} if foreign_exists else {"bedrock_migrations"}
         assert _tables(db_path) == expected | {own}
         manager.downgrade(target, "-1")
         assert _tables(db_path) == expected
-        assert _versions(db_path) == {"ag_core0", "ag_plugin0"}
+        assert _versions(db_path) == {(core, "ag_core0"), (plugin, "ag_plugin0")}
         if foreign_exists:
             assert _sqlite_rows(db_path, f"SELECT id FROM {foreign}") == {42}
 
@@ -761,7 +1213,7 @@ class TestAutogenerateIsolation:
         registry.populate([core, plugin])
         db_path = tmp_path / "columns.db"
         manager = MigrationsManager(registry, _database_url(db_path))
-        command.stamp(manager._build_config(None), "heads")
+        _baseline(manager, core, plugin)
         with sqlite3.connect(db_path) as connection:
             connection.execute("CREATE TABLE account (id INTEGER NOT NULL PRIMARY KEY)")
             connection.execute("CREATE TABLE tag (id INTEGER NOT NULL PRIMARY KEY)")
@@ -777,7 +1229,7 @@ class TestAutogenerateIsolation:
             assert [row[1] for row in connection.execute("PRAGMA table_info(account)")] == ["id"]
 
     def test_association_foreign_key_is_retained(self, module_factory: ModuleFactory, tmp_path: Path) -> None:
-        core = _migration_app(module_factory, "ag_core", _model_source("Account", "account"))
+        core = _model_app(module_factory, "ag_core", _model_source("Account", "account"))
         plugin = _migration_app(
             module_factory,
             "ag_plugin",
@@ -791,8 +1243,8 @@ class TestAutogenerateIsolation:
         registry.populate([core, plugin])
         db_path = tmp_path / "foreign_key.db"
         manager = MigrationsManager(registry, _database_url(db_path))
-        manager.ensure_schema(core)
-        command.stamp(manager._build_config(None), "heads")
+        _install(manager, core)
+        _baseline(manager, plugin)
         manager.revision(plugin, "add account links")
         manager.upgrade(plugin)
         with sqlite3.connect(db_path) as connection:
@@ -800,7 +1252,7 @@ class TestAutogenerateIsolation:
                 ("account", "user_id", "id")
             ]
         manager.downgrade(plugin, "-1")
-        assert _tables(db_path) == {"account", "alembic_version"}
+        assert _tables(db_path) == {"account", "bedrock_migrations"}
 
     @pytest.mark.parametrize("case", ["missing", "conflict", "duplicate_schema"])
     def test_invalid_ownership_writes_no_revision(
@@ -822,23 +1274,12 @@ class TestAutogenerateIsolation:
         registry.populate([app, other])
         db_path = tmp_path / "invalid_generation.db"
         manager = MigrationsManager(registry, _database_url(db_path))
-        command.stamp(manager._build_config(None), "heads")
+        _baseline(manager, app, other)
         with pytest.raises(MigrationError):
             manager.revision(app, "must not be written")
         assert {p.name for p in (module_factory.root / app / "migrations").glob("*.py")} == {"initial.py"}
-        assert _versions(db_path) == {"ag_invalid0", "ag_other0"}
-        assert _tables(db_path) == {"alembic_version"}
-
-    def test_missing_autogenerate_scope_is_rejected(self, module_factory: ModuleFactory, tmp_path: Path) -> None:
-        app = _migration_app(module_factory, "ag_app", _model_source("Account", "account"))
-        registry = ModuleRegistry()
-        registry.populate([app])
-        manager = MigrationsManager(registry, _database_url(tmp_path / "missing_scope.db"))
-        cfg = manager._build_config(app)
-        command.stamp(cfg, "heads")
-        with pytest.raises(MigrationError):
-            command.revision(cfg, message="no scope", autogenerate=True, head=f"{app}@head")
-        assert {p.name for p in (module_factory.root / app / "migrations").glob("*.py")} == {"initial.py"}
+        assert _versions(db_path) == {(app, "ag_invalid0"), (other, "ag_other0")}
+        assert _tables(db_path) == {"bedrock_migrations"}
 
     def test_empty_module_generates_no_foreign_operations(self, module_factory: ModuleFactory, tmp_path: Path) -> None:
         core = _migration_app(module_factory, "ag_core", _model_source("Account", "account"))
@@ -847,18 +1288,18 @@ class TestAutogenerateIsolation:
         registry.populate([core, empty])
         db_path = tmp_path / "empty_generation.db"
         manager = MigrationsManager(registry, _database_url(db_path))
-        command.stamp(manager._build_config(None), "heads")
+        _baseline(manager, core, empty)
         manager.revision(empty, "no owned changes")
         manager.upgrade(empty)
         manager.uninstall(empty)
-        assert _tables(db_path) == {"alembic_version"}
-        assert _versions(db_path) == {"ag_core0"}
+        assert _tables(db_path) == {"bedrock_migrations"}
+        assert _versions(db_path) == {(core, "ag_core0")}
 
     @pytest.mark.parametrize("schema", [None, "main"])
     def test_default_schema_aliases_do_not_create_phantom_tables(
         self, module_factory: ModuleFactory, tmp_path: Path, schema: str | None
     ) -> None:
-        app = _migration_app(
+        app = _model_app(
             module_factory,
             "ag_app",
             _model_source("Account", "account", f"    __table_args__ = {{'schema': {schema!r}}}\n"),
@@ -867,7 +1308,7 @@ class TestAutogenerateIsolation:
         registry.populate([app])
         db_path = tmp_path / "default_schema.db"
         manager = MigrationsManager(registry, _database_url(db_path))
-        manager.ensure_schema(app)
+        _install(manager, app)
         with sqlite3.connect(db_path) as connection:
             connection.execute("INSERT INTO account VALUES (42)")
         manager.revision(app, "no changes")
@@ -878,22 +1319,22 @@ class TestAutogenerateIsolation:
     def test_install_uninstall_preserves_foreign_data_and_revision(
         self, module_factory: ModuleFactory, tmp_path: Path
     ) -> None:
-        core = _migration_app(module_factory, "ag_core", _model_source("Account", "account"))
+        core = _model_app(module_factory, "ag_core", _model_source("Account", "account"))
         plugin = module_factory("ag_plugin", models=_model_source("Tag", "tag"), files={"migrations/__init__.py": ""})
         registry = ModuleRegistry()
         registry.populate([core, plugin])
         db_path = tmp_path / "lifecycle.db"
         manager = MigrationsManager(registry, _database_url(db_path))
-        manager.ensure_schema(core)
+        _install(manager, core)
         with sqlite3.connect(db_path) as connection:
             connection.execute("INSERT INTO account VALUES (42)")
         manager.revision(plugin, "initial plugin")
         assert manager.ensure_schema(plugin) == "created"
-        assert _tables(db_path) == {"account", "tag", "alembic_version"}
+        assert _tables(db_path) == {"account", "tag", "bedrock_migrations"}
         manager.uninstall(plugin)
-        assert _tables(db_path) == {"account", "alembic_version"}
+        assert _tables(db_path) == {"account", "bedrock_migrations"}
         assert _sqlite_rows(db_path, "SELECT id FROM account") == {42}
-        assert _versions(db_path) == {"ag_core0"}
+        assert _versions(db_path) == _head_keys(manager, core)
 
     def test_removed_model_requires_explicit_drop(self, module_factory: ModuleFactory, tmp_path: Path) -> None:
         app = _migration_app(module_factory, "ag_app", "")
@@ -901,14 +1342,14 @@ class TestAutogenerateIsolation:
         registry.populate([app])
         db_path = tmp_path / "historical.db"
         manager = MigrationsManager(registry, _database_url(db_path))
-        command.stamp(manager._build_config(None), "heads")
+        _baseline(manager, app)
         with sqlite3.connect(db_path) as connection:
             connection.execute("CREATE TABLE removed (id INTEGER NOT NULL PRIMARY KEY)")
             connection.execute("INSERT INTO removed VALUES (42)")
         manager.revision(app, "no inferred drop")
         manager.upgrade(app)
         assert _sqlite_rows(db_path, "SELECT id FROM removed") == {42}
-        revision = manager.get_history(app)[0]["revision"]
+        revision = manager.heads(app)[0]
         (module_factory.root / app / "migrations" / "explicit.py").write_text(
             "from alembic import op\nimport sqlalchemy as sa\n"
             "revision = 'explicit_drop'\n"
@@ -922,3 +1363,40 @@ class TestAutogenerateIsolation:
         assert "removed" not in _tables(db_path)
         manager.downgrade(app, "-1")
         assert "removed" in _tables(db_path)
+
+    def test_revision_requires_app_at_head(self, module_factory: ModuleFactory, tmp_path: Path) -> None:
+        app = _migration_app(module_factory, "ag_app", "")
+        registry = ModuleRegistry()
+        registry.populate([app])
+        manager = MigrationsManager(registry, _database_url(tmp_path / "behind.db"))
+
+        with pytest.raises(MigrationError, match="not at head"):
+            manager.revision(app, "pending revision exists")
+
+        assert {p.name for p in (module_factory.root / app / "migrations").glob("*.py")} == {"initial.py"}
+
+    def test_revision_records_dependency_heads_once(self, module_factory: ModuleFactory, tmp_path: Path) -> None:
+        auth = _model_app(module_factory, "dp_auth", "")
+        orders = _model_app(
+            module_factory,
+            "dp_orders",
+            "",
+            manifest={"title": "Orders", "version": "0.1.0", "depends_on": [auth]},
+        )
+        registry = ModuleRegistry()
+        registry.populate([auth, orders])
+        manager = MigrationsManager(registry, _database_url(tmp_path / "deps.db"))
+
+        def generate(app: str, message: str) -> str:
+            """Generate and run a revision; return its recorded depends_on."""
+            manager.revision(app, message)
+            manager.upgrade(app)
+            head = manager.heads(app)[0]
+            return {entry["revision"]: entry["depends_on"] for entry in manager.get_history(app)}[head]
+
+        assert generate(auth, "initial") == ""
+        auth_first = manager.heads(auth)[0]
+        assert generate(orders, "initial") == f"{auth}:{auth_first}"
+        assert generate(orders, "second") == ""
+        generate(auth, "email")
+        assert generate(orders, "third") == f"{auth}:{manager.heads(auth)[0]}"

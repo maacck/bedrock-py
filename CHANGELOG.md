@@ -9,7 +9,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
-- **Migration table ownership**: autogeneration and first-install table creation now reject
+- **Module-scoped migrations**: Bedrock now records migrations in its own `bedrock_migrations`
+  table (primary key `(app, revision)`) instead of Alembic's `alembic_version`. Alembic is used
+  only as a library to execute and autogenerate scripts; `env.py` and `script.py.mako` are gone.
+  Generated revisions get module-local full names such as `0001_initial` (the file stem is the
+  name); existing revision IDs are not renumbered, and the next name continues from the old head.
+  - **Python imports:** `bedrock.database.migrations_manager` was removed. Use
+    `from bedrock.database import MigrationsManager` (unchanged); migration internals now live in `bedrock.database.migration`.
+  - **Existing databases**: load every module and run `bedrock db adopt <app> ...` once. Until
+    then every migration command refuses to run. Adopt imports protected `baseline` rows
+    atomically, executes no script, and leaves `alembic_version` untouched as an audit snapshot.
+    Baseline rows cannot be rolled back, and old heads are resolved through that deployment's own
+    revision graph. Back up first; after the new version has written to the database, restore a
+    matching database, program, and migration files together instead of switching back to old
+    code. Alembic's native CLI must no longer be used on Bedrock-managed databases.
+    Preserve published IDs and operation bodies; qualify verified legacy cross-module references
+    before adoption. See the database guide for a worked conversion and rehearsal.
+  - All migration CLI entry points use the initialized database URL and its resolved ledger and lock settings together.
+    The ledger snapshots all direct parents, including local `down_revision` edges, on execution and adoption;
+    drift blocks writes. A prerelease cross-only ledger is incompatible and is not silently backfilled.
+    Autogeneration rejects explicit ownership that contradicts an identified external module.
+  - **First install** runs migrations instead of `create_all` plus stamp; a module with models but
+    no migration scripts raises `MigrationError`. Run `bedrock db revision <app> -m "initial schema"`
+    first. `ensure_schema()` returns `"created"`, `"upgraded"`, or `"up-to-date"`.
+  - **Cross-module dependencies**: revision generation writes qualified `app:revision` entries to
+    `depends_on`, which must be direct manifest dependencies; bare names are rejected. Upgrades run
+    only the target's dependency closure. Generation requires the module to be at head.
+  - **Rollback** is blocked while other modules' applied migrations depend on it. Pass
+    `cascade=True` (`--cascade`) to roll dependents back first; dependents that are not loaded
+    (`--load <app>` loads one) always fail, and so do baseline rows, before any DDL runs.
+  - **Custom version table**: `MigrationsManager(..., *, version_table="bedrock_migrations")` and
+    `DATABASE_MIGRATION_VERSION_TABLE` (`DbSettings.MIGRATION_VERSION_TABLE`) choose the ledger
+    name (lowercase simple SQL identifier, at most 57 characters; the name and `<name>_adopt` are
+    reserved and a name must not end in `_adopt`). Programmatic code may run independent registries
+    with separate ledgers on one database, provided their module sets own disjoint model tables and
+    have no cross-ledger migration dependencies; all managers share the same database lock. The
+    host and CLI use one configured root set and one ledger (no CLI flag). Never rename a table to
+    switch ledgers. `adopt` imports the whole legacy baseline into the configured ledger.
+    For a confirmed new independent registry added after the core was adopted, use
+    `bedrock db init-ledger <root> ... --adopted-ledger <source>` (`mgr.init_ledger(adopted_ledger=...)`)
+    to create only an empty ledger (no baseline rows or migration execution). It checks the adopted ledger
+    read-only and refuses overlap, existing model-owned tables, or a conflicting target/staging table.
+  - Generated revisions are reviewable drafts; runtime uses only the committed declared `depends_on` graph and never infers dependencies from foreign keys.
+  - **Removed or changed APIs**: `BranchOwnershipError`, `branch_labels` (ignored when present),
+    `MigrationsManager(script_location=...)`, and the `<app>@<target>` target syntax are removed.
+    Targets are `head`, `+N`, `base`, `-N`, or a full local revision name. `heads()` and
+    `current()` return tuples, `upgrade()`/`downgrade()`/`uninstall()` return the executed
+    `(app, revision)` steps, `RevisionHistoryEntry.branch_labels` becomes `depends_on`, and
+    `bedrock db history` shows Depends On instead of Branch Labels.
+  - **Transactions**: each migration runs in its own transaction. Scripts must not commit or use
+    `autocommit_block()`; MySQL and MariaDB cannot roll back failed DDL, so compare the real
+    schema before retrying.
+- **Migration table ownership**: autogeneration now rejects
   missing, conflicting, or unloaded table owners with `MigrationError`. Ordinary ORM models
   are inferred from their defining package and need no annotation. Unmapped association
   `Table` objects must declare `info={"bedrock_module": "myapp.module"}`; any explicit ORM
@@ -17,7 +68,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `models` module; keep mappings of one shared table in one module. No database ownership
   table or backfill is needed. Tables whose models were removed require explicit drop
   migrations. Existing generated scripts are not rewritten: audit both upgrade and downgrade
-  before installing, rolling back, or uninstalling affected modules, including stamped revisions.
+  before installing, rolling back, or uninstalling affected modules.
+- **CLI command groups**: only `run`, `app`, and `db` remain.
+  - `bedrock manage` is removed, including dynamic registration of module commands. Business
+    commands run as `bedrock run --app ROOT MODULE COMMAND`.
+  - `bedrock manage -A ROOT install --app TARGET` becomes `bedrock app install TARGET --root ROOT`.
+    `bedrock manage install` with `BEDROCK_APP` set becomes
+    `bedrock app install "$BEDROCK_APP" --with-dependencies`.
+  - `bedrock app install TARGET [--root ROOT] [--with-dependencies] [--skip-migrations]` installs
+    only TARGET by default. `--root` selects the load context only. `--with-dependencies` installs
+    TARGET's manifest dependency closure once each, in dependency order. `--skip-migrations`
+    still skips the schema step only.
+  - `bedrock db uninstall <app> [--cascade] [--load <app>]` is removed; use
+    `bedrock db downgrade <app> base [--cascade] [--load <app>]`. `MigrationsManager.uninstall()` remains in Python.
+  - `bedrock-cli add submodule` is renamed `bedrock-cli add module`. Generated modules and
+    `bedrock-cli init` projects no longer include an empty `models.py`; add one when the module owns tables.
 - **Cache backend protocol**: custom backends registered with `register_backend()` must implement
   `compare_and_expire(key, expected, ex) -> bool` and `acompare_and_expire(...)`: reset the key's TTL to
   `ex` seconds only when its value equals `expected`, atomically, and return whether it did.

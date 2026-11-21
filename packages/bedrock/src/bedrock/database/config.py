@@ -40,6 +40,8 @@ class DbSettings(BaseSettings):
         POOL_SIZE: Steady-state pool size; must be at least 1.
         POOL_RECYCLE: Seconds before a pooled connection is recycled.
         MIGRATION_LOCK_TIMEOUT: Seconds to wait for the migration lock.
+        MIGRATION_VERSION_TABLE: Name of the table that records applied migrations.
+            The manager validates it (lowercase simple SQL identifier, at most 57 characters).
         SCHEMA: Database name, or a SQLite file path.
     """
 
@@ -57,6 +59,7 @@ class DbSettings(BaseSettings):
     POOL_SIZE: int = 10
     POOL_RECYCLE: int = 1800
     MIGRATION_LOCK_TIMEOUT: float = 30
+    MIGRATION_VERSION_TABLE: str = "bedrock_migrations"
     SCHEMA: str = "bedrock.db"
 
     @model_validator(mode="after")

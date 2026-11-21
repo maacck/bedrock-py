@@ -10,18 +10,16 @@ from typer.testing import CliRunner
 runner = CliRunner()
 
 
-class TestAddSubmodule:
-    def test_creates_submodule_structure(self) -> None:
+class TestAddModule:
+    def test_creates_module_structure(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            result = runner.invoke(
-                app, ["add", "submodule", "inventory", tmpdir, "--no-bootstrap", "--no-installation"]
-            )
+            result = runner.invoke(app, ["add", "module", "inventory", tmpdir, "--no-bootstrap", "--no-installation"])
             assert result.exit_code == 0
 
             mod_dir = Path(tmpdir) / "inventory"
             assert (mod_dir / "__init__.py").exists()
             assert (mod_dir / "manifest.yaml").exists()
-            assert (mod_dir / "models.py").exists()
+            assert not (mod_dir / "models.py").exists()
             assert (mod_dir / "entities.py").exists()
             assert (mod_dir / "exc.py").exists()
             assert not (mod_dir / "bootstrap.py").exists()
@@ -29,21 +27,19 @@ class TestAddSubmodule:
 
     def test_with_bootstrap(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            result = runner.invoke(app, ["add", "submodule", "auth", tmpdir, "--bootstrap", "--no-installation"])
+            result = runner.invoke(app, ["add", "module", "auth", tmpdir, "--bootstrap", "--no-installation"])
             assert result.exit_code == 0
             assert (Path(tmpdir) / "auth" / "bootstrap.py").exists()
 
     def test_with_installation(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            result = runner.invoke(app, ["add", "submodule", "auth", tmpdir, "--no-bootstrap", "--installation"])
+            result = runner.invoke(app, ["add", "module", "auth", tmpdir, "--no-bootstrap", "--installation"])
             assert result.exit_code == 0
             assert (Path(tmpdir) / "auth" / "installation.py").exists()
 
     def test_slugifies_name(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            result = runner.invoke(
-                app, ["add", "submodule", "User-Auth", tmpdir, "--no-bootstrap", "--no-installation"]
-            )
+            result = runner.invoke(app, ["add", "module", "User-Auth", tmpdir, "--no-bootstrap", "--no-installation"])
             assert result.exit_code == 0
             assert (Path(tmpdir) / "user_auth" / "manifest.yaml").exists()
 
@@ -53,9 +49,7 @@ class TestAddSubmodule:
             mod_dir.mkdir()
             (mod_dir / "existing.py").write_text("x", encoding="utf-8")
 
-            result = runner.invoke(
-                app, ["add", "submodule", "inventory", tmpdir, "--no-bootstrap", "--no-installation"]
-            )
+            result = runner.invoke(app, ["add", "module", "inventory", tmpdir, "--no-bootstrap", "--no-installation"])
             assert result.exit_code == 1
 
     def test_overwrite_flag(self) -> None:
@@ -65,14 +59,14 @@ class TestAddSubmodule:
             (mod_dir / "old.py").write_text("x", encoding="utf-8")
 
             result = runner.invoke(
-                app, ["add", "submodule", "inventory", tmpdir, "--no-bootstrap", "--no-installation", "--overwrite"]
+                app, ["add", "module", "inventory", tmpdir, "--no-bootstrap", "--no-installation", "--overwrite"]
             )
             assert result.exit_code == 0
             assert (mod_dir / "manifest.yaml").exists()
 
     def test_manifest_content(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            runner.invoke(app, ["add", "submodule", "billing", tmpdir, "--no-bootstrap", "--no-installation"])
+            runner.invoke(app, ["add", "module", "billing", tmpdir, "--no-bootstrap", "--no-installation"])
             manifest = (Path(tmpdir) / "billing" / "manifest.yaml").read_text(encoding="utf-8")
             assert "billing" in manifest
             assert "0.1.0" in manifest

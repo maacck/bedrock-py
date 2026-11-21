@@ -23,7 +23,7 @@ class TestInitCommand:
             assert (project_dir / "README.md").exists()
             assert (project_dir / "src" / "my_app" / "__init__.py").exists()
             assert (project_dir / "src" / "my_app" / "manifest.yaml").exists()
-            assert (project_dir / "src" / "my_app" / "models.py").exists()
+            assert not (project_dir / "src" / "my_app" / "models.py").exists()
             assert (project_dir / "src" / "my_app" / "bootstrap.py").exists()
             assert (project_dir / "src" / "my_app" / "installation.py").exists()
             assert (project_dir / "src" / "my_app" / "exc.py").exists()
