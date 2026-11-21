@@ -191,18 +191,20 @@ results = ns.call("authenticate", user="alice", password="s3cret")
 Bedrock provides CLI tools for common operations:
 
 ```bash
-# Module management
+# Module inspection (read) and installation (write)
 bedrock app inspect <module>   # Validate manifest
 bedrock app info <module>      # Display module details
-bedrock app install <module>   # Run migrations and hooks
+bedrock app install <module>   # Target only: schema, then install hooks
+bedrock app install <module> --with-dependencies   # Also its depends_on closure
 
 # Database migrations
 bedrock db revision <module> -m "description"
 bedrock db upgrade <module>
+bedrock db downgrade <module> base   # Remove a module's schema
 bedrock db history <module>
 
 # Run module commands
-bedrock run --app <module> <module> <command>
+bedrock run --app <root_module> <module> <command>
 ```
 
 ## Project Goals

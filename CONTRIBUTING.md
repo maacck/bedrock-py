@@ -232,9 +232,10 @@ For every user-visible change in that range:
 
 - [ ] `CHANGELOG.md` `[Unreleased]` has an entry; breaking changes state the migration.
 - [ ] Web Doc pages in `docs-web/content/docs/en/` and `zh/` describe the current signatures and behavior.
-- [ ] `skills/bedrock/` and `skills/bedrock-cli/` (`SKILL.md`, references, templates) match the code.
+- [ ] Write skills for developers building their own applications with Bedrock. They must work without a Bedrock source checkout. Keep instructions for developing Bedrock itself in the contributor docs, not in published skills.
+- [ ] The bundled `bedrock` and `bedrock-cli` skills match the code. `bedrock-live` points to current documentation rather than duplicating API guides.
 - [ ] Contrib playbooks (`contrib/*/playbook/`) match their package.
-- [ ] No doc, skill, or playbook mentions a removed or renamed symbol (grep each one).
+- [ ] No current doc, skill, or playbook mentions a removed or renamed symbol.
 
 Then verify:
 

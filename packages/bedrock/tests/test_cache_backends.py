@@ -151,3 +151,26 @@ class TestRedisClear:
         assert async_client.scan_calls == [(b"users:*", 100)]
         async_client.delete.assert_not_awaited()
         async_client.flushdb.assert_not_awaited()
+
+
+def test_async_loader_allows_threaded_cache_work_and_coalesces_callers() -> None:
+    """Awaiting a provider must not hold the thread lock needed by its worker."""
+    backend = InMemoryBackend()
+    calls = 0
+
+    async def load() -> bytes:
+        nonlocal calls
+        calls += 1
+        await asyncio.to_thread(backend.set, "side-effect", b"stored")
+        return b"loaded"
+
+    async def scenario() -> None:
+        values = await asyncio.wait_for(
+            asyncio.gather(backend.aget_or_set("shared", load), backend.aget_or_set("shared", load)),
+            timeout=5,
+        )
+        assert values == [b"loaded", b"loaded"]
+        assert calls == 1
+        assert await backend.aget("side-effect") == b"stored"
+
+    asyncio.run(scenario())

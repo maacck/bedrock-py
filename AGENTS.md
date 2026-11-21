@@ -109,7 +109,7 @@ A change to a public signature, behavior, default, error type, configuration key
 |---|---|---|
 |Changelog|`CHANGELOG.md`; `integrations/<framework>/CHANGELOG.md` for an integration|Entry under `## [Unreleased]`; breaking changes state the migration|
 |Web Doc|`docs-web/content/docs/{en,zh}/`|Affected pages in both languages; `meta.json` for new pages|
-|Agent skills|`skills/bedrock/`, `skills/bedrock-cli/`|`SKILL.md`, affected `references/*.md`, templates|
+|Agent skills|`skills/bedrock/`, `skills/bedrock-live/`, `skills/bedrock-cli/`|Keep bundled references and templates aligned with the code; update live lookup and decision guidance where affected.|
 |Playbooks|`packages/bedrock/src/bedrock/contrib/*/playbook/`|When a contrib API changes|
 
 Completion: no surface references a removed or renamed API, and every code example matches current signatures. Internal changes with no user-visible effect need none of these.

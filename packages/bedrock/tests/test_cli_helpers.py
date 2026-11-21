@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import bedrock.cli.apps as cli_apps
+import bedrock.cli.db as cli_db
 import bedrock.cli.run as cli_run
 import pytest
 import typer
@@ -290,7 +291,6 @@ class TestInstallCommand:
 
         app_config = self._make_app_config()
         self._patch_apps_get(monkeypatch, app_config)
-        monkeypatch.setattr(cli_apps, "_bootstrap_migrations_manager", lambda: None)
         monkeypatch.setattr(cli_apps.os.path, "exists", lambda path: True)
         monkeypatch.setattr(
             cli_apps,
@@ -333,7 +333,7 @@ class TestInstallCommand:
         app_config.models_module = object()
 
         self._patch_apps_get(monkeypatch, app_config)
-        monkeypatch.setattr(cli_apps, "_bootstrap_migrations_manager", lambda: manager)
+        monkeypatch.setattr(cli_db, "build_migrations_manager", lambda registry: manager)
         monkeypatch.setattr(cli_apps.os.path, "exists", lambda path: True)
         monkeypatch.setattr(
             cli_apps,
@@ -348,7 +348,6 @@ class TestInstallCommand:
     def test_install_skips_hooks_when_no_installation_py(self, monkeypatch: pytest.MonkeyPatch) -> None:
         app_config = self._make_app_config()
         self._patch_apps_get(monkeypatch, app_config)
-        monkeypatch.setattr(cli_apps, "_bootstrap_migrations_manager", lambda: None)
         monkeypatch.setattr(cli_apps.os.path, "exists", lambda path: False)
 
         cli_apps.install("demo.app", skip_migrations=True)
@@ -356,7 +355,6 @@ class TestInstallCommand:
     def test_install_skips_hooks_when_no_install_function(self, monkeypatch: pytest.MonkeyPatch) -> None:
         app_config = self._make_app_config()
         self._patch_apps_get(monkeypatch, app_config)
-        monkeypatch.setattr(cli_apps, "_bootstrap_migrations_manager", lambda: None)
         monkeypatch.setattr(cli_apps.os.path, "exists", lambda path: True)
         monkeypatch.setattr(cli_apps, "load_optional_callable", lambda path: None)
 
@@ -370,7 +368,6 @@ class TestInstallCommand:
 
         app_config = self._make_app_config()
         self._patch_apps_get(monkeypatch, app_config)
-        monkeypatch.setattr(cli_apps, "_bootstrap_migrations_manager", lambda: None)
         monkeypatch.setattr(cli_apps.os.path, "exists", lambda path: True)
         monkeypatch.setattr(
             cli_apps,
@@ -392,7 +389,7 @@ class TestInstallCommand:
             cli_apps.install("nonexistent.app", skip_migrations=True)
 
     def test_install_raises_on_migration_failure(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from bedrock.database.migrations_manager import MigrationError
+        from bedrock.database import MigrationError
 
         manager = MagicMock()
         manager.ensure_schema.side_effect = MigrationError("schema failed")
@@ -401,7 +398,7 @@ class TestInstallCommand:
         app_config.models_module = object()
 
         self._patch_apps_get(monkeypatch, app_config)
-        monkeypatch.setattr(cli_apps, "_bootstrap_migrations_manager", lambda: manager)
+        monkeypatch.setattr(cli_db, "build_migrations_manager", lambda registry: manager)
 
         with pytest.raises(typer.Exit):
             cli_apps.install("demo.app", skip_migrations=False)
@@ -422,10 +419,6 @@ class TestPlaybookCommand:
         def print(self, *args: object, **kwargs: object) -> None:
             self.messages.append((args, kwargs))
 
-    @staticmethod
-    def _make_app_config(package_dir: Path) -> SimpleNamespace:
-        return SimpleNamespace(package_dir=package_dir)
-
     def _patch_console(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self._ConsoleDouble.instances.clear()
         monkeypatch.setattr(cli_apps, "Console", self._ConsoleDouble)
@@ -440,7 +433,7 @@ class TestPlaybookCommand:
         (playbook_dir / "PLAYBOOK.md").write_text("default playbook\n", encoding="utf-8")
 
         self._patch_console(monkeypatch)
-        monkeypatch.setattr(cli_apps, "build_app_config", lambda import_path: self._make_app_config(package_dir))
+        monkeypatch.setattr(cli_apps, "_package_dir", lambda import_path: package_dir)
 
         cli_apps.playbook("demo.app")
 
@@ -454,7 +447,7 @@ class TestPlaybookCommand:
         (playbook_dir / "some-file.md").write_text("referenced playbook\n", encoding="utf-8")
 
         self._patch_console(monkeypatch)
-        monkeypatch.setattr(cli_apps, "build_app_config", lambda import_path: self._make_app_config(package_dir))
+        monkeypatch.setattr(cli_apps, "_package_dir", lambda import_path: package_dir)
 
         cli_apps.playbook("demo.app", "references/some-file.md")
 
@@ -479,7 +472,7 @@ class TestPlaybookCommand:
         (package_dir / "playbook").mkdir(parents=True)
 
         self._patch_console(monkeypatch)
-        monkeypatch.setattr(cli_apps, "build_app_config", lambda import_path: self._make_app_config(package_dir))
+        monkeypatch.setattr(cli_apps, "_package_dir", lambda import_path: package_dir)
 
         with pytest.raises(typer.Exit) as exc_info:
             cli_apps.playbook("demo.app", path)
@@ -491,7 +484,7 @@ class TestPlaybookCommand:
         self._patch_console(monkeypatch)
         monkeypatch.setattr(
             cli_apps,
-            "build_app_config",
+            "_package_dir",
             lambda import_path: (_ for _ in ()).throw(
                 InvalidManifestError("Cannot locate package for import path 'demo.app'.")
             ),
@@ -512,7 +505,7 @@ class TestPlaybookCommand:
         package_dir.mkdir()
 
         self._patch_console(monkeypatch)
-        monkeypatch.setattr(cli_apps, "build_app_config", lambda import_path: self._make_app_config(package_dir))
+        monkeypatch.setattr(cli_apps, "_package_dir", lambda import_path: package_dir)
 
         with pytest.raises(typer.Exit) as exc_info:
             cli_apps.playbook("demo.app")
@@ -528,7 +521,7 @@ class TestPlaybookCommand:
         playbook_dir.mkdir(parents=True)
 
         self._patch_console(monkeypatch)
-        monkeypatch.setattr(cli_apps, "build_app_config", lambda import_path: self._make_app_config(package_dir))
+        monkeypatch.setattr(cli_apps, "_package_dir", lambda import_path: package_dir)
 
         with pytest.raises(typer.Exit) as exc_info:
             cli_apps.playbook("demo.app", "references/missing.md")
@@ -542,3 +535,24 @@ class TestPlaybookCommand:
                 {},
             )
         ]
+
+    def test_playbook_reads_package_without_building_app_config(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        package_dir = tmp_path / "playbook_only_app"
+        (package_dir / "playbook").mkdir(parents=True)
+        (package_dir / "__init__.py").write_text("raise RuntimeError('package must not be imported')\n")
+        (package_dir / "models.py").write_text("raise RuntimeError('models must not be imported')\n")
+        (package_dir / "bootstrap.py").write_text("raise RuntimeError('bootstrap must not be imported')\n")
+        (package_dir / "manifest.yaml").write_text("title: Playbook only\n")
+        (package_dir / "playbook" / "PLAYBOOK.md").write_text("packaged docs\n", encoding="utf-8")
+
+        self._patch_console(monkeypatch)
+        monkeypatch.syspath_prepend(str(tmp_path))
+        monkeypatch.setattr(
+            cli_apps, "build_app_config", lambda import_path: pytest.fail("AppConfig must not be built")
+        )
+
+        cli_apps.playbook("playbook_only_app")
+
+        assert self._latest_messages() == [(("packaged docs\n",), {"markup": False, "highlight": False, "end": ""})]

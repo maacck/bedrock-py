@@ -51,6 +51,8 @@ Register extensions in `bootstrap.py:on_load` with `register_backend(name, backe
 
 Backends live in a `bedrock.provider.ProviderCatalog[CacheBackend]` that imports built-in paths on demand. `configure()` translates an unknown name, a failed import (the message names the install requirement, e.g. `bedrock-core[cache-redis]`), or an object that does not implement `CacheBackend` to `BackendNotConfiguredError` with the provider error as the cause. Other constructor errors propagate unchanged. The catalog does not own instances; the service does.
 
+Custom backends must implement atomic `compare_and_expire(key: str, expected: bytes, ex: int) -> bool` and `acompare_and_expire(...)` for lock renewal. Reset the TTL to `ex` seconds only while the stored value matches `expected`; return `False` without mutation for a missing or differently owned key. Inheriting the `CacheBackend` protocol's stubs is not an implementation: they return `None`, so renewal raises `CacheLockOwnershipError`. The built-in memory and Redis backends supply both methods.
+
 ## Core API
 
 `cache` is a `CacheService`. Expiration uses `ex` (seconds), `px` (milliseconds), or `ea` (Unix timestamp) — mutually exclusive. Omit all three to store without expiry.

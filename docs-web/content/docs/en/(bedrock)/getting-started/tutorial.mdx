@@ -296,7 +296,7 @@ def adjust(
 
 ## Step 9: Run the Command
 
-Use `bedrock run` to execute your module's commands:
+Use `bedrock run --app ROOT MODULE COMMAND` to execute your module's commands. `--app` is the root module to load, `MODULE` is the module whose commands to run, and `COMMAND` is one of its Typer commands (here the root and the module are both `inventory`):
 
 ```bash
 # Add a product

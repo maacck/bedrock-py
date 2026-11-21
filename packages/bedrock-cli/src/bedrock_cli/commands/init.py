@@ -37,7 +37,7 @@ def init(
 
     Creates a new project directory at OUTPUT_DIR/NAME with a standard
     Bedrock layout: pyproject.toml, .python-version, README.md, and a
-    source package with manifest, models, bootstrap, installation, and exc.
+    source package with manifest, bootstrap, installation, and exc.
     """
     output_dir = output_dir.resolve()
     try:
@@ -75,7 +75,6 @@ def init(
             context={"project_name": name},
         ),
         RenderedFile(f"src/{package_base}/manifest.yaml", "module/manifest.yaml.j2", project_context),
-        RenderedFile(f"src/{package_base}/models.py", "module/models.py.j2", project_context),
         RenderedFile(f"src/{package_base}/bootstrap.py", "module/bootstrap.py.j2", project_context),
         RenderedFile(f"src/{package_base}/installation.py", "module/installation.py.j2", project_context),
         RenderedFile(f"src/{package_base}/exc.py", "module/exceptions.py.j2", project_context),

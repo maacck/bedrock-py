@@ -23,9 +23,10 @@ bedrock [OPTIONS] COMMAND [ARGS]
 | 组 | 用途 |
 |-------|---------|
 | `bedrock run` | 运行模块专属命令 |
-| `bedrock app` | 检查和管理模块 |
-| `bedrock manage` | 应用生命周期管理 |
-| `bedrock db` | 数据库迁移操作 |
+| `bedrock app` | 读取：`inspect`、`info`、`playbook`。写入：`install` |
+| `bedrock db` | 状态（只读）：`heads`、`current`、`check`、`history`。写入：`revision`、`upgrade`、`downgrade`、`adopt`、`init-ledger` |
+
+只有 `run`、`app`、`db` 三组。原 `bedrock manage` 组和 `bedrock db uninstall` 已移除。
 
 ## 模块命令（`bedrock app`）
 
@@ -97,7 +98,28 @@ Commands     commands:app
 安装 Bedrock 模块：确保数据库 schema 为最新，然后运行可选的安装生命周期钩子。
 
 ```bash
-bedrock app install <import_path>
+bedrock app install <TARGET> [--root ROOT] [--with-dependencies] [--skip-migrations]
+```
+
+| 选项 | 说明 |
+|--------|-------------|
+| `--root ROOT` | 要加载的根模块，只决定加载上下文，不会扩大安装范围。不传时以 TARGET 作为根加载 |
+| `--with-dependencies` | 同时按依赖顺序安装 TARGET 的 `depends_on` 闭包（每个一次），最后安装 TARGET |
+| `--skip-migrations` | 只跳过 schema 步骤；安装钩子仍会运行 |
+
+默认只安装 TARGET。安装依赖其他模块的模块时，不会运行这些依赖的钩子，除非传入 `--with-dependencies`；根模块和同级模块不会被隐式安装。
+
+**钩子不被追踪。** Bedrock 不记录模块是否已安装，每次运行都会对每个被安装的模块重复执行 `pre_install` → `install` → `post_install`，因此钩子必须幂等。
+
+```bash
+# 只安装 myapp.users
+bedrock app install myapp.users
+
+# 通过根模块 myapp 加载，安装 myapp.users 及其依赖
+bedrock app install myapp.users --root myapp --with-dependencies
+
+# 只运行钩子
+bedrock app install myapp.users --skip-migrations
 ```
 
 <Callout type="info">
@@ -135,7 +157,7 @@ bedrock app playbook myapp.auth examples/login-flow.py
 
 ## 数据库命令（`bedrock db`）
 
-基于 Alembic 的数据库迁移命令。每条命令都接收一个应用导入路径，它既作为宿主应用，也作为迁移分支目标。
+由 Bedrock 自己的版本表（`bedrock_migrations`，主键为 `(app, revision)`）支撑的数据库迁移命令；Alembic 仅作为库用于执行和自动生成脚本。每条命令都接收一个应用导入路径，它既作为宿主应用，也作为迁移目标。旧版本创建的数据库必须先用 `bedrock db adopt` 接管一次。
 
 ### `bedrock db revision`
 
@@ -156,7 +178,7 @@ bedrock db revision <app_import_path> -m "<message>"
 **示例：**
 
 ```bash
-# First revision (creates branch root)
+# First revision (creates 0001_initial)
 bedrock db revision myapp.users -m "initial schema"
 
 # Subsequent revision
@@ -167,13 +189,16 @@ bedrock db revision myapp.users -m "custom index" --no-autogenerate
 ```
 
 **工作方式：**
-- 首次调用会通过 `--head=base` 创建分支根节点
-- 分支标签等于导入路径（例如 `myapp.users`）
-- 后续调用会追加到 `<import_path>@head`
+- 新 revision 命名为 `<编号>_<slug>`，例如 `0001_initial`：该 module 当前最大编号加一，再加上消息的 slug
+- 首次调用创建根 revision（`down_revision = None`），之后的调用基于该 module 唯一的 head
+- 对其他 module 的依赖会自动以带限定的 `app:revision` 写入 `depends_on`，且必须是 manifest 中的直接依赖
+- 应用必须处于 head（先执行 `bedrock db upgrade <app>`）；存在未应用的 revision 时，生成会失败且不写任何文件
 
 自动生成会在数据库侧和模型侧同时限制为目标 module 的表。普通 ORM 模型归定义它的 module，而不归导入它的 module。无 ORM 映射的 `Table` 必须声明 `info={"bedrock_module": "myapp.users"}`。归属缺失、冲突或 owner 未加载时，在写出 revision 前抛出 `MigrationError`，不会回退到全部表。参见[表归属](/docs/guides/database#表归属)。
 
-数据库中已删除模型的旧表不会被自动认领到当前分支或自动删除。需要删除时，使用 `--no-autogenerate` 编写经过审查的显式迁移。手写迁移和历史升级／回滚执行不要求当前表归属快照。
+生成的文件是可审阅的草稿：请审阅并提交。运行时顺序只依据已提交的 `depends_on` 图，从不依据外键。
+
+数据库中已删除模型的旧表不会被自动认领到当前 module 或自动删除。需要删除时，使用 `--no-autogenerate` 编写经过审查的显式迁移。手写迁移和历史升级／回滚执行不要求当前表归属快照。
 
 ---
 
@@ -194,7 +219,7 @@ bedrock db upgrade <app_import_path> [target]
 |--------|-------------|
 | `head` | 升级到最新版本（默认） |
 | `+1` | 向前升级一步 |
-| `<revision_id>` | 升级到该应用分支中的指定版本 |
+| `<revision_name>` | 升级到该应用的指定完整 revision 名称（例如 `0002_add_email`） |
 
 **示例：**
 
@@ -206,12 +231,14 @@ bedrock db upgrade myapp.users
 bedrock db upgrade myapp.users +1
 
 # Upgrade to specific revision
-bedrock db upgrade myapp.users abc123def456
+bedrock db upgrade myapp.users 0002_add_email
 ```
 
-**重要：** 只会升级指定应用的分支，其他分支不会受到影响。目标不属于该应用分支时（例如 `heads` 或其他应用的版本 ID）会报错。
+**重要：** 只会运行指定应用的迁移，以及它们在其他 module 中依赖的迁移。无关 module 和依赖方更晚的 revision 不会受到影响。目标不是该应用的 revision 名称时（例如 `heads` 或其他应用的 revision 名称）会报错。每个已执行的步骤会以 `app:revision` 形式打印；没有可执行的步骤时打印 `Nothing to do.`。
 
 升级和降级会获取迁移锁。PostgreSQL 使用 advisory lock，MySQL 和 MariaDB 使用 `GET_LOCK`，等待时间为 `DATABASE_MIGRATION_LOCK_TIMEOUT` 秒（默认 30）。SQLite 迁移不加锁，请只在一个进程中运行。超时会导致命令失败。
+
+CLI 只使用一个账本，默认是 `bedrock_migrations`。设置 `DATABASE_MIGRATION_VERSION_TABLE`（小写简单 SQL 标识符，最长 57 个字符）即可改用其他名称；没有对应的 CLI 参数。不要通过重命名表来切换账本。见[自定义版本表](/docs/guides/database#自定义版本表与独立-module-集合)。
 
 ---
 
@@ -229,9 +256,16 @@ bedrock db downgrade <app_import_path> <target>
 |--------|-------------|
 | `base` | 移除该应用的全部版本（其他应用不受影响） |
 | `-1` | 回退一步 |
-| `<revision_id>` | 回退到该应用分支中的指定版本 |
+| `<revision_name>` | 撤销该应用已应用的、位于该完整 revision 名称之后的版本（该 revision 本身保留） |
 
-只会移动指定应用的分支。目标不属于该分支时会报错。
+只会移动指定应用的版本；目标不是该应用的 revision 名称时会报错。如果其他 module 已应用的迁移依赖将被撤销的内容，命令会失败且不做任何改动。传入 `--cascade` 会先撤销这些依赖方；依赖方的 module 未加载时一律报错，因此要为每一个加上 `--load <app>`。`adopt` 导入的基线行无法撤销。
+
+**选项：**
+
+| 选项 | 说明 |
+|--------|-------------|
+| `--cascade` | 同时回滚已加载 module 中依赖被移除版本的已应用迁移 |
+| `--load <app>` | 同时加载该 module，使其已应用的迁移可见；可重复 |
 
 **示例：**
 
@@ -241,13 +275,16 @@ bedrock db downgrade myapp.users -1
 
 # Downgrade to base
 bedrock db downgrade myapp.users base
+
+# Roll back a module that other loaded modules depend on
+bedrock db downgrade myapp.users base --load myapp.orders --cascade
 ```
 
 ---
 
 ### `bedrock db heads`
 
-显示应用当前的 head 版本。
+显示应用迁移脚本中的 head 版本，每行一个。
 
 ```bash
 bedrock db heads <app_import_path>
@@ -258,14 +295,14 @@ bedrock db heads <app_import_path>
 ```bash
 $ bedrock db heads myapp.users
 
-abc123def456 (head)
+0002_add_email
 ```
 
 ---
 
 ### `bedrock db current`
 
-显示当前数据库版本。
+显示应用已在数据库中应用的版本，每行一个（没有时显示 `-`）。
 
 ```bash
 bedrock db current <app_import_path>
@@ -276,28 +313,28 @@ bedrock db current <app_import_path>
 ```bash
 $ bedrock db current myapp.users
 
-Current revision: abc123def456
+0002_add_email
 ```
 
 ---
 
 ### `bedrock db check`
 
-报告每个已加载迁移分支是否位于 head。该命令只读取数据库，不会修改它。
+报告每个已加载 module 的迁移是否位于 head。该命令只读取数据库，不会修改它。
 
 ```bash
 bedrock db check <app_import_path>
 ```
 
-表格列出分支、已应用版本、脚本 head 和状态：
+表格列出 module、已应用版本、脚本 head 和状态：
 
 | 状态 | 含义 | 退出码 |
 |-------|---------|-----------|
-| `at-head` | 已应用版本与分支 head 一致 | 参与退出码 0 |
-| `behind` | 已应用该分支上更早的版本 | 退出码 1 |
-| `unknown` | 尚未应用版本、分支没有脚本，或已应用的版本不属于该分支 | 退出码 1 |
+| `at-head` | 已应用版本与 module 的 head 一致 | 参与退出码 0 |
+| `behind` | 已应用该 module 更早的版本 | 退出码 1 |
+| `unknown` | 尚未应用版本、module 没有脚本，或已应用的版本没有对应脚本 | 退出码 1 |
 
-只有每个被报告的分支都是 `at-head` 时，进程才以 0 退出。
+只有每个被报告的 module 都是 `at-head` 时，进程才以 0 退出。
 
 **示例：**
 
@@ -324,88 +361,68 @@ bedrock db history <app_import_path>
 ```bash
 $ bedrock db history myapp.users
 
-Revision         Down Revision    Branch Labels    Message
-abc123def456     None             myapp.users      initial schema
-def789ghi012     abc123def456     myapp.users      add email verification
+Revision                Down Revision    Depends On                Message
+0001_initial (head)     base                                       initial schema
+0002_add_email          0001_initial     myapp.base:0001_initial   add email verification
 ```
 
 ---
 
-### `bedrock db uninstall`
+### 移除模块
 
-回滚目标应用已应用的版本，为移除该应用做好准备。
+`bedrock db uninstall` 已移除。要移除模块的 schema，使用 `bedrock db downgrade <app> base`（见上文 `bedrock db downgrade`）。
+
+**先审查已有脚本。** 回滚会执行该 module 每个已应用版本的 `downgrade()`，包括此前版本编写的脚本。归属过滤保护新的自动生成，不会修复旧污染脚本或拦截任意 SQL。回滚受影响应用前，先备份并遵循[已有迁移的安全处置](/docs/guides/database#已有迁移的安全处置)。
+
+---
+
+### `bedrock db adopt`
+
+把旧版本 Bedrock 创建的数据库（迁移记录在 Alembic 的 `alembic_version` 中）导入 `bedrock_migrations`。
 
 ```bash
-bedrock db uninstall <app_import_path>
+bedrock db adopt <app_import_path> [<app_import_path> ...]
 ```
+
+加载所有带迁移的 module；每个旧 head 必须唯一归属于其中一个。在对这样的数据库执行一次该命令之前，其他迁移命令都会拒绝运行。
 
 **执行内容：**
-1. 将目标应用已应用的版本回退到该分支的 base
-2. 从 `alembic_version` 中移除该分支的条目
-3. 核实迁移执行结果后，才移除模块
+1. 通过该部署自身的 revision 图解析每个旧 head。head 缺失、有歧义或无法解析时不会写入任何内容。
+2. 为每个直到这些 head 的 revision 写入一行 `baseline`，然后原子发布该表。如果 `bedrock_migrations` 已存在，会报告数据库已初始化，不会重复导入。
+3. 原样保留 `alembic_version` 作为审计快照。不会执行任何迁移脚本。
 
-**先审查已有脚本。** 正确的分支标签并不限制 `downgrade()` 执行什么。首次安装可能只 stamp 了版本而没有运行其 `upgrade()`，卸载仍会执行其中的 `downgrade()`。归属过滤保护新的自动生成，不会修复旧污染脚本或拦截任意 SQL。卸载受影响应用前，先备份并遵循[已有迁移的安全处置](/docs/guides/database#已有迁移的安全处置)。
+基线行假定 schema 已经就位，并受到保护：需要撤销基线行的 downgrade 或 cascade 会在任何 DDL 执行之前失败。先备份，并遵循[接管已有数据库](/docs/guides/database#接管已有数据库)。
 
 **示例：**
 
 ```bash
-$ bedrock db uninstall myapp.users
+$ bedrock db adopt myapp.users myapp.orders
 
-✓ myapp.users downgraded to base. You can now remove it from INSTALLED_APPS.
+✓ Imported 3 baseline migration(s). No scripts were executed.
 ```
 
 ---
 
-## 应用管理（`bedrock manage`）
+### `bedrock db init-ledger`
 
-用于管理应用生命周期的命令。
-
-### `bedrock manage install`
-
-安装当前 Bedrock 应用。
+在核心 module 已被接管的数据库中，为全新的独立 module registry 创建配置的 ledger。
 
 ```bash
-bedrock manage [-A ROOT_MODULE] install [OPTIONS]
+bedrock db init-ledger <root> [<root> ...] --adopted-ledger <source-name>
 ```
 
-**选项：**
+| 选项 | 必填 | 说明 |
+|------|------|------|
+| `--adopted-ledger` | 是 | 已接管的源 ledger 名称（如 `bedrock_migrations`），只读 |
 
-| 选项 | 简写 | 说明 |
-|--------|-------|-------------|
-| `--app` | | 安装指定的已加载模块（默认：所有已加载模块） |
-| `--skip-migrations` | | 跳过数据库迁移 |
+通过 `DATABASE_MIGRATION_VERSION_TABLE` 指定新目标；该命令只用于没有既有历史和业务表的模块。
 
-父级 `manage` 命令的 `-A ROOT_MODULE` 选项指定要加载的根模块；也可以设置 `BEDROCK_APP`。
+只创建空目标账本，不复制版本行、不执行迁移。先备份并在恢复出的副本上演练。
 
-**对每个模块会执行的操作：**
-
-1. **数据库 schema** — 首次安装时创建表，若落后于 head 则执行升级
-2. **安装前钩子** — 如果定义了 `installation.py:pre_install()` 就执行
-3. **安装钩子** — 如果定义了 `installation.py:install()` 就执行
-4. **安装后钩子** — 如果定义了 `installation.py:post_install()` 就执行
-
-**示例：**
+**预期失败**（不写入任何内容）：缺少旧表；源不是有效的已接管 ledger 或缺少旧 head 的证据；源中已有已加载 module 的行；已加载 module 模型所拥有的表已存在；目标 ledger 或源/目标暂存表已存在。
 
 ```bash
-# Install all modules
-bedrock manage install
-
-# Install specific module
-bedrock manage install --app myapp.users
-
-# Skip migrations
-bedrock manage install --skip-migrations
-```
-
-**示例输出：**
-
-```bash
-✓ Installing application...
-Installing app: myapp.users 0.1.0
-✓ Schema created (tables initialised and stamped at head).
-Running pre-install hook for myapp.users...
-Running post-install hook for myapp.users...
-✓ Application installed successfully.
+$ bedrock db init-ledger myapp.billing --adopted-ledger bedrock_migrations
 ```
 
 ---
@@ -418,11 +435,13 @@ Running post-install hook for myapp.users...
 bedrock run --app <root_module> <module> <command> [ARGS]
 ```
 
+`--app` 加载根模块及其依赖闭包。`<module>` 是要执行其命令的已加载模块，`<command>` 是它的 Typer 命令。业务命令只能通过 `run` 访问；不存在 `bedrock manage` 组。
+
 **选项：**
 
 | 选项 | 简写 | 说明 |
 |--------|-------|-------------|
-| `--app` | `-a` | 要加载的模块（或设置 `BEDROCK_APP` 环境变量） |
+| `--app` | `-a` | 要加载的根模块（或设置 `BEDROCK_APP`） |
 
 ### 模块命令的工作方式
 
@@ -457,13 +476,13 @@ commands: commands:app
 
 ```bash
 # Run module command
-bedrock run --app myapp.users myapp.users create-user --name Alice --email alice@example.com
+bedrock run --app myapp myapp.users create-user --name Alice --email alice@example.com
 
 # List available commands
-bedrock run --app myapp.users myapp.users --help
+bedrock run --app myapp myapp.users --help
 
 # Use BEDROCK_APP environment variable
-export BEDROCK_APP=myapp.users
+export BEDROCK_APP=myapp
 bedrock run myapp.users create-user --name Bob --email bob@example.com
 ```
 
@@ -473,7 +492,7 @@ bedrock run myapp.users create-user --name Bob --email bob@example.com
 
 | 变量 | 说明 | 默认值 |
 |----------|-------------|---------|
-| `BEDROCK_APP` | `run` 和 `manage` 命令的默认根应用 | None |
+| `BEDROCK_APP` | `run` 命令的默认根应用 | None |
 | `DATABASE_SCHEMA` | 数据库名称或 SQLite 文件路径 | `bedrock.db` |
 
 ---
@@ -483,8 +502,8 @@ bedrock run myapp.users create-user --name Bob --email bob@example.com
 ### 项目初始化
 
 ```bash
-# 1. Install the application
-bedrock manage install
+# 1. 安装根模块及其全部依赖
+bedrock app install myapp --with-dependencies
 
 # 2. Verify modules
 bedrock app info myapp.users
@@ -513,11 +532,11 @@ bedrock db current myapp.users
 ### 移除模块
 
 ```bash
-# 1. Rollback migrations
-bedrock db uninstall myapp.users
+# 1. 回滚其迁移（若有其他模块依赖它，加上 --load <dependent> --cascade）
+bedrock db downgrade myapp.users base
 
-# 2. Remove from INSTALLED_APPS
-# 3. Delete module code
+# 2. 从根模块的 depends_on / INSTALLED_APPS 中移除
+# 3. 删除模块代码
 ```
 
 ### 调试模块问题

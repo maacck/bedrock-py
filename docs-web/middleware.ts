@@ -10,11 +10,11 @@ const i18nMiddleware = createI18nMiddleware(i18n);
 
 const { rewrite: rewriteDocs } = rewritePath(
   `${docsRoute}{/*path}`,
-  `${docsContentRoute}{/*path}/content.md`,
+  `${docsContentRoute}{/*path}`,
 );
 const { rewrite: rewriteSuffix } = rewritePath(
   `${docsRoute}{/*path}.mdx`,
-  `${docsContentRoute}{/*path}/content.md`,
+  `${docsContentRoute}{/*path}`,
 );
 
 export default function middleware(

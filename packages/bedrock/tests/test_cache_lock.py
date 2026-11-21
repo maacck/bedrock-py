@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from bedrock.contrib.cache import CacheLockAcquisitionError, CacheLockOwnershipError
+from bedrock.contrib.cache.backends import memory as memory_module
+from bedrock.contrib.cache.backends.memory import MemoryCacheSettings
+from bedrock.contrib.cache.entities import CacheEntry
 from bedrock.contrib.cache.service import CacheService
 
 
@@ -102,3 +107,102 @@ class TestCacheLock:
                 await lock.aextend()
 
         asyncio.run(scenario())
+
+    @pytest.mark.parametrize(
+        ("renewal", "reader"),
+        [
+            ("extend", "get"),
+            ("extend", "get_with_ttl"),
+            ("extend", "exists"),
+            ("extend", "get_many"),
+            ("extend", "set"),
+            ("aextend", "aget"),
+            ("aextend", "aget_with_ttl"),
+            ("aextend", "aexists"),
+            ("aextend", "aget_many"),
+            ("aextend", "aset"),
+            ("extend", "aexists"),
+            ("aextend", "exists"),
+        ],
+    )
+    def test_expiry_cleanup_cannot_delete_a_successfully_renewed_lock(
+        self, monkeypatch: pytest.MonkeyPatch, renewal: str, reader: str
+    ) -> None:
+        """A reader racing a renewal cannot admit a second lock holder."""
+        clock = [100.0]
+        monkeypatch.setattr(memory_module.time, "monotonic", lambda: clock[0])
+        cache = CacheService()
+        backend = cache.configure("memory", settings=MemoryCacheSettings(max_size=2))
+        holder = cache.lock("jobs:renewal-race", expire=1, blocking=False)
+        contender = cache.lock("jobs:renewal-race", expire=30, blocking=False)
+        assert holder.acquire()
+        backend.set("expired-filler", b"old", ex=1)
+        original_entry = backend._store[holder.key]
+        original_expiry = CacheEntry.is_expired.fget
+        original_lock = backend._sync_lock
+        renewal_checked = threading.Event()
+        reader_started = threading.Event()
+        renewal_done = threading.Event()
+        role = threading.local()
+
+        class ObservedLock:
+            """Expose a reader's lock attempt without changing mutual exclusion."""
+
+            def __enter__(self) -> None:
+                if getattr(role, "name", None) == "reader":
+                    reader_started.set()
+                original_lock.acquire()
+
+            def __exit__(self, *exc: object) -> None:
+                original_lock.release()
+
+        def scheduled_expiry(entry: CacheEntry) -> bool:
+            expired = original_expiry(entry)
+            if entry is original_entry:
+                if getattr(role, "name", None) == "renewal":
+                    assert not expired
+                    renewal_checked.set()
+                    assert reader_started.wait(5), "reader never attempted access"
+                elif getattr(role, "name", None) == "reader" and expired:
+                    # Also exposes the old unlocked reader path: it inspected the
+                    # stale entry, then resumes deletion after renewal completes.
+                    reader_started.set()
+                    assert renewal_done.wait(5), "renewal never completed"
+            return expired
+
+        def renew() -> None:
+            role.name = "renewal"
+            try:
+                if renewal == "aextend":
+                    asyncio.run(holder.aextend(expire=30))
+                else:
+                    holder.extend(expire=30)
+            finally:
+                renewal_done.set()
+
+        def read_or_evict() -> None:
+            role.name = "reader"
+            if reader in {"set", "aset"}:
+                args = ("fresh", b"value")
+            elif reader in {"get_many", "aget_many"}:
+                args = ([holder.key],)
+            else:
+                args = (holder.key,)
+            result = getattr(backend, reader)(*args)
+            if reader.startswith("a"):
+                asyncio.run(result)
+
+        monkeypatch.setattr(backend, "_sync_lock", ObservedLock())
+        monkeypatch.setattr(CacheEntry, "is_expired", property(scheduled_expiry))
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            renewed = pool.submit(renew)
+            assert renewal_checked.wait(5), "renewal never inspected the old entry"
+            clock[0] = 102.0
+            read = pool.submit(read_or_evict)
+            renewed.result(timeout=5)
+            read.result(timeout=5)
+
+        assert holder.locked()
+        assert contender.acquire() is False
+        holder.release()
+        cache.close()
