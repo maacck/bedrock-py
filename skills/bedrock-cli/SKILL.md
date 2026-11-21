@@ -10,7 +10,7 @@ metadata:
 
 # Bedrock CLI Scaffolding
 
-`bedrock-cli` is the exploratory scaffolding companion for Bedrock. It is **not** the runtime `bedrock` CLI, and its command surface is not stable. Trust `packages/bedrock-cli/src/bedrock_cli/` over higher-level prose.
+`bedrock-cli` is the exploratory scaffolding companion for Bedrock. It is **not** the runtime `bedrock` CLI, and its command surface is not stable.
 
 This skill describes `bedrock-cli` at the version in `metadata.bedrock-cli` above. If the installed version differs (`uv run python -c "import importlib.metadata as m; print(m.version('bedrock-cli'))"`), tell the user and trust the installed `bedrock_cli` source and `bedrock-cli --help` over this skill.
 
@@ -62,7 +62,7 @@ my-saas-app/
     └── exc.py
 ```
 
-This is the CLI's starter scaffold, not the canonical project anatomy. It makes the project package a Bedrock module and creates placeholder files. Follow `docs/bedrock-anatomy.md`: add host `settings.py` and an `app.py` entry point as needed, keep a root manifest only if the project owns lifecycle or dependency behavior, and remove placeholder files for concerns the project does not own.
+This is a starter scaffold, not a list of required files. Use the [Module Hierarchy guide](https://bedrock-py.com/llms.mdx/docs/guides/module-hierarchy) to decide which packages need a manifest. Add host `settings.py` and an `app.py` entry point as needed; keep a root manifest only if the project owns lifecycle or dependency behavior.
 
 ### 2. Add modules explicitly
 
@@ -75,7 +75,7 @@ bedrock-cli add domain profile src/my_saas_app/users
 
 - `add module` creates `__init__.py`, `manifest.yaml`, `entities.py`, `exc.py`, plus optional `bootstrap.py` and `installation.py`; omitted flags prompt interactively with a default of no. It creates no `models.py`: add one only when the module owns tables
 - `add domain` creates `__init__.py`, `entities.py`, `service.py`, and `exc.py`; it is an internal domain package, not a Bedrock module
-- Generated files are starters: follow `docs/bedrock-anatomy.md`, adding a module `service.py` for business logic and removing optional placeholders for concerns the module does not own.
+- Generated files are starters: add a module `service.py` for business logic and remove optional placeholders for concerns the module does not own.
 
 ### 3. Generate code from models
 
@@ -89,7 +89,7 @@ bedrock-cli gen service my_saas_app.users.models:User src/my_saas_app/users/prof
 - `model_ref` must be `<module.path>:<ClassName>`
 - Built-ins are `entity` and `service`
 - Output file is always `<template>.py`; `entity` therefore writes `entity.py`, not the canonical `entities.py`. Move its contents into `entities.py` and remove `entity.py`.
-- `--overwrite` is needed here because `add domain` made the destination non-empty; it also replaces the domain's existing `service.py`. The generated service returns ORM objects, so adapt it to the entity-based service interface described in `docs/bedrock-anatomy.md`.
+- `--overwrite` is needed here because `add domain` made the destination non-empty; it also replaces the domain's existing `service.py`. The generated service returns ORM objects; adapt it to the entity-based service interface in the [Module Anatomy guide](https://bedrock-py.com/llms.mdx/docs/guides/module-anatomy).
 
 Template resolution order:
 
@@ -110,8 +110,7 @@ bedrock app info my_saas_app.users
 | Mistake | Fix |
 |---|---|
 | Treating `bedrock-cli` as the same thing as `bedrock` | State the distinction first |
-| Presenting `bedrock-cli` as stable | Mention that `packages/bedrock-cli/README.md` calls it exploratory/planned |
-| Using docs as authority when they disagree with implementation | Prefer `packages/bedrock-cli/src/bedrock_cli/commands/*.py` and templates |
+| Assuming a command or flag is stable | Check `bedrock-cli <command> --help` in the application's environment |
 | Omitting explicit add flags in scripted examples | Use `--bootstrap/--no-bootstrap` and `--installation/--no-installation` |
 | Running `gen` outside project root | Run it where `_bedrock_gen/`, `src/`, and your model package are visible |
 | Forgetting overwrite semantics | Without `--overwrite`, any non-empty destination fails, even if the target file does not exist |
