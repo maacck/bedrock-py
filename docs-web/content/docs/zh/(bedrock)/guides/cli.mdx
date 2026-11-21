@@ -192,7 +192,7 @@ bedrock db revision myapp.users -m "custom index" --no-autogenerate
 - 新 revision 命名为 `<编号>_<slug>`，例如 `0001_initial`：该 module 当前最大编号加一，再加上消息的 slug
 - 首次调用创建根 revision（`down_revision = None`），之后的调用基于该 module 唯一的 head
 - 对其他 module 的依赖会自动以带限定的 `app:revision` 写入 `depends_on`，且必须是 manifest 中的直接依赖
-- 应用必须处于 head（先执行 `bedrock db upgrade <app>`）；存在未应用的 revision 时，生成会失败且不写任何文件
+- 使用自动生成时，应用必须处于 head（先执行 `bedrock db upgrade <app>`）；存在未应用的 revision 时，生成会失败且不写任何文件。`--no-autogenerate` 不做此检查，但仍要求只有一个 head
 
 自动生成会在数据库侧和模型侧同时限制为目标 module 的表。普通 ORM 模型归定义它的 module，而不归导入它的 module。无 ORM 映射的 `Table` 必须声明 `info={"bedrock_module": "myapp.users"}`。归属缺失、冲突或 owner 未加载时，在写出 revision 前抛出 `MigrationError`，不会回退到全部表。参见[表归属](/docs/guides/database#表归属)。
 
@@ -270,8 +270,8 @@ bedrock db downgrade <app_import_path> <target>
 **示例：**
 
 ```bash
-# Downgrade one step
-bedrock db downgrade myapp.users -1
+# Downgrade one step (`--` is required before a negative target)
+bedrock db downgrade myapp.users -- -1
 
 # Downgrade to base
 bedrock db downgrade myapp.users base
@@ -362,8 +362,8 @@ bedrock db history <app_import_path>
 $ bedrock db history myapp.users
 
 Revision                Down Revision    Depends On                Message
-0001_initial (head)     base                                       initial schema
-0002_add_email          0001_initial     myapp.base:0001_initial   add email verification
+0002_add_email (head)   0001_initial     myapp.base:0001_initial   add email verification
+0001_initial            base                                       initial schema
 ```
 
 ---

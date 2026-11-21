@@ -599,7 +599,7 @@ Each module keeps its scripts in `<package_dir>/migrations/*.py`; files starting
 
 `depends_on` lists qualified `app:revision` references, for example `("myapp.users:0002_email",)`. Bare revision names are rejected, and the target must belong to a module that is a direct manifest `depends_on` of the owner. Upgrading a module first applies every migration it depends on, in dependency order, and nothing else: unrelated modules and later revisions of a dependency stay untouched.
 
-`bedrock db revision` writes these references for you. It records the heads of the modules that the new revision depends on, and repeats a reference only when that module has a newer head. Generation requires the module to be at head (`bedrock db upgrade <app>` first) and a single head.
+`bedrock db revision` writes these references for you. It records the heads of the modules that the new revision depends on, and repeats a reference only when that module has a newer head. Autogeneration requires the module to be at head (`bedrock db upgrade <app>` first); any generation requires a single head.
 
 A generated revision is a reviewable draft: read it, edit it, and commit it with the module. At run time Bedrock uses only the dependency graph declared in the committed scripts (`down_revision` plus qualified `depends_on`). It never infers ordering from foreign keys, table names, or the current models, so add a `depends_on` entry by hand when a script needs another module's tables that generation did not record.
 

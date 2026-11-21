@@ -194,7 +194,7 @@ bedrock db revision myapp.users -m "custom index" --no-autogenerate
 - The new revision is named `<number>_<slug>`, e.g. `0001_initial`: the module's highest number plus one, and a slug of the message
 - The first call creates a root revision (`down_revision = None`); later calls revise the module's single head
 - Dependencies on other modules are written automatically as qualified `app:revision` entries in `depends_on`, and must be direct manifest dependencies
-- The app must be at head (`bedrock db upgrade <app>` first); an unapplied revision makes generation fail without writing a file
+- With autogeneration, the app must be at head (`bedrock db upgrade <app>` first); an unapplied revision makes generation fail without writing a file. `--no-autogenerate` skips this check but still requires a single head
 
 Autogeneration compares only the target module's tables on both the database and model sides. Ordinary ORM models are owned by their defining module, not by modules importing them. Unmapped `Table` objects require `info={"bedrock_module": "myapp.users"}`. Missing, conflicting, or unloaded owners raise `MigrationError` before a revision is written; there is no all-tables fallback. See [Table Ownership](/docs/guides/database#table-ownership).
 
@@ -271,8 +271,8 @@ Only the specified app's revisions move; a target that is not a revision name of
 
 **Examples:**
 ```bash
-# Downgrade one step
-bedrock db downgrade myapp.users -1
+# Downgrade one step (`--` is required before a negative target)
+bedrock db downgrade myapp.users -- -1
 
 # Downgrade to base
 bedrock db downgrade myapp.users base
@@ -363,8 +363,8 @@ bedrock db history <app_import_path>
 $ bedrock db history myapp.users
 
 Revision                Down Revision    Depends On                Message
-0001_initial (head)     base                                       initial schema
-0002_add_email          0001_initial     myapp.base:0001_initial   add email verification
+0002_add_email (head)   0001_initial     myapp.base:0001_initial   add email verification
+0001_initial            base                                       initial schema
 ```
 
 ---
