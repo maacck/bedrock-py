@@ -50,6 +50,8 @@ ignore = [
 ]
 
 [tool.ruff.format]
+# Keep documentation examples outside the Python formatting gate.
+exclude = ["*.md"]
 quote-style = "double"
 indent-style = "space"
 docstring-code-format = true
