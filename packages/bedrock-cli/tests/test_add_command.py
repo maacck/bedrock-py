@@ -13,9 +13,7 @@ runner = CliRunner()
 class TestAddModule:
     def test_creates_module_structure(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            result = runner.invoke(
-                app, ["add", "module", "inventory", tmpdir, "--no-bootstrap", "--no-installation"]
-            )
+            result = runner.invoke(app, ["add", "module", "inventory", tmpdir, "--no-bootstrap", "--no-installation"])
             assert result.exit_code == 0
 
             mod_dir = Path(tmpdir) / "inventory"
@@ -41,9 +39,7 @@ class TestAddModule:
 
     def test_slugifies_name(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            result = runner.invoke(
-                app, ["add", "module", "User-Auth", tmpdir, "--no-bootstrap", "--no-installation"]
-            )
+            result = runner.invoke(app, ["add", "module", "User-Auth", tmpdir, "--no-bootstrap", "--no-installation"])
             assert result.exit_code == 0
             assert (Path(tmpdir) / "user_auth" / "manifest.yaml").exists()
 
@@ -53,9 +49,7 @@ class TestAddModule:
             mod_dir.mkdir()
             (mod_dir / "existing.py").write_text("x", encoding="utf-8")
 
-            result = runner.invoke(
-                app, ["add", "module", "inventory", tmpdir, "--no-bootstrap", "--no-installation"]
-            )
+            result = runner.invoke(app, ["add", "module", "inventory", tmpdir, "--no-bootstrap", "--no-installation"])
             assert result.exit_code == 1
 
     def test_overwrite_flag(self) -> None:

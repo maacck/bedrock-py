@@ -489,7 +489,9 @@ def install(
         console.print(f"[bold red]✗[/bold red] {escape(str(exc))}")
         raise typer.Exit(1) from exc
     except KeyError as exc:
-        console.print(f"[bold red]✗[/bold red] Module '{escape(target)}' is not in '{escape(root)}' or its dependencies.")
+        console.print(
+            f"[bold red]✗[/bold red] Module '{escape(target)}' is not in '{escape(root)}' or its dependencies."
+        )
         raise typer.Exit(1) from exc
 
     manager = None

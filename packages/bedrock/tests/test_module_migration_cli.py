@@ -17,6 +17,7 @@ import pytest
 from bedrock.cli.db import db_app
 from bedrock.module.registry import ModuleRegistry
 from bedrock.testing.modules import ModuleFactory
+from click import unstyle
 from typer.testing import CliRunner
 
 _ENTRY = "from bedrock.cli.main import entrypoint; entrypoint()"
@@ -138,7 +139,7 @@ class TestUpgradeOutput:
         listing = project.cli("--help")
         assert listing.returncode == 0
         assert "adopt" in listing.stdout
-        assert "--cascade" in project.cli("downgrade", "--help").stdout
+        assert "--cascade" in unstyle(project.cli("downgrade", "--help").stdout)
         assert "uninstall" not in listing.stdout
 
 
