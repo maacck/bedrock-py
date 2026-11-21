@@ -93,6 +93,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Agent skills**: choose `bedrock-live` to consult published Markdown guides, or keep using the original `bedrock` skill with its bundled references and templates.
+- The documentation index (`/llms.txt`) identifies its `bedrock-core` version and links to migration notes.
 - **Release tooling**: `make release-version VERSION=X.Y.Z` synchronizes the root, core, and CLI package
   versions through uv and regenerates the lockfile once. `PACKAGE=bedrock-fastapi` or `PACKAGE=bedrock-celery`
   selects an independent integration release. Failed updates restore the selected manifests and lockfile;

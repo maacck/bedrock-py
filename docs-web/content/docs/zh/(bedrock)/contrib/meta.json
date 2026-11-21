@@ -1,0 +1,5 @@
+{
+  "title": "Contrib 扩展包",
+  "pages": ["../guides/cache", "../guides/metric", "../guides/storage", "../guides/rate-limit"],
+  "defaultOpen": true
+}

@@ -1,118 +1,30 @@
 ---
 title: Agent Skills
-description: 使用 Bedrock 约定配置 AI 编码助手
+description: 为 Bedrock 应用开发选择文档优先或离线技能
 ---
 
-Bedrock 被设计为能够与 AI 编码助手无缝协作。为了获得最佳效果，请安装 Bedrock agent skill，让你的 AI 助手了解 Bedrock 的约定和模式。
+## 选择技能
 
-## 为什么要安装这个技能？
-
-如果没有这个技能，AI 助手就必须：
-
-1. 扫描整个代码库来理解 Bedrock 的模式
-2. 猜测模块结构和约定
-3. 在每一次对话中重复这些工作
-
-安装技能后，你的 AI 助手会立刻知道：
-
-- 标准模块结构和文件组织方式
-- Manifest 格式与依赖声明
-- 数据库模式和模型约定
-- Cache 系统的使用方式
-- CLI 命令和工作流
+| 技能 | 适用场景 |
+| --- | --- |
+| `bedrock` | 原版应用开发技能，自带指南、参考资料和模板，可离线使用。 |
+| `bedrock-live` | 适用于可联网的应用开发环境。助手按任务读取线上 Markdown 指南，并与应用安装的版本核对。 |
+| `bedrock-cli` | 创建项目骨架或生成代码；可搭配任一应用开发技能。 |
 
 ## 安装
 
-Bedrock agent skill 可用于多个 AI 编码助手。
-
-### Skills.sh
+两种应用开发技能选一个即可：
 
 ```bash
-npx skills add https://github.com/maacck/bedrock-py
+npx skills add maacck/bedrock-py --skill bedrock
+# 如需使用在线文档，改用：
+npx skills add maacck/bedrock-py --skill bedrock-live
 ```
 
-### 匹配你的 Bedrock 版本
+手动安装时，把整个 `skills/bedrock/` 或 `skills/bedrock-live/` 目录复制到助手的技能目录。
 
-上面的命令安装的是对应最新 `bedrock-core` 版本的技能。如果你的项目使用的是旧版本，请从对应的 release tag 安装技能，避免 AI 助手使用你的版本中不存在的 API：
+## 核对项目版本
 
-```bash
-npx skills add maacck/bedrock-py@v0.3.1  # 换成你的 bedrock-core 版本
-```
+`bedrock-live` 直接读取 Markdown 指南。[主题索引](/llms.txt)标明文档对应的 `bedrock-core` 版本。如果它与你的应用实际安装的版本不同，请在[更新日志](/docs/changelog)中查看两个版本之间的变更。固定 skill 版本不会固定网站版本。
 
-每个技能都在 `SKILL.md` frontmatter 中记录了它所描述的版本（`bedrock` 为 `metadata.bedrock-core`，`bedrock-cli` 为 `metadata.bedrock-cli`）。`bedrock` 技能会要求 AI 助手将其与已安装的 `bedrock-core` 版本比较，不一致时以已安装的包和[更新日志](/docs/changelog)为准。站点顶部显示的版本就是这份文档所描述的 `bedrock-core` 版本。
-
-## 技能会教会什么
-
-Bedrock agent skill 提供以下内容：
-
-### 模块结构
-
-Bedrock 模块的标准文件组织：
-
-```
-my_app/
-└── my_module/
-    ├── __init__.py
-    ├── manifest.yaml
-    ├── models.py
-    ├── entities.py
-    ├── service.py
-    ├── exc.py
-    └── bootstrap.py
-```
-
-### Manifest 格式
-
-如何编写 `manifest.yaml` 文件：
-
-```yaml
-title: my_module
-description: Module description
-version: 0.1.0
-depends_on:
-  - other_module
-commands: "commands:app"
-```
-
-### 层边界
-
-不同类型的代码应该放在哪里：
-
-| 层级     | 文件           | 用途            |
-| -------- | -------------- | --------------- |
-| 数据     | `models.py`    | SQLAlchemy 模型 |
-| 校验     | `entities.py`  | Pydantic 模型   |
-| 逻辑     | `service.py`   | 业务逻辑        |
-| 错误     | `exc.py`       | 模块异常        |
-| 生命周期 | `bootstrap.py` | 钩子            |
-
-### 反模式
-
-在使用 Bedrock 时，不要这样做：
-
-- 不要在 service 层导入 HTTP 类型
-- 不要在模块级别直接实例化 settings（如果环境变量可能尚未就绪），请使用 `SettingsProxy`
-- 不要绕过 `ModuleRegistry.install()` 加载模块
-- 不要把 API endpoints 放进 service 文件
-
-## 手动设置
-
-如果你更愿意手动配置这些约定，可以把 skills 安装到项目中并自行编辑。这个目录包含了该技能提供的全部约定。
-
-仓库提供 `skills/bedrock/SKILL.md` 和 `skills/bedrock-cli/SKILL.md`。Bedrock 技能在 `skills/bedrock/references/` 中包含以下参考文件：
-
-- `architecture.md`
-- `class-registry-guide.md`
-- `cli-guide.md` 和 `cli-scripts.md`
-- `database-guide.md`
-- `di-guide.md`
-- `hooks-guide.md`
-- `module-guide.md` 和 `module-hierarchy.md`
-- `provider-guide.md`
-- `signals-guide.md`
-- `testing-guide.md`
-
-## 下一步
-
-- [Module Anatomy](/docs/guides/module-anatomy) — 详细模块结构
-- [Module Playbooks](/docs/guides/playbooks) — 面向 AI 的模块文档
+原版 `bedrock` 在 `metadata.bedrock-core` 中标明内置指南的版本。如果应用使用旧版，可从对应的 release tag 安装该技能。
