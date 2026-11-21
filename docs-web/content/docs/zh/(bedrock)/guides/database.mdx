@@ -599,7 +599,7 @@ history = migrations.get_history("myapp.users")
 
 `depends_on` 列出带限定的 `app:revision` 引用，例如 `("myapp.users:0002_email",)`。裸 revision 名称会被拒绝，目标必须属于拥有者 manifest `depends_on` 中直接声明的 module。升级一个 module 时，会先按依赖顺序执行它依赖的全部迁移，且只执行这些：无关 module 和依赖方更晚的 revision 都不会被改动。
 
-`bedrock db revision` 会自动写入这些引用：记录新 revision 所依赖 module 的 head，只有该 module 出现更新的 head 时才再次写入。生成前要求该 module 已处于 head（先执行 `bedrock db upgrade <app>`）且只有一个 head。
+`bedrock db revision` 会自动写入这些引用：记录新 revision 所依赖 module 的 head，只有该 module 出现更新的 head 时才再次写入。自动生成前要求该 module 已处于 head（先执行 `bedrock db upgrade <app>`）；无论是否自动生成都要求只有一个 head。
 
 生成的 revision 只是可审阅的草稿：阅读、必要时修改，并随 module 一起提交。运行时 Bedrock 只使用已提交脚本中声明的依赖图（`down_revision` 加限定的 `depends_on`），从不根据外键、表名或当前模型推断顺序；脚本需要其他 module 的表而生成未记录时，请手动补充 `depends_on`。
 

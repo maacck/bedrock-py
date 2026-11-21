@@ -32,7 +32,7 @@ Documentation = "https://bedrock-py.com"
 "Bug Tracker" = "https://github.com/maacck/bedrock-py/issues"
 
 [build-system]
-requires = ["uv_build>=0.8.15,<0.9.0"]
+requires = ["uv_build>=0.8.15,<0.14.0"]
 build-backend = "uv_build"
 
 [tool.uv.build-backend]

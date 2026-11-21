@@ -10,7 +10,7 @@ Usage::
     bedrock db revision myerp.wms -m "add order table"
     bedrock db upgrade myerp.wms
     bedrock db upgrade myerp.wms +1
-    bedrock db downgrade myerp.wms -1
+    bedrock db downgrade myerp.wms -- -1
     bedrock db downgrade myerp.wms base
     bedrock db downgrade myerp.auth base --load myerp.orders --cascade
     bedrock db heads myerp.wms
@@ -201,7 +201,7 @@ def downgrade(
 
     Examples::
 
-        bedrock db downgrade myerp.wms -1
+        bedrock db downgrade myerp.wms -- -1
         bedrock db downgrade myerp.wms base
         bedrock db downgrade myerp.auth base --load myerp.orders --cascade
     """

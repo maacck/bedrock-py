@@ -125,7 +125,7 @@ Create a new database migration.
 bedrock db revision <app> -m "description" [--autogenerate | --no-autogenerate]
 ```
 
-Autogeneration defaults to enabled. Revisions are named `<number>_<slug>` (`0001_initial`, `0002_add_email`); the first creates the app's root, later ones follow its single head. The app must be at head, and dependencies on other modules are written automatically as qualified `app:revision` entries in `depends_on`.
+Autogeneration defaults to enabled. Revisions are named `<number>_<slug>` (`0001_initial`, `0002_add_email`); the first creates the app's root, later ones follow its single head. With autogeneration the app must be at head (`--no-autogenerate` skips that check), and dependencies on other modules are written automatically as qualified `app:revision` entries in `depends_on`.
 
 The generated file is a reviewable draft; commit it after review. Runtime ordering uses only the committed `depends_on` graph, never foreign keys.
 

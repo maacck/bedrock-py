@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.3.4] - 2026-11-14
+## [0.4.0] - 2026-11-22
 
 ### Breaking changes
 
@@ -34,7 +34,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     first. `ensure_schema()` returns `"created"`, `"upgraded"`, or `"up-to-date"`.
   - **Cross-module dependencies**: revision generation writes qualified `app:revision` entries to
     `depends_on`, which must be direct manifest dependencies; bare names are rejected. Upgrades run
-    only the target's dependency closure. Generation requires the module to be at head.
+    only the target's dependency closure. Autogeneration requires the module to be at head;
+    even an empty revision cannot be generated from multiple heads.
   - **Rollback** is blocked while other modules' applied migrations depend on it. Pass
     `cascade=True` (`--cascade`) to roll dependents back first; dependents that are not loaded
     (`--load <app>` loads one) always fail, and so do baseline rows, before any DDL runs.
@@ -60,15 +61,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Transactions**: each migration runs in its own transaction. Scripts must not commit or use
     `autocommit_block()`; MySQL and MariaDB cannot roll back failed DDL, so compare the real
     schema before retrying.
-- **Migration table ownership**: autogeneration now rejects
-  missing, conflicting, or unloaded table owners with `MigrationError`. Ordinary ORM models
-  are inferred from their defining package and need no annotation. Unmapped association
-  `Table` objects must declare `info={"bedrock_module": "myapp.module"}`; any explicit ORM
-  declaration must agree with its defining module. Load the owning module and provide its
-  `models` module; keep mappings of one shared table in one module. No database ownership
-  table or backfill is needed. Tables whose models were removed require explicit drop
-  migrations. Existing generated scripts are not rewritten: audit both upgrade and downgrade
-  before installing, rolling back, or uninstalling affected modules.
 - **CLI command groups**: only `run`, `app`, and `db` remain.
   - `bedrock manage` is removed, including dynamic registration of module commands. Business
     commands run as `bedrock run --app ROOT MODULE COMMAND`.
@@ -83,6 +75,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `bedrock db downgrade <app> base [--cascade] [--load <app>]`. `MigrationsManager.uninstall()` remains in Python.
   - `bedrock-cli add submodule` is renamed `bedrock-cli add module`. Generated modules and
     `bedrock-cli init` projects no longer include an empty `models.py`; add one when the module owns tables.
+
+### Added
+
+- **Agent skills**: choose `bedrock-live` to consult published Markdown guides, or keep using the original `bedrock` skill with its bundled references and templates.
+- The documentation index (`/llms.txt`) identifies its `bedrock-core` version and links to migration notes.
+
+## [0.3.4] - 2026-11-14
+
+### Breaking changes
+
+- **Migration table ownership**: autogeneration and first-install table creation now reject
+  missing, conflicting, or unloaded table owners with `MigrationError`. Ordinary ORM models
+  are inferred from their defining package and need no annotation. Unmapped association
+  `Table` objects must declare `info={"bedrock_module": "myapp.module"}`; any explicit ORM
+  declaration must agree with its defining module. Load the owning module and provide its
+  `models` module; keep mappings of one shared table in one module. No database ownership
+  table or backfill is needed. Tables whose models were removed require explicit drop
+  migrations. Existing generated scripts are not rewritten: audit both upgrade and downgrade
+  before installing, rolling back, or uninstalling affected modules, including stamped revisions.
 - **Cache backend protocol**: custom backends registered with `register_backend()` must implement
   `compare_and_expire(key, expected, ex) -> bool` and `acompare_and_expire(...)`: reset the key's TTL to
   `ex` seconds only when its value equals `expected`, atomically, and return whether it did.
@@ -93,8 +104,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Agent skills**: choose `bedrock-live` to consult published Markdown guides, or keep using the original `bedrock` skill with its bundled references and templates.
-- The documentation index (`/llms.txt`) identifies its `bedrock-core` version and links to migration notes.
 - **Release tooling**: `make release-version VERSION=X.Y.Z` synchronizes the root, core, and CLI package
   versions through uv and regenerates the lockfile once. `PACKAGE=bedrock-fastapi` or `PACKAGE=bedrock-celery`
   selects an independent integration release. Failed updates restore the selected manifests and lockfile;

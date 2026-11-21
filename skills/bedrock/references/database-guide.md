@@ -227,7 +227,7 @@ mgr.revision(
 )
 ```
 
-New revisions are named `<number>_<slug>` (`0001_initial`, `0002_add_email_column`): the module's highest number plus one. Existing random IDs are kept; the next name continues from the old head. Generation requires the module to be at head with a single head, and writes qualified `app:revision` entries into `depends_on` for the modules it depends on (they must be direct manifest dependencies; bare names are rejected). `branch_labels` and `MigrationsManager(script_location=...)` no longer exist; scripts that still declare `branch_labels` load normally and the label is ignored.
+New revisions are named `<number>_<slug>` (`0001_initial`, `0002_add_email_column`): the module's highest number plus one. Existing random IDs are kept; the next name continues from the old head. Generation requires a single head, and autogeneration also requires the module to be at head. It writes qualified `app:revision` entries into `depends_on` for the modules it depends on (they must be direct manifest dependencies; bare names are rejected). `branch_labels` and `MigrationsManager(script_location=...)` no longer exist; scripts that still declare `branch_labels` load normally and the label is ignored.
 
 A generated revision is a reviewable draft: review, edit, and commit it. Runtime uses only the committed declared graph (`down_revision` plus qualified `depends_on`) and never infers ordering from foreign keys; add a missing `depends_on` by hand.
 
