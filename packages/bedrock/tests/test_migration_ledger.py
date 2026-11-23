@@ -209,6 +209,24 @@ def test_adopt_unresolved_head_writes_nothing(engine, graph):
     assert _tables(engine) == {"alembic_version"}
 
 
+def _squashed_graph() -> MigrationGraph:
+    end = _mig("a", "e1")
+    end.module.bedrock_squash = {"format": 1, "old": [("x1", []), ("e1", [])]}
+    return _graph(end, _mig("b", "x1"), _mig("b", "b2", ("x1",)))
+
+
+def test_adopt_head_retired_in_other_app_is_not_misattributed(engine):
+    _legacy(engine, "x1")
+    with pytest.raises(MigrationError, match="retired by a squash in a"):
+        L.adopt(engine, _squashed_graph())
+    assert _tables(engine) == {"alembic_version"}
+
+
+def test_adopt_independent_head_beside_squash_is_preserved(engine):
+    _legacy(engine, "b2")
+    assert L.adopt(engine, _squashed_graph()) == 2
+
+
 def test_adopt_without_legacy_table_is_rejected(engine, graph):
     with pytest.raises(MigrationError, match="nothing to adopt"):
         L.adopt(engine, graph)

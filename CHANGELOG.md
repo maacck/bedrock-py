@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `bedrock db squash prepare` produces a standalone replacement for a linear migration range. It keeps the last full ID unless `--rename` is explicit and refuses to retire referenced revisions. `bedrock db upgrade` and `ensure_schema` now automatically reconcile every complete approved squash range in the upgrade target's ancestry before business migrations: fresh databases execute the replacement, current ones skip it, and partly applied or conflicting ledgers are refused. Read-only commands never mutate. `bedrock db squash apply` remains for optional preview and manual handover/recovery; `--apply` switches a fully applied ledger without replaying migrations.
+- Subsequent revisions reserve retired IDs. Squash rejects `head`/`base` as new IDs and generic migration entry points; legacy adoption refuses to guess a retired revision's owner. An unrelated module's partially applied replacement does not block a scoped upgrade.
+- Squash rejects conflicting database names in connection URLs before connecting. Read-only SQLite inspection does not create missing files, including `file:` URI targets.
+
 ## [0.4.0] - 2026-11-22
 
 ### Breaking changes

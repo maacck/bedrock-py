@@ -22,6 +22,7 @@ Usage::
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, NoReturn
 
 import typer
@@ -40,6 +41,8 @@ db_app = typer.Typer(
     rich_markup_mode="rich",
     help="Database migration commands for Bedrock modules.",
 )
+squash_app = typer.Typer(help="Prepare a replacement migration or switch an existing ledger.")
+db_app.add_typer(squash_app, name="squash", rich_help_panel="Write migration scripts")
 
 _console = Console()
 
@@ -77,20 +80,8 @@ def build_migrations_manager(registry: ModuleRegistry) -> MigrationsManager:
     )
 
 
-def _bootstrap_manager(*roots: str) -> MigrationsManager:
-    """Load *roots* into the registry and return a :class:`MigrationsManager`.
-
-    Args:
-        *roots: Import paths to load; the first is the command's target app.
-            A registry that is already ready is never extended, so every root
-            must already be loaded in that case.
-
-    Returns:
-        A :class:`MigrationsManager` bound to the configured database URL.
-
-    Raises:
-        :class:`typer.Exit`: If a root is not loaded in an already-ready registry.
-    """
+def _load_registry(*roots: str) -> ModuleRegistry:
+    """Load project roots without resolving a migration database URL."""
     from bedrock.module.registry import apps
 
     unique = list(dict.fromkeys(roots))
@@ -105,7 +96,12 @@ def _bootstrap_manager(*roots: str) -> MigrationsManager:
             )
             raise typer.Exit(1)
 
-    return build_migrations_manager(apps)
+    return apps
+
+
+def _bootstrap_manager(*roots: str) -> MigrationsManager:
+    """Build the migration manager for the requested roots."""
+    return build_migrations_manager(_load_registry(*roots))
 
 
 def _fail(exc: MigrationError) -> NoReturn:
@@ -132,6 +128,67 @@ def _print_revisions(revisions: tuple[str, ...]) -> None:
 # ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
+
+
+_SquashRoots = Annotated[list[str], typer.Option("--root", help="Project root to inspect; repeat for all roots.")]
+
+
+def _squash_registry(app: str, roots: list[str]) -> ModuleRegistry:
+    registry = _load_registry(app, *roots)
+    typer.echo("Loaded modules: " + ", ".join(sorted(item.name for item in registry.all())))
+    return registry
+
+
+@squash_app.command("prepare")
+def squash_prepare(
+    app: str,
+    first: Annotated[str, typer.Option("--from", help="First old revision, inclusive.")],
+    through: Annotated[str, typer.Option("--through", help="Last old revision, inclusive.")],
+    root: _SquashRoots,
+    out: Annotated[Path, typer.Option("--out", help="Candidate directory outside active migrations.")],
+    rename: Annotated[
+        str | None, typer.Option("--rename", help="New full revision ID; default: keep the last ID.")
+    ] = None,
+    script: Annotated[Path | None, typer.Option("--script", help="Reviewed manual replacement script.")] = None,
+) -> None:
+    """Write a reviewable candidate. Never remove old scripts or change the ledger."""
+    from bedrock.database.migration.squash_writer import prepare_candidate
+
+    registry = _squash_registry(app, root)
+    try:
+        path = prepare_candidate(registry, app, first, through, out=out, rename=rename, script=script)
+    except (MigrationError, OSError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    typer.echo(f"Candidate: {path}")
+    typer.echo(f"Replace the old scripts from {app}:{first} through {app}:{through} only after replay and review.")
+
+
+@squash_app.command("apply")
+def squash_apply(
+    app: str,
+    revision: str,
+    root: _SquashRoots,
+    apply: Annotated[
+        bool, typer.Option("--apply", help="Write the ledger switch. Without this flag, preview only.")
+    ] = False,
+) -> None:
+    """Inspect a published squash, or switch only its ledger rows without replaying migrations."""
+    registry = _squash_registry(app, root)
+    manager = build_migrations_manager(registry)
+    try:
+        report = manager.apply_squash(app, revision, apply=apply)
+    except MigrationError as exc:
+        _fail(exc)
+    typer.echo(f"Database: {report.target} | Ledger: {report.version_table}")
+    for (owner, name), state in report.states.items():
+        typer.echo(f"{owner}:{name}: {state}")
+    if report.update:
+        old, new = report.update
+        typer.echo(f"{'Applied' if report.applied else 'Preview'}: update {':'.join(old)} -> {':'.join(new)} (parents)")
+        for key in report.delete:
+            typer.echo(f"  delete {':'.join(key)}")
+    if report.remaining:
+        typer.echo("Remaining switches: " + ", ".join(":".join(key) for key in report.remaining))
 
 
 @db_app.command(rich_help_panel="Write migration scripts")

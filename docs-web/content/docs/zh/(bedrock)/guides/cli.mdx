@@ -159,6 +159,20 @@ bedrock app playbook myapp.auth examples/login-flow.py
 
 由 Bedrock 自己的版本表（`bedrock_migrations`，主键为 `(app, revision)`）支撑的数据库迁移命令；Alembic 仅作为库用于执行和自动生成脚本。每条命令都接收一个应用导入路径，它既作为宿主应用，也作为迁移目标。旧版本创建的数据库必须先用 `bedrock db adopt` 接管一次。
 
+### `bedrock db squash`
+
+```bash
+bedrock db squash prepare orders --from 0002_add --through 0004_finalize --root shop --out ./candidate
+# 如需保留手写 SQL 或数据回填，传入已审查的替换脚本：
+bedrock db squash prepare orders --from 0002_add --through 0004_finalize --root shop --out ./manual --script ./replacement.py
+# 常规部署无需额外步骤：`bedrock db upgrade` 会先对账完整区间。
+# 可选预览，或手动交接/恢复：
+bedrock db squash apply orders 0004_finalize --root shop
+bedrock db squash apply orders 0004_finalize --root shop --apply
+```
+
+用重复的 `--root` 加载全部项目根。默认保留末端完整 ID；仅在 prepare 时传 `--rename 0002_feature` 才改名，随后用新 ID 执行 apply。若区间外仍引用待退役的 revision，命令会拒绝。部分执行的区间，升级与 apply 都会拒绝，须先在桥接版本升到旧末端。部署及恢复流程见数据库指南。
+
 ### `bedrock db revision`
 
 创建新的迁移版本。

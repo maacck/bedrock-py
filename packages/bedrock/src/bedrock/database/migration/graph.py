@@ -209,17 +209,45 @@ class MigrationGraph:
                     )
                 migrations[mig.key] = mig
         if legacy:
+            retired = cls._retired(migrations.values())
             for key, migration in migrations.items():
                 resolved = []
+                scope = registry.get(key[0]).manifest.depends_on
                 for owner, rev in migration.depends_on:
                     if not owner:
                         matches = [a for a, r in migrations if r == rev]
-                        if len(matches) != 1 or matches[0] not in registry.get(key[0]).manifest.depends_on:
+                        if gone := sorted(a for a, r in retired if r == rev and a in scope):
+                            raise MigrationError(
+                                f"Legacy dependency {rev!r} of {key} was retired by a squash in {', '.join(gone)} "
+                                f"but is still live in {matches!r}; it cannot be attributed. Qualify it "
+                                "on the bridge release before squashing."
+                            )
+                        if len(matches) != 1 or matches[0] not in scope:
                             raise MigrationError(f"Cannot resolve legacy dependency {rev!r} of {key}: {matches!r}.")
                         owner = matches[0]
                     resolved.append((owner, rev))
                 migrations[key] = replace(migration, depends_on=tuple(resolved))
-        return cls(migrations)
+        graph = cls(migrations)
+        from .squash import installed_specs  # squash imports this module
+
+        installed_specs(graph)  # published squash descriptors must be consistent, even on a fresh database
+        return graph
+
+    @staticmethod
+    def _retired(migrations: Iterable[Migration]) -> set[MigrationKey]:
+        """Names replaced by an installed squash descriptor, read leniently (malformed ones fail later)."""
+        gone: set[MigrationKey] = set()
+        for mig in migrations:
+            raw = getattr(mig.module, "bedrock_squash", None)
+            items = raw.get("old") if isinstance(raw, dict) else None
+            for item in items if isinstance(items, (list, tuple)) else ():
+                if isinstance(item, (list, tuple)) and item and isinstance(item[0], str) and item[0] != mig.revision:
+                    gone.add((mig.app, item[0]))
+        return gone
+
+    def retired(self) -> set[MigrationKey]:
+        """Keys of old revisions that installed squashes replaced (their scripts are gone)."""
+        return self._retired(self.migrations.values())
 
     def __contains__(self, key: object) -> bool:
         return key in self.migrations
@@ -238,6 +266,10 @@ class MigrationGraph:
     def ancestors(self, revisions: Iterable[MigrationKey]) -> set[MigrationKey]:
         """Inclusive closure over ``down_revision`` and ``depends_on`` edges."""
         return self._closure(revisions, self._parents)
+
+    def dependents(self, key: MigrationKey) -> tuple[MigrationKey, ...]:
+        """Sorted migrations naming *key* in ``down_revision`` or ``depends_on``."""
+        return tuple(sorted(self._dependents[key]))
 
     def descendants_in_app(self, revisions: Iterable[MigrationKey]) -> set[MigrationKey]:
         """Inclusive closure over same-app ``down_revision`` children; cross-app dependents are excluded."""

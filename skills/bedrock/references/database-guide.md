@@ -260,6 +260,12 @@ Declare `myapp.users` in the tags module's manifest `depends_on`. Full metadata 
 - Recompute the ownership snapshot per operation; no database ledger, global registration hook, or ordinary model annotation is needed. An empty owned set never means all tables.
 - Once a model is removed, do not infer its old table's owner or auto-drop it. Use `--no-autogenerate` for a reviewed explicit migration. Historical execution, manual revisions, and offline SQL do not require current ownership. Raw unmanaged Alembic calls retain the full metadata view and are outside the isolation guarantee.
 
+### Squash rollout
+
+Keep retired revision IDs reserved. `head` and `base` are command targets, not rename choices. Adopt ambiguous bare Alembic heads on the bridge release. Use synchronous non-generic functions for manual replacements.
+
+Rehearse both paths with seeded data. No automatic net diff: preserve data backfills and review transaction boundaries. Partial ranges must reach the old endpoint on the bridge release; upgrade refuses partial or conflicting ranges. Deploy and run the ordinary upgrade (`bedrock db upgrade` / `ensure_schema`): complete approved ranges in the target's ancestry are reconciled before business migrations (fresh executes, current skips); read-only commands never mutate. For handover or recovery, pause writes, back up, preview with `bedrock db squash apply` and switch manually with `--apply`.
+
 ### Existing Migration Safety
 
 Bedrock does not rewrite old scripts, and new filtering does not repair old contaminated ones. Installation now executes the recorded scripts, so uninstall runs the `downgrade()` of scripts whose `upgrade()` really ran; databases adopted from `alembic_version` keep protected baseline rows instead (see below).
