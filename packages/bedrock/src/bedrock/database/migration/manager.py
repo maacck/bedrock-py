@@ -21,6 +21,7 @@ from sqlalchemy.engine.url import URL, make_url
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from sqlalchemy.pool import NullPool
 
+from ...exc import BedrockExc
 from ...logging import get_logger
 from . import ledger, squash, squash_writer
 from .graph import MigrationError, MigrationGraph, MigrationKey
@@ -42,8 +43,10 @@ _PYSQLITE_CONNECT_ARGS = frozenset(
 )
 
 
-class _MissingDatabase(Exception):
+class _MissingDatabase(BedrockExc):
     """A noncreating open found no SQLite file."""
+
+    detail = "SQLite database file does not exist."
 
 
 class _LockResult(Protocol):
