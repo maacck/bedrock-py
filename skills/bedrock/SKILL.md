@@ -7,7 +7,7 @@ description: >
   debugging module lifecycle issues, writing bootstrap hooks, configuring database migrations,
   writing tests for Bedrock modules, or building applications on top of Bedrock. Trigger on: "python project dependencies contains 'bedrock-py'", "working on a Bedrock module", "writing a manifest.yaml", "using bedrock CLI commands", "testing a Bedrock module"
 metadata:
-  bedrock-core: "0.4.0"
+  bedrock-core: "0.4.1"
 ---
 
 # Bedrock Application Development

@@ -5,7 +5,7 @@ description: >
   especially for `bedrock-cli init`, `bedrock-cli add`, `bedrock-cli gen`, `_bedrock_gen` custom templates,
   or when a task risks confusing the scaffolding CLI with the runtime `bedrock` command.
 metadata:
-  bedrock-cli: "0.4.0"
+  bedrock-cli: "0.4.1"
 ---
 
 # Bedrock CLI Scaffolding
