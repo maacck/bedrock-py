@@ -25,6 +25,7 @@ from sqlalchemy.types import TypeEngine
 
 from .graph import _MAX_REVISION_LENGTH, MigrationError, MigrationGraph, MigrationKey
 from .ledger import LEGACY_VERSION_TABLE, STAGING_TABLE_NAME, VERSION_TABLE_NAME
+from .squash import installed_specs
 
 if TYPE_CHECKING:
     from ...module.entities import AppConfig
@@ -258,12 +259,17 @@ def write_revision(
             name,
         )
 
-    numbers = [int(m.group(1)) for _, rev in graph.revisions(name) if (m := _NUMBER.match(rev))]
+    # Retired squash IDs stay reserved: reusing one would collide with the ledger rows of databases that ran it.
+    retired = {key for spec in installed_specs(graph).values() for key in spec.retired}
+    taken = graph.revisions(name) | {key for key in retired if key[0] == name}
+    numbers = [int(m.group(1)) for _, rev in taken if (m := _NUMBER.match(rev))]
     number = max(numbers, default=0) + 1
     prefix = f"{number:04d}_"
     revision = prefix + _slug(message, _MAX_REVISION_LENGTH - len(prefix))
-    if (name, revision) in graph:
-        raise MigrationError(f"Migration '{revision}' already exists for '{name}'.", name)
+    if len(revision) > _MAX_REVISION_LENGTH:
+        raise MigrationError(f"Next migration '{revision}' is longer than {_MAX_REVISION_LENGTH} characters.", name)
+    if (name, revision) in taken:
+        raise MigrationError(f"Migration '{revision}' already exists or was retired by a squash for '{name}'.", name)
     down = heads[0][1] if heads else None
 
     imports: set[str] = set()

@@ -215,3 +215,24 @@ class TestMigrationGraph:
             MigrationGraph(with_(a1, depends_on=(("gr_auth", "ghost"),)))
         with pytest.raises(MigrationError, match="does not match"):
             MigrationGraph({("gr_auth", "wrong"): a1})
+
+    def _legacy_apps(self, dep: str) -> tuple:
+        squashed = _script("e1", None) + "bedrock_squash = {'format': 1, 'old': [('x1', []), ('e1', ['gr_a:x1'])]}\n"
+        return (
+            ("gr_a", {"e1": squashed}, ()),
+            ("gr_b", {"x1": _script("x1", None), "b2": _script("b2", "x1")}, ()),
+            ("gr_c", {"c1": _script("c1", None, (dep,))}, ("gr_a", "gr_b")),
+        )
+
+    def _load_legacy(self, module_factory: ModuleFactory, *apps: tuple) -> MigrationGraph:
+        registry = ModuleRegistry()
+        registry.populate([_chain_app(module_factory, *a) for a in apps])
+        return MigrationGraph.load(registry, legacy=True)
+
+    def test_legacy_bare_dep_on_retired_name_live_elsewhere_is_refused(self, module_factory: ModuleFactory) -> None:
+        with pytest.raises(MigrationError, match="retired by a squash in gr_a"):
+            self._load_legacy(module_factory, *self._legacy_apps("x1"))
+
+    def test_legacy_bare_dep_on_independent_name_still_resolves(self, module_factory: ModuleFactory) -> None:
+        graph = self._load_legacy(module_factory, *self._legacy_apps("b2"))
+        assert graph[("gr_c", "c1")].depends_on == (("gr_b", "b2"),)

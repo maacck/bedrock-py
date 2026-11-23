@@ -686,6 +686,18 @@ It refuses, writing nothing, when any of the following holds:
 
 Fix the reported cause and rerun; never create or edit ledger rows by hand to get past a refusal.
 
+### Squashing migrations
+
+Prepare and rehearse in development. A squash replaces a linear range, not a schema diff. Reviewing transaction boundaries matters: one new script runs as one migration, not three. Only use trusted module hooks and migration imports; they can have side effects.
+
+1. Generate the candidate outside the active migrations directories. Review it, then replace all listed old files together. Replay the old and new paths against equivalent seeded databases: compare rows, indexes, constraints, and downgrade behavior. Unloaded and unapplied third-party plugins cannot be checked.
+2. Publish the bridge release with the old scripts. For a squash of `0002_add` through `0004_finalize`, partially applied databases must first reach `0004_finalize` on the old release; upgrade refuses a partial or conflicting range. Keeping its ID preserves dependents such as `0005_ship`.
+3. Deploy the new code and run the ordinary upgrade (`bedrock db upgrade`, or `ensure_schema` at startup). Complete approved ranges in the target's ancestry are reconciled before business migrations without replay: a fresh database executes the replacement, a current one skips it. Read-only commands never mutate. For a handover or recovery, pause writes and migration/install jobs, back up, then use `bedrock db squash apply` to preview and `--apply` to switch manually, confirming the database, ledger and affected rows first.
+
+Retired IDs remain reserved when generating later revisions. Do not use `head` or `base` as rename targets. Adopt ambiguous bare Alembic revisions on the bridge release. Manual replacements need synchronous, non-generic `upgrade()` and `downgrade()` functions.
+
+A failed business migration on MySQL or MariaDB may already have committed DDL: inspect the schema before retrying. Retrying a ledger switch is different. Restoring old history requires matching code, scripts and a backup; after business writes resume, an old backup alone loses new data.
+
 ### Existing Migration Safety
 
 Bedrock does not rewrite already generated scripts. Before upgrading or rolling back an affected module:

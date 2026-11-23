@@ -6,15 +6,33 @@ empty result on failure: an unreadable ledger is a ``MigrationError``.
 
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha1
+from typing import TYPE_CHECKING
 
 import sqlalchemy as sa
-from sqlalchemy import Column, Connection, DateTime, Engine, MetaData, String, Table, Text, delete, insert, select
+from sqlalchemy import (
+    Column,
+    Connection,
+    DateTime,
+    Engine,
+    MetaData,
+    String,
+    Table,
+    Text,
+    delete,
+    insert,
+    select,
+    update,
+)
 from sqlalchemy.exc import SQLAlchemyError
 
 from .graph import Migration, MigrationError, MigrationGraph, MigrationKey
+
+if TYPE_CHECKING:
+    from .squash import SquashSpec
 
 VERSION_TABLE_NAME = "bedrock_migrations"
 STAGING_TABLE_NAME = "bedrock_migrations_adopt"
@@ -80,9 +98,16 @@ def _baseline(graph: MigrationGraph, heads: list[str]) -> _Baseline:
     owners_of: dict[str, list[str]] = {}
     for app, revision in graph.migrations:
         owners_of.setdefault(revision, []).append(app)
+    retired = graph.retired()
     start: set[MigrationKey] = set()
     for head in heads:
         owners = sorted(owners_of.get(head, ()))
+        if gone := sorted(a for a, r in retired if r == head):
+            raise MigrationError(
+                f"Legacy head '{head}' was retired by a squash in {', '.join(gone)}; it cannot be attributed "
+                f"to {', '.join(owners) or 'a live module'}. Reach the squash's old end on the bridge release "
+                "before adopting; nothing was written."
+            )
         if not owners:
             raise MigrationError(
                 f"Legacy head '{head}' matches no migration of any loaded module; nothing was written."
@@ -93,6 +118,76 @@ def _baseline(graph: MigrationGraph, heads: list[str]) -> _Baseline:
             )
         start.add((owners[0], head))
     return [(key, graph[key].parents) for key in graph.order(graph.ancestors(start))]
+
+
+def _names(keys: set[MigrationKey] | frozenset[MigrationKey]) -> str:
+    return ", ".join(f"{a}:{r}" for a, r in sorted(keys))
+
+
+def _squash_state(applied: Mapping[MigrationKey, "AppliedMigration"], spec: "SquashSpec") -> str:
+    """Classify one replacement as fresh, current or replace; raise MigrationError when blocked."""
+    old = dict(spec.old)
+    end, old_end = spec.end, spec.old[-1][0]
+    retired = set(old) - {end}
+    label = f"{end[0]}:{end[1]}"
+    for key, row in applied.items():
+        if key not in old and key != end and (blocked := retired.intersection(row.parents)):
+            raise MigrationError(
+                f"Cannot squash {label}: applied {key[0]}:{key[1]} records retired parents {_names(blocked)}.", end[0]
+            )
+    present = set(old) & applied.keys()
+    if not present and end not in applied:
+        return "fresh"
+    if end in applied and not retired & applied.keys() and applied[end].parents == spec.parents:
+        return "current"
+    if present == set(old) and (end == old_end or end not in applied):
+        if any(applied[key].origin != "executed" for key in old):
+            raise MigrationError(f"Cannot squash {label}: baseline rows are protected and are never rewritten.", end[0])
+        if drifted := [key for key, parents in old.items() if applied[key].parents != parents]:
+            raise MigrationError(f"Cannot squash {label}: recorded parents drifted for {_names(set(drifted))}.", end[0])
+        if missing := set(spec.parents) - applied.keys():
+            raise MigrationError(f"Cannot squash {label}: parents are not applied: {_names(missing)}.", end[0])
+        return "replace"
+    raise MigrationError(
+        f"Cannot squash {label}: the ledger is partly or inconsistently squashed (present: "
+        f"{_names(present | ({end} & applied.keys()))}). Upgrade with the previous release to {old_end[0]}:{old_end[1]} "
+        "first; nothing was written.",
+        end[0],
+    )
+
+
+def project_squashes(
+    applied: Mapping[MigrationKey, "AppliedMigration"], specs: Mapping[MigrationKey, "SquashSpec"]
+) -> tuple[dict[MigrationKey, str], dict[MigrationKey, "AppliedMigration"]]:
+    """Classify every installed replacement and project the whole ledger after all pending ones.
+
+    Returns:
+        The state of each spec by end key (fresh, current, replace) and the projected ledger.
+
+    Raises:
+        MigrationError: any spec is blocked, or a row would keep a dangling reference.
+    """
+    states = {spec.end: _squash_state(applied, spec) for spec in specs.values()}
+    # Judge every original reference first: projecting renamed ends would otherwise make a phantom new end look real.
+    for key, row in applied.items():
+        if missing := set(row.parents) - applied.keys():
+            raise MigrationError(f"Applied {key[0]}:{key[1]} depends on unrecorded {_names(missing)}.", key[0])
+    projected = dict(applied)
+    touched: set[MigrationKey] = set()
+    for spec in specs.values():
+        touched.update(key for key, _ in spec.old)
+        touched.add(spec.end)
+        if states[spec.end] != "replace":
+            continue
+        end = spec.end
+        origin = applied[spec.old[-1][0]].origin
+        for key, _ in spec.old:
+            projected.pop(key)
+        projected[end] = AppliedMigration(end[0], end[1], spec.parents, origin)
+    for key, row in projected.items():
+        if dangling := touched.intersection(row.parents) - projected.keys():
+            raise MigrationError(f"Applied {key[0]}:{key[1]} depends on missing {_names(dangling)}.", key[0])
+    return states, projected
 
 
 class MigrationLedger:
@@ -247,6 +342,38 @@ class MigrationLedger:
 
     def forget(self, conn: Connection, key: MigrationKey) -> None:
         conn.execute(delete(self._table).where(self._table.c.app == key[0], self._table.c.revision == key[1]))
+
+    def replace_squash(self, conn: Connection, spec: "SquashSpec") -> None:
+        """Rewrite the old end row to the new end and delete the other old rows, in the caller's transaction.
+
+        Keeps ``origin`` and ``applied_at``. Never creates the table or commits.
+
+        Raises:
+            MigrationError: a statement did not hit exactly the expected rows, or the whole ledger after the
+                switch differs from the expected one (for example a trigger rewrote another row).
+        """
+        table = self._table
+        old_end = spec.old[-1][0]
+
+        def snapshot() -> dict[MigrationKey, tuple]:
+            return {(r.app, r.revision): tuple(r)[2:] for r in conn.execute(select(table))}
+
+        before = snapshot()
+        hit = conn.execute(
+            update(table)
+            .where(table.c.app == old_end[0], table.c.revision == old_end[1])
+            .values(revision=spec.end[1], parents=_encode(spec.parents))
+        )
+        if hit.rowcount != 1:
+            raise MigrationError(f"Squash expected to update one row of {old_end[0]}:{old_end[1]}, got {hit.rowcount}.")
+        for key, _ in spec.old[:-1]:
+            hit = conn.execute(delete(table).where(table.c.app == key[0], table.c.revision == key[1]))
+            if hit.rowcount != 1:
+                raise MigrationError(f"Squash expected to delete one row of {key[0]}:{key[1]}, got {hit.rowcount}.")
+        expected = {k: v for k, v in before.items() if k not in {key for key, _ in spec.old}}
+        expected[spec.end] = (_encode(spec.parents), *before[old_end][1:])
+        if snapshot() != expected:
+            raise MigrationError(f"Squash of {spec.end[0]}:{spec.end[1]} changed rows beyond the expected switch.")
 
     # --- adopt (ADR-9) -------------------------------------------------------------
 

@@ -128,6 +128,26 @@ class TestNumberingAndNaming:
             write_revision(_app(registry, "wr_heads"), graph, "x", None, None)
         assert len(list((_app(registry, "wr_heads").package_dir / "migrations").glob("*.py"))) == 2
 
+    def test_retired_squash_ids_stay_reserved_for_numbering(self, setup: Setup) -> None:
+        squash = {"format": 1, "old": [("0002_old", ["wr_ret:0001_base"]), ("0003_old", ["wr_ret:0002_old"])]}
+        scripts = {
+            "0001_base": _script("0001_base", None),
+            "0002_new": _script("0002_new", "0001_base") + f"bedrock_squash = {squash!r}\n",
+        }
+        registry, graph = setup(("wr_ret", scripts, ()))
+
+        path = write_revision(_app(registry, "wr_ret"), graph, "next", None, None)
+
+        assert path.name == "0004_next.py"
+
+    def test_oversize_successor_is_rejected_without_writing(self, setup: Setup) -> None:
+        big = "9" * 62 + "_x"
+        registry, graph = setup(("wr_big", {big: _script(big, None)}, ()))
+
+        with pytest.raises(MigrationError, match="longer than 64"):
+            write_revision(_app(registry, "wr_big"), graph, "x", None, None)
+        assert [p.name for p in (_app(registry, "wr_big").package_dir / "migrations").glob("*.py")] == [f"{big}.py"]
+
 
 class TestDependencies:
     def test_dependency_heads_are_written_once_and_again_when_upstream_moves(self, setup: Setup) -> None:

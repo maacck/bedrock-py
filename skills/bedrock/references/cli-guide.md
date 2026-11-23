@@ -120,6 +120,20 @@ Use this when your module `depends_on` an external module and you need to unders
 
 ---
 
+## `bedrock db squash`
+
+```bash
+bedrock db squash prepare orders --from 0002_add --through 0004_finalize --root shop --out ./candidate
+# To supply reviewed data operations or custom SQL instead:
+bedrock db squash prepare orders --from 0002_add --through 0004_finalize --root shop --out ./manual --script ./replacement.py
+# Ordinary deployment needs nothing more: `bedrock db upgrade` reconciles complete ranges first.
+# Optional preview, or manual handover/recovery:
+bedrock db squash apply orders 0004_finalize --root shop
+bedrock db squash apply orders 0004_finalize --root shop --apply
+```
+
+Repeat `--root` for all project roots. Preparation keeps the last full revision ID unless you pass e.g. `--rename 0002_feature`; apply then takes that new ID. Any reference to a retired revision outside the range blocks the operation. Partly applied ranges are refused by upgrade and apply alike; reach the old end on the bridge release first. See the database guide for rollout and recovery.
+
 ## bedrock db revision
 
 Create a new database migration.
