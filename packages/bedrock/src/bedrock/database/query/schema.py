@@ -290,10 +290,15 @@ def _query_spec_to_dict(spec: QuerySpec) -> dict[str, Any]:
     return payload
 
 
+def _filter_ref(model: type[Any], depth: int, schema_tag: str) -> str:
+    """Return a unique, collision-free Pydantic ref for *(model, depth, schema_tag)*."""
+    return f"{model.__module__}.{model.__qualname__}:Filter:d{depth}:{schema_tag}"
+
+
 class _FilterNodeSource:
     """Pydantic metadata source building a recursive model filter ``CoreSchema``."""
 
-    __slots__ = ("_include_dotted", "_ref", "_remaining_rel_depth", "_resolved")
+    __slots__ = ("_include_dotted", "_ref", "_remaining_rel_depth", "_resolved", "_schema_tag")
 
     def __init__(
         self,
@@ -302,11 +307,13 @@ class _FilterNodeSource:
         remaining_rel_depth: int,
         include_dotted: bool,
         ref: str,
+        schema_tag: str,
     ) -> None:
         self._resolved = resolved
         self._remaining_rel_depth = remaining_rel_depth
         self._include_dotted = include_dotted
         self._ref = ref
+        self._schema_tag = schema_tag
 
     def __get_pydantic_core_schema__(self, source_type: Any, handler: GetCoreSchemaHandler) -> CoreSchema:
         resolved = self._resolved
@@ -365,12 +372,17 @@ class _FilterNodeSource:
         if self._remaining_rel_depth > 0:
             for rel_name, rel in resolved.relations.items():
                 child_resolved = resolve_model_policy(rel.target_model, _collect_dotted=False)
-                child_ref = f"{child_resolved.model.__name__}Filter_d{self._remaining_rel_depth - 1}"
+                child_ref = _filter_ref(
+                    child_resolved.model,
+                    self._remaining_rel_depth - 1,
+                    self._schema_tag,
+                )
                 child_source = _FilterNodeSource(
                     child_resolved,
                     remaining_rel_depth=self._remaining_rel_depth - 1,
                     include_dotted=False,
                     ref=child_ref,
+                    schema_tag=self._schema_tag,
                 )
                 child_schema = handler.generate_schema(Annotated[Any, child_source])
                 child_ref_only = core_schema.definition_reference_schema(child_ref)
@@ -524,12 +536,14 @@ class CompiledQueryValidator:
 
     def __init__(self, resolved: ResolvedModelPolicy) -> None:
         self.resolved = resolved
-        root_ref = f"{resolved.model.__name__}Filter_d{resolved.policy.max_relation_depth}"
+        self._schema_tag = f"{id(self):x}"
+        root_ref = _filter_ref(resolved.model, resolved.policy.max_relation_depth, self._schema_tag)
         self._filter_source = _FilterNodeSource(
             resolved,
             remaining_rel_depth=resolved.policy.max_relation_depth,
             include_dotted=True,
             ref=root_ref,
+            schema_tag=self._schema_tag,
         )
         self._query_source = _QueryDictSource(resolved, self._filter_source)
         self._query_adapter: TypeAdapter[Any] = TypeAdapter(Annotated[Any, self._query_source])

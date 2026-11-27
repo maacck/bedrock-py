@@ -7,11 +7,11 @@ from weakref import WeakKeyDictionary
 
 from pydantic import GetCoreSchemaHandler
 from pydantic_core import CoreSchema
-from sqlalchemy import Select, func, select
+from sqlalchemy import Column, Select, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import InstrumentedAttribute, Session
 from sqlalchemy.sql.base import ExecutableOption
-from sqlalchemy.sql.elements import ColumnElement
+from sqlalchemy.sql.elements import ColumnElement, Label
 
 from ...exc import BadFilterFormatError, InvalidQueryLimitError
 from ..base import BedrockModel
@@ -62,6 +62,16 @@ def _resolve_projection_exprs(
         else:
             expressions.append(item)
     return expressions
+
+
+def _is_plain_model_column(expr: Any, model: type[Any]) -> bool:
+    """Return ``True`` only when *expr* projects a plain column on *model* (1:1 row cardinality)."""
+    target = expr.element if isinstance(expr, Label) else expr
+    if isinstance(target, InstrumentedAttribute):
+        return bool(target.class_ is model and hasattr(target.property, "columns"))
+    if isinstance(target, Column):
+        return target.table is getattr(model, "__table__", None)
+    return False
 
 
 def _build_page_result[T](items: list[T], total: int, *, page: int, limit: int) -> PageResult[T]:
@@ -232,7 +242,8 @@ class QuerySchema[M: BedrockModel]:
         if paginated:
             page, limit = self._pagination_bounds(spec)
             data_stmt = data_stmt.offset((page - 1) * limit).limit(limit)
-            if not grouped and base_select is None:
+            all_plain_columns = all(_is_plain_model_column(expr, self.model) for expr in projected)
+            if not grouped and base_select is None and all_plain_columns:
                 count_stmt: Select[Any] | None = select(func.count()).select_from(self.model).where(where_clause)
             else:
                 count_stmt = select(func.count()).select_from(filtered.order_by(None).subquery())
@@ -292,7 +303,7 @@ class QuerySchema[M: BedrockModel]:
             paginated=False,
             server_limit=limit,
         )
-        return list(session.execute(data_stmt).scalars().all())
+        return list(session.execute(data_stmt).unique().scalars().all())
 
     async def asearch(
         self,
@@ -312,7 +323,7 @@ class QuerySchema[M: BedrockModel]:
             server_limit=limit,
         )
         result = await session.execute(data_stmt)
-        return list(result.scalars().all())
+        return list(result.unique().scalars().all())
 
     def paginate(
         self,
@@ -331,7 +342,7 @@ class QuerySchema[M: BedrockModel]:
         )
         assert count_stmt is not None
         total = int(session.execute(count_stmt).scalar() or 0)
-        items = list(session.execute(data_stmt).scalars().all())
+        items = list(session.execute(data_stmt).unique().scalars().all())
         return _build_page_result(items, total, page=page, limit=limit)
 
     async def apaginate(
@@ -351,7 +362,7 @@ class QuerySchema[M: BedrockModel]:
         )
         assert count_stmt is not None
         total = int((await session.execute(count_stmt)).scalar() or 0)
-        items = list((await session.execute(data_stmt)).scalars().all())
+        items = list((await session.execute(data_stmt)).unique().scalars().all())
         return _build_page_result(items, total, page=page, limit=limit)
 
     # --- 2. Field projection / aggregation search & paginate ---

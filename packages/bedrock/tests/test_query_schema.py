@@ -274,3 +274,42 @@ class TestSchemaValidationMatrix:
             TypeAdapter(Annotated[QuerySpec, hook]).validate_python(
                 {"filter": {"field": "internal_note", "op": "eq", "value": "x"}}
             )
+
+    def test_distinct_policies_on_same_model_do_not_collide_in_enclosing_schema(self):
+        from bedrock.database import QuerySchema
+
+        public_schema = QuerySchema(
+            SchemaOrder,
+            policy=QueryPolicy(fields={"title": FieldPolicy(allow_raw_like=False)}),
+        )
+        admin_schema = QuerySchema(
+            SchemaOrder,
+            policy=QueryPolicy(fields={"title": FieldPolicy(allow_raw_like=True)}),
+        )
+
+        class DualEndpointInput(BedrockEntity):
+            public_query: Annotated[QuerySpec, public_schema]
+            admin_query: Annotated[QuerySpec, admin_schema]
+
+        DualEndpointInput.model_rebuild(_types_namespace={"public_schema": public_schema, "admin_schema": admin_schema})
+
+        # Admin allows raw `like`, while public must still reject `like`
+        parsed = DualEndpointInput.model_validate(
+            {
+                "public_query": {"filter": {"field": "title", "op": "contains", "value": "foo"}},
+                "admin_query": {"filter": {"field": "title", "op": "like", "value": "foo%"}},
+            }
+        )
+        assert isinstance(parsed.admin_query.filter, FieldFilter)
+        assert parsed.admin_query.filter.op == "like"
+
+        with pytest.raises(ValidationError):
+            DualEndpointInput.model_validate(
+                {
+                    "public_query": {"filter": {"field": "title", "op": "like", "value": "foo%"}},
+                    "admin_query": {"filter": {"field": "title", "op": "like", "value": "foo%"}},
+                }
+            )
+
+        enclosing_json_schema = DualEndpointInput.model_json_schema()
+        assert len(enclosing_json_schema["$defs"]) >= 2

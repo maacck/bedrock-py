@@ -26,7 +26,7 @@ from bedrock.database import (
 from bedrock.exc import BadFilterFormatError, InvalidQueryLimitError
 from sqlalchemy import Column, ForeignKey, Integer, String, create_engine, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.orm import aliased, relationship, selectinload, sessionmaker
+from sqlalchemy.orm import aliased, joinedload, relationship, selectinload, sessionmaker
 
 
 class ExecUser(BedrockModel):
@@ -186,6 +186,47 @@ class TestModelExecutors:
         )
         assert [o.code for o in items] == ["ORD-3"]
 
+    def test_joinedload_collection_option_uniquifies_entities_sync(self, sync_session):
+        users = search_models(
+            sync_session,
+            ExecUser,
+            query={"sort": [{"field": "name", "direction": "asc"}]},
+            options=[joinedload(ExecUser.orders)],
+        )
+        assert [u.name for u in users] == ["Alice", "Bob", "Carol"]
+        assert len(users[0].orders) == 2
+
+        page = paginate_models(
+            sync_session,
+            ExecUser,
+            query={"filter": {"field": "name", "op": "eq", "value": "Alice"}, "pagination": {"page": 1, "limit": 10}},
+            options=[joinedload(ExecUser.orders)],
+        )
+        assert page.total == 1
+        assert [u.name for u in page.items] == ["Alice"]
+        assert len(page.items[0].orders) == 2
+
+    @pytest.mark.asyncio
+    async def test_joinedload_collection_option_uniquifies_entities_async(self, async_session: AsyncSession):
+        users = await asearch_models(
+            async_session,
+            ExecUser,
+            query={"sort": [{"field": "name", "direction": "asc"}]},
+            options=[joinedload(ExecUser.orders)],
+        )
+        assert [u.name for u in users] == ["Alice", "Bob", "Carol"]
+        assert len(users[0].orders) == 2
+
+        page = await apaginate_models(
+            async_session,
+            ExecUser,
+            query={"filter": {"field": "name", "op": "eq", "value": "Alice"}, "pagination": {"page": 1, "limit": 10}},
+            options=[joinedload(ExecUser.orders)],
+        )
+        assert page.total == 1
+        assert [u.name for u in page.items] == ["Alice"]
+        assert len(page.items[0].orders) == 2
+
 
 class TestFieldProjectionExecutors:
     """Verify search_fields / paginate_fields with multi-column group_by and dict rows."""
@@ -255,6 +296,39 @@ class TestFieldProjectionExecutors:
             query={"pagination": {"page": 1, "limit": 10}},
         )
         assert page.total == 2
+
+    def test_ungrouped_aggregate_paginate_fields_counts_projected_rows_sync(self, sync_session):
+        page = paginate_fields(
+            sync_session,
+            ExecOrder,
+            fields=[func.count(ExecOrder.id).label("cnt"), func.sum(ExecOrder.total).label("gmv")],
+            query={"pagination": {"page": 1, "limit": 1}},
+        )
+        assert page.total == 1
+        assert page.items == [{"cnt": 4, "gmv": 1349}]
+        assert page.page_info.has_more is False
+
+        empty_match_page = paginate_fields(
+            sync_session,
+            ExecOrder,
+            fields=[func.count(ExecOrder.id).label("cnt")],
+            query={"filter": {"field": "tenant_id", "op": "eq", "value": 999}, "pagination": {"page": 1, "limit": 1}},
+        )
+        assert empty_match_page.total == 1
+        assert empty_match_page.items == [{"cnt": 0}]
+        assert empty_match_page.page_info.has_more is False
+
+    @pytest.mark.asyncio
+    async def test_ungrouped_aggregate_paginate_fields_counts_projected_rows_async(self, async_session: AsyncSession):
+        page = await apaginate_fields(
+            async_session,
+            ExecOrder,
+            fields=[func.count(ExecOrder.id).label("cnt")],
+            query={"pagination": {"page": 1, "limit": 1}},
+        )
+        assert page.total == 1
+        assert page.items == [{"cnt": 4}]
+        assert page.page_info.has_more is False
 
 
 class TestCustomSelectExecutors:
