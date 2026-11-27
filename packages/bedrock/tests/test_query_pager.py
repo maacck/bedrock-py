@@ -883,8 +883,13 @@ class TestCustomExternalPager:
                 cursor = p.page_info.next_cursor  # type: ignore[attr-defined]
             assert codes == expected
 
-        # 2. Typed sort_expressions (Decimal arithmetic) + extra column in base_select
-        expr_policy = QueryPolicy(sort_expressions={"adjusted": PagerEvent.amount + Decimal("0.50")})
+        # 2. Typed sort_expressions (Decimal arithmetic + overriding an existing model field with different SQL type)
+        expr_policy = QueryPolicy(
+            sort_expressions={
+                "adjusted": PagerEvent.amount + Decimal("0.50"),
+                "code": func.length(PagerEvent.code),  # overrides string column `code` with integer length
+            }
+        )
         expr_schema = QuerySchema(PagerEvent, policy=expr_policy, pager=CursorPager())
         expr_codes: list[str] = []
         cursor = None
@@ -902,6 +907,22 @@ class TestCustomExternalPager:
                 break
             cursor = p.page_info.next_cursor  # type: ignore[attr-defined]
         assert expr_codes == ["E-1", "E-2", "E-3", "E-4", "E-5"]
+
+        overridden_codes: list[str] = []
+        cursor = None
+        while True:
+            p = expr_schema.paginate(
+                pager_sync_session,
+                query={
+                    "sort": [{"field": "code", "direction": "asc"}],
+                    "pagination": {"cursor": cursor, "limit": 2},
+                },
+            )
+            overridden_codes.extend(e.code for e in p.items)
+            if not p.page_info.has_more:
+                break
+            cursor = p.page_info.next_cursor  # type: ignore[attr-defined]
+        assert overridden_codes == ["E-1", "E-2", "E-3", "E-4", "E-5"]
 
         # 3. DISTINCT and ungrouped aggregate projections rejected cleanly
         with pytest.raises(BadFilterFormatError, match="DISTINCT"):

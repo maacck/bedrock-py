@@ -743,7 +743,7 @@ class CursorPager(BasePager[CursorParams, CursorPageInfo]):
             if expr is None:
                 raise BadFilterFormatError(f"Field `{item.field}` is not allowed on {resolved.model.__name__}.")
             field_meta = resolved.fields.get(item.field)
-            if field_meta is None:
+            if field_meta is None or field_meta.expression is not expr:
                 field_meta = _infer_sort_expression_field(item.field, expr)
             nullable = field_meta is None or field_meta.nullable
             nulls_first = item.nulls == "first" if item.nulls is not None else False
@@ -786,7 +786,7 @@ class CursorPager(BasePager[CursorParams, CursorPageInfo]):
                     f"Cursor unique key `{key_name}` is not a sortable field on {resolved.model.__name__}."
                 )
             field_meta = resolved.fields.get(key_name)
-            if field_meta is None:
+            if field_meta is None or field_meta.expression is not expr:
                 field_meta = _infer_sort_expression_field(key_name, expr)
             nullable = field_meta is None or field_meta.nullable
             keys.append(
