@@ -195,7 +195,13 @@ class BasePager[ParamsT: PaginationParams, InfoT: BasePageInfo](ABC):
                     **td_kwargs,
                 )
 
-        return core_schema.typed_dict_schema(fields, extra_behavior="forbid")
+        td_config: core_schema.CoreConfig | None = None
+        if self.params_model.model_config.get("populate_by_name") or self.params_model.model_config.get(
+            "validate_by_name"
+        ):
+            td_config = core_schema.CoreConfig(validate_by_name=True)
+
+        return core_schema.typed_dict_schema(fields, extra_behavior="forbid", config=td_config)
 
     def precheck_raw(self, raw: Any, *, max_limit: int) -> None:
         """Run fast pre-Pydantic validation on a raw ``pagination`` mapping."""
@@ -211,14 +217,14 @@ class BasePager[ParamsT: PaginationParams, InfoT: BasePageInfo](ABC):
         elif isinstance(raw, self.params_model):
             return raw  # type: ignore[return-value]
         elif isinstance(raw, PaginationParams):
-            data = raw.model_dump(mode="python")
+            data = raw.model_dump(mode="python", by_alias=True)
         elif isinstance(raw, Mapping):
             data = dict(raw)
         else:
             raise InvalidQueryLimitError("`pagination` must be an object.")
         data.setdefault("limit", policy.default_limit)
         try:
-            return self.params_model.model_validate(data)  # type: ignore[return-value]
+            return self.params_model.model_validate(data, by_alias=True, by_name=True)  # type: ignore[return-value]
         except ValidationError as err:
             raise InvalidQueryLimitError(f"Invalid pagination parameters: {err.errors()[0]['msg']}") from err
 
@@ -855,7 +861,7 @@ class CursorPager(BasePager[CursorParams, CursorPageInfo]):
         ctx: PaginationContext[Any, CursorParams],
         keys: Sequence[_CursorSortKey],
     ) -> bool:
-        if ctx.mode != "models" or bool(ctx.options):
+        if ctx.mode != "models" or bool(ctx.options) or bool(getattr(ctx.filtered_stmt, "_with_options", ())):
             return True
         model = ctx.resolved.model
         mapper = inspect(model)

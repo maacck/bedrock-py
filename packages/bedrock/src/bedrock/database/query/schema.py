@@ -320,7 +320,7 @@ def _query_spec_to_dict(spec: QuerySpec) -> dict[str, Any]:
     if spec.search is not None:
         payload["search"] = spec.search
     if spec.pagination is not None:
-        payload["pagination"] = spec.pagination.model_dump(mode="python")
+        payload["pagination"] = spec.pagination.model_dump(mode="python", by_alias=True)
     return payload
 
 

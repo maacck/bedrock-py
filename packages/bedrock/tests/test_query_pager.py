@@ -991,6 +991,46 @@ class TestCustomExternalPager:
         with pytest.raises(InvalidQueryLimitError):
             shard_schema.paginate(pager_sync_session, query={})
 
+        # 7. Custom pager with aliased parameter preserves alias across both validation passes and round-trips
+        class AliasedParams(PaginationParams):
+            shard: str = Field(alias="shardId")
+
+        class AliasedPager(BasePager[AliasedParams, BasePageInfo]):
+            params_model = AliasedParams
+            page_info_model = BasePageInfo
+
+            def apply(self, stmt: Select[Any], ctx: PaginationContext[Any, AliasedParams]) -> Select[Any]:
+                return stmt.limit(ctx.params.limit)
+
+            def paginate[T](self, session: Session, ctx: PaginationContext[T, AliasedParams]) -> PageResult[T]:
+                items = ctx.fetch_rows(session, self.apply(ctx.filtered_stmt, ctx))
+                return PageResult[T](
+                    items=items,
+                    total=len(items),
+                    page_info=BasePageInfo(total=len(items), limit=ctx.params.limit, has_more=False),
+                )
+
+            async def apaginate[T](
+                self, session: AsyncSession, ctx: PaginationContext[T, AliasedParams]
+            ) -> PageResult[T]:
+                items = await ctx.afetch_rows(session, self.apply(ctx.filtered_stmt, ctx))
+                return PageResult[T](
+                    items=items,
+                    total=len(items),
+                    page_info=BasePageInfo(total=len(items), limit=ctx.params.limit, has_more=False),
+                )
+
+        aliased_schema = QuerySchema(PagerEvent, pager=AliasedPager())
+        aliased_spec = aliased_schema.validate({"pagination": {"shardId": "us-east", "limit": 2}})
+        assert isinstance(aliased_spec.pagination, AliasedParams)
+        assert aliased_spec.pagination.shard == "us-east"
+        # Re-validating the QuerySpec AST and paginating both succeed
+        assert aliased_schema.validate(aliased_spec).pagination == aliased_spec.pagination
+        aliased_page = aliased_schema.paginate(
+            pager_sync_session, query={"pagination": {"shardId": "us-east", "limit": 2}}
+        )
+        assert len(aliased_page.items) == 2
+
     @pytest.mark.asyncio
     async def test_async_cursor_with_deferred_column_and_load_only_avoids_missing_greenlet(
         self, pager_async_session: AsyncSession
@@ -1012,6 +1052,25 @@ class TestCustomExternalPager:
                 break
             cursor = page.page_info.next_cursor  # type: ignore[attr-defined]
         assert ranks_seen == ["E-2", "E-4", "E-1", "E-5", "E-3"]
+
+        # Options attached directly to base_select (with ctx.options=None) also avoid MissingGreenlet
+        base_with_load_only = select(PagerEvent).options(load_only(PagerEvent.id))
+        ids_seen: list[int] = []
+        cursor = None
+        while True:
+            page = await schema.apaginate(
+                pager_async_session,
+                base_select=base_with_load_only,
+                query={
+                    "sort": [{"field": "code", "direction": "desc"}],
+                    "pagination": {"cursor": cursor, "limit": 2},
+                },
+            )
+            ids_seen.extend(e.id for e in page.items)
+            if not page.page_info.has_more:
+                break
+            cursor = page.page_info.next_cursor  # type: ignore[attr-defined]
+        assert ids_seen == [5, 4, 3, 2, 1]
 
     def test_page_result_round_trips_concrete_page_info_types_and_exposes_json_schema(self, pager_sync_session):
         # PageInfo round-trip
