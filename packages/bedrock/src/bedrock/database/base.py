@@ -66,6 +66,7 @@ class BedrockModel(DeclarativeBase, CrudMixin):
     __abstract__ = True
     __searchable_columns__: list[str] = []
     __filterable_fields__: list[str] | Literal["__all__"] = []
+    __query_policy__: Any = None
     __search_op__: str = "ilike"
 
     @property
@@ -128,12 +129,21 @@ class BedrockModel(DeclarativeBase, CrudMixin):
 
         op_name = cls.__search_op__
         use_wildcards = op_name in ("ilike", "like")
-        term = f"%{q}%" if use_wildcards else q
+        if use_wildcards:
+            escaped = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            term = f"%{escaped}%"
+        else:
+            term = q
 
         clauses = []
         for col_name in cls.__searchable_columns__:
             col = getattr(cls, col_name)
-            clauses.append(col.op(op_name)(term))
+            if op_name == "ilike":
+                clauses.append(col.ilike(term, escape="\\"))
+            elif op_name == "like":
+                clauses.append(col.like(term, escape="\\"))
+            else:
+                clauses.append(col.op(op_name)(term))
 
         return or_(*clauses)
 

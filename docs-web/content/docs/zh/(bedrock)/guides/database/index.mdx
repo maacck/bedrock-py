@@ -1,0 +1,198 @@
+---
+title: 概览与配置
+description: SQLAlchemy 2.0 数据库层快速开始、DbSettings 配置、DatabaseManager API、架构与反模式
+---
+
+Bedrock 内置了一套 SQLAlchemy 2.0 数据库层，负责 engine 初始化、上下文局部 session、声明式模型、JSON Schema 驱动查询构建以及按 module 隔离的迁移管理。整个子系统位于 `bedrock.database` 下。
+
+<Cards>
+  <Card title="Session 管理" href="/docs/guides/database/sessions" description="上下文局部同步/异步事务作用域、入口装饰器、独立事务以及关闭 Engine。" />
+  <Card title="模型与事件" href="/docs/guides/database/models" description="BedrockModel 基类、CrudMixin 常用方法、默认值以及 SQLAlchemy ORM 事件监听。" />
+  <Card title="查询构建器" href="/docs/guides/database/query-builder" description="JSON Schema 驱动的 QuerySchema、FastAPI OpenAPI 集成、models/fields/select 执行器与 SEC-01 策略。" />
+  <Card title="迁移" href="/docs/guides/database/migrations" description="按 module 管理的 bedrock_migrations 账本、表归属、跨 module 依赖、接管与合并迁移。" />
+</Cards>
+
+## 快速开始
+
+定义一个模型，初始化数据库，然后开始查询：
+
+```python
+from bedrock.database import db, BedrockModel
+from sqlalchemy import Column, String, Integer
+
+class Product(BedrockModel):
+    __tablename__ = "products"
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String(100), nullable=False)
+
+# Initialize once at process start
+db.init()
+
+# 使用事务作用域（退出时解绑 session）
+with db.session_scope() as session:
+    product = Product(name="Widget")
+    session.add(product)
+    session.flush()
+
+    # Query back
+    all_products = session.query(Product).all()
+```
+
+## 配置
+
+数据库设置使用带有 `DATABASE_` 前缀的环境变量。`DbSettings` 是 Pydantic 的 `BaseSettings` 子类，因此会自动从环境中读取配置。
+
+### 环境变量
+
+| 变量 | 类型 | 默认值 | 说明 |
+|----------|------|---------|-------------|
+| `DATABASE_TYPE` | `str` | `"sqlite"` | 数据库方言（`sqlite`、`postgresql`、`mysql`） |
+| `DATABASE_DRIVER` | `str` | `"pysqlite"` | DBAPI 驱动（`pysqlite`、`psycopg2`、`pymysql`） |
+| `DATABASE_HOST` | `str \| None` | `None` | 数据库主机（非 SQLite 时必需） |
+| `DATABASE_PORT` | `int \| None` | `None` | 数据库端口（非 SQLite 时必需） |
+| `DATABASE_USERNAME` | `str \| None` | `None` | 数据库用户名 |
+| `DATABASE_PASSWORD` | `SecretStr \| None` | `None` | 数据库密码。不会出现在 `repr` 和校验错误中。 |
+| `DATABASE_ASYNC_DRIVER` | `str \| None` | `None` | 异步 DBAPI 驱动（`aiosqlite`、`asyncpg`、`psycopg`、`asyncmy`、`aiomysql`） |
+| `DATABASE_MAX_CONNECTIONS` | `int` | `10` | 单个进程的连接上限，包含溢出连接 |
+| `DATABASE_POOL_TIMEOUT` | `int` | `30` | 等待连接的秒数 |
+| `DATABASE_POOL_SIZE` | `int` | `10` | 连接池常态大小，至少为 1。 |
+| `DATABASE_POOL_RECYCLE` | `int` | `1800` | 回收连接前的秒数 |
+| `DATABASE_MIGRATION_LOCK_TIMEOUT` | `float` | `30` | 等待迁移锁的秒数。`0` 表示不等待。 |
+| `DATABASE_MIGRATION_VERSION_TABLE` | `str` | `"bedrock_migrations"` | 记录已应用迁移的表名。小写的简单 SQL 标识符，最长 57 个字符。见[自定义版本表](/docs/guides/database/migrations#自定义版本表与独立-module-集合)。 |
+| `DATABASE_SCHEMA` | `str` | `"bedrock.db"` | 数据库名称或文件路径 |
+
+`MAX_CONNECTIONS` 是单个进程可以同时取出的连接总数。PostgreSQL 和 MySQL 的 engine 会收到 `pool_size`、`pool_timeout`、`pool_recycle`，以及 `max_overflow = MAX_CONNECTIONS - POOL_SIZE`。`MAX_CONNECTIONS` 必须大于或等于 `POOL_SIZE`，更小的值会抛出 `DatabaseConfigurationError`，错误信息会同时写明这两个设置。`POOL_SIZE` 小于 1 同样会抛出 `DatabaseConfigurationError`，因为 SQLAlchemy 把 0 视为不限制连接池大小，上限会失效。SQLite engine 继续忽略连接池设置。
+
+默认值（`POOL_SIZE=10`、`MAX_CONNECTIONS=10`）把单个进程限制在 10 个连接。此前 SQLAlchemy 还会附加默认的 10 个溢出连接，因此同样的默认值实际允许 20 个连接。部署如果依赖那部分溢出容量，需要把 `DATABASE_MAX_CONNECTIONS` 提高到 `DATABASE_POOL_SIZE` 之上。
+
+`PASSWORD` 是 Pydantic 的 `SecretStr`。传入普通字符串会被保存为 secret。`repr(settings)` 和校验错误不会包含密码或拼好的 URL。URL 由 `sqlalchemy.engine.URL.create` 生成，用户名和密码里的 `@`、`:`、`/`、`%` 会正确转义并可以还原。只在真正打开连接的地方调用 `settings.PASSWORD.get_secret_value()`。
+
+### SQLite
+
+```bash
+export DATABASE_TYPE=sqlite
+export DATABASE_DRIVER=pysqlite
+export DATABASE_SCHEMA=bedrock.db
+```
+
+对于内存数据库，将 `DATABASE_SCHEMA` 设置为 `:memory:`。
+
+### PostgreSQL
+
+```bash
+export DATABASE_TYPE=postgresql
+export DATABASE_DRIVER=psycopg2
+export DATABASE_HOST=localhost
+export DATABASE_PORT=5432
+export DATABASE_USERNAME=myuser
+export DATABASE_PASSWORD=mypassword
+export DATABASE_SCHEMA=myapp
+```
+
+### MySQL
+
+```bash
+export DATABASE_TYPE=mysql
+export DATABASE_DRIVER=pymysql
+export DATABASE_HOST=localhost
+export DATABASE_PORT=3306
+export DATABASE_USERNAME=root
+export DATABASE_PASSWORD=secret
+export DATABASE_SCHEMA=myapp
+```
+
+### 通过代码配置
+
+将 `DbSettings` 实例直接传给 `db.init()`：
+
+```python
+from bedrock.database import db, DbSettings
+
+settings = DbSettings(
+    TYPE="postgresql",
+    DRIVER="psycopg2",
+    HOST="localhost",
+    PORT=5432,
+    USERNAME="admin",
+    PASSWORD="secret",
+    SCHEMA="myapp",
+)
+
+db.init(settings=settings)
+```
+
+你也可以完全覆盖连接 URL：
+
+```python
+db.init(url="postgresql+psycopg2://admin:secret@localhost:5432/myapp")
+```
+
+## DatabaseManager
+
+`db` 单例是一个 `DatabaseManager` 实例。它持有 engine、session factory 和 settings。所有访问都通过该对象进行。
+
+### API 参考
+
+| 方法 / 属性 | 签名 | 说明 |
+|-------------------|-----------|-------------|
+| `db.init()` | `init(url: str \| None = None, settings: DbSettings \| None = None)` | 初始化 engine 和 session factory。在进程启动时调用一次。 |
+| `db.engine` | `property → Engine` | SQLAlchemy engine。未初始化时会抛出 `DatabaseNotConfiguredError`。 |
+| `db.session` | `property → Session` | 当前上下文绑定的 session。没有绑定时抛出 `SessionNotBoundError`。 |
+| `db.session_factory` | `property → SessionFactory` | 底层 session factory。 |
+| `db.settings` | `property → DbSettings` | 解析后的数据库 settings。 |
+| `db.set_session(session)` | `set_session(session: Session)` | 将现有 session 绑定到当前执行上下文。 |
+| `db.clear_session()` | `clear_session()` | 关闭并解绑当前上下文局部 session。 |
+| `db.session_scope()` | `contextmanager → Session` | 事务作用域，自动提交/回滚。绑定到上下文。也可以用作装饰器。 |
+| `db.independent_session()` | `contextmanager → Session` | 隔离事务，不绑定到上下文。 |
+| `db.aengine` | `property → AsyncEngine` | 使用 `init()` 已解析的 URL，只把驱动换成 `DATABASE_ASYNC_DRIVER`。 |
+| `db.asession` | `property → AsyncSession` | 当前上下文绑定的异步 session，使用与 `db.session` 不同的上下文变量。没有绑定时抛出 `SessionNotBoundError`。 |
+| `db.asession_scope()` | `async context manager → AsyncSession` | 异步事务作用域，提交、回滚和禁止嵌套的规则与 `session_scope()` 相同。也可以用作 `async def` 的装饰器。 |
+| `db.aindependent_session()` | `async context manager → AsyncSession` | 不绑定 `db.asession` 的异步事务。 |
+| `db.close()` | `close()` | 释放同步 engine。已创建的异步 engine 仍可使用。可以重复调用。之后可以再次 `init()`。 |
+| `db.aclose()` | `async aclose()` | 释放异步 engine。同步 engine 仍可使用。可以重复调用。 |
+
+### 错误处理
+
+在调用 `db.init()` 之前访问 `db.engine`、`db.session` 或 `db.settings` 会抛出 `DatabaseNotConfiguredError`。使用这些属性前务必先初始化数据库。
+
+当前上下文没有绑定 session 时读取 `db.session` 或 `db.asession` 会抛出 `SessionNotBoundError`（`BedrockExc` 的子类）。框架不会隐式创建 session：请在入口处打开作用域。
+
+## 架构
+
+数据库模块按职责拆分为聚焦的文件与子包：
+
+```
+bedrock/database/
+├── __init__.py            # Public exports
+├── base.py                # BedrockModel (DeclarativeBase + CrudMixin)
+├── config.py              # DbSettings (env-prefixed BaseSettings)
+├── connection.py          # Engine and session factory builders
+├── manager.py             # DatabaseManager singleton (db)
+├── migration/             # 模块迁移管理器、依赖图、版本表、合并与脚本生成器
+├── query/                 # JSON Schema 驱动的 QuerySchema、策略、编译器与执行器
+├── session_factory.py     # Context-local sessions via ContextVar
+├── utils.py               # Model registry helpers
+├── filters.py             # 旧版过滤解析器（已弃用，计划 0.5.0 移除）
+└── service.py             # 旧版 search_filter_sort_paginate（已弃用，计划 0.5.0 移除）
+```
+
+## 反模式
+
+**避免在工作进行中重新初始化 `db`。** `db.init()` 支持替换：先构建新的同步 engine，再清理当前上下文的同步 session 并释放上一个同步 engine。如果异步 engine 已经打开过连接，先 `await db.aclose()` 再 `init()`，让这些连接在事件循环上关闭。替换前其他上下文必须自行管理其 session。
+
+**不要在初始化前访问 `db.session`。** 这会抛出 `DatabaseNotConfiguredError`。务必先调用 `db.init()`。
+
+**不要在作用域之外读取 `db.session`。** 这会抛出 `SessionNotBoundError`。请在入口处用 `db.session_scope()` 或 FastAPI 中间件绑定 session；service 只负责读取。
+
+**不要忘记清理自己绑定的 session。** 用 `db.set_session()` 绑定的 session 会一直保持绑定，直到调用 `db.clear_session()`。请在 `finally` 中调用。
+
+**不要在 service 或 model 层中放入 HTTP 类型。** Request 和 Response 对象应位于适配器边界，而不应进入业务逻辑。
+
+**不要绕过 `ModuleRegistry.install()` 来执行迁移。** registry 会处理依赖顺序和生命周期钩子，手动加载模块会跳过这些机制。
+
+**不要硬编码数据库 URL。** 使用环境变量或 `DbSettings`，让配置保持在代码之外。
+
+**不要在模块级别直接实例化 settings（如果环境变量可能尚未就绪）。** 使用 `bedrock.conf` 中的 `SettingsProxy` 包装模块级单例以延迟初始化。
+
+**不要在核心代码中导入 `contrib` 模块。** 核心运行时不能依赖 contrib 包。

@@ -1,5 +1,6 @@
 """Database query helpers for filtering, sorting, and pagination."""
 
+import warnings
 from typing import Any
 
 from sqlalchemy import (
@@ -80,7 +81,7 @@ def build_auto_joins(model: type[BedrockModel], filters: list[Filter | BooleanFi
     return auto_joins
 
 
-def build_query(
+def _build_query_internal(
     *,
     select: Select,
     model: type[BedrockModel],
@@ -98,40 +99,7 @@ def build_query(
     group_by: GroupBy | None = None,
     auto_join_: bool = True,
 ) -> tuple[Select, Select, list[ColumnElement[bool]]]:
-    """Build a filtered, sorted, paginated SQLAlchemy query pair.
-
-    Constructs both a data query and a corresponding count query from the
-    provided filter specifications, sort configuration, and pagination
-    parameters.
-
-    Args:
-        select: Base :class:`Select` statement to build upon.
-        model: The SQLAlchemy model class being queried.
-        limit: Maximum number of results per page.
-        page: 1-based page number.
-        sort_dir: Sort direction — ``"asc"`` or ``"desc"``.
-        q: Optional free-text search string.
-        sort_key: Column name or list of ``(column, direction)`` tuples
-            for ordering.
-        sqla_filters: Additional raw SQLAlchemy filter expressions.
-        filter_specs: Declarative filter specifications processed by
-            :func:`init_filters`.
-        join_models: Explicit join specifications (tuples of model classes
-            and optional ``isouter`` flag).
-        options: SQLAlchemy loader options (e.g. ``selectinload``).
-        show_all: When ``True``, ignore *limit* and *page*.
-        count_pk: Primary-key attribute name for the count query. Defaults
-            to the model's first primary key; any other name raises
-            :class:`~bedrock.exc.BadFilterFormatError`.
-        group_by: Column name or expression to group results by. The count
-            query then counts groups, not rows.
-        auto_join_: When ``True``, automatically join related models
-            required by filter field paths.
-
-    Returns:
-        A tuple of ``(data_query, count_query, filters)`` where *filters*
-        is the combined list of active filter clauses.
-    """
+    """Internal implementation shared by deprecated query helpers."""
     limit = _validate_query_limit(limit)
     sort_by = None
     offset = (page - 1) * limit if page > 1 else 0
@@ -198,6 +166,56 @@ def build_query(
     return query, count_query, filters
 
 
+def build_query(
+    *,
+    select: Select,
+    model: type[BedrockModel],
+    limit: int = 10,
+    page: int = 1,
+    sort_dir: str | None = None,
+    q: str | None = None,
+    sort_key: SortKey | None = None,
+    sqla_filters: list[ColumnElement[bool]] | None = None,
+    filter_specs: FilterSpecs | None = None,
+    join_models: list[tuple[Any, ...]] | None = None,
+    options: list[Any] | None = None,
+    show_all: bool = False,
+    count_pk: str | None = None,
+    group_by: GroupBy | None = None,
+    auto_join_: bool = True,
+) -> tuple[Select, Select, list[ColumnElement[bool]]]:
+    """Build a filtered, sorted, paginated SQLAlchemy query pair.
+
+    .. deprecated:: 0.4.2
+        Use :func:`bedrock.database.compile_query_schema` and its ``apply`` /
+        ``compile_where`` / ``compile_order_by`` methods instead. Scheduled for
+        removal in 0.5.0.
+    """
+    warnings.warn(
+        "`bedrock.database.service.build_query` is deprecated and will be removed in 0.5.0; "
+        "use `bedrock.database.compile_query_schema` instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return _build_query_internal(
+        select=select,
+        model=model,
+        limit=limit,
+        page=page,
+        sort_dir=sort_dir,
+        q=q,
+        sort_key=sort_key,
+        sqla_filters=sqla_filters,
+        filter_specs=filter_specs,
+        join_models=join_models,
+        options=options,
+        show_all=show_all,
+        count_pk=count_pk,
+        group_by=group_by,
+        auto_join_=auto_join_,
+    )
+
+
 def _search_statements(
     model: type[BedrockModel], additional_select: list[Any] | None, **build_kwargs: Any
 ) -> tuple[Select, Select]:
@@ -205,7 +223,7 @@ def _search_statements(
     select_fields = [model]
     if additional_select is not None:
         select_fields.extend(additional_select)
-    query, count_query, _ = build_query(select=sa_select(*select_fields), model=model, **build_kwargs)
+    query, count_query, _ = _build_query_internal(select=sa_select(*select_fields), model=model, **build_kwargs)
     return query, count_query
 
 
@@ -288,6 +306,12 @@ def search_filter_sort_paginate(
         ``"page_info"`` containing the query results and pagination
         metadata.
     """
+    warnings.warn(
+        "`bedrock.database.service.search_filter_sort_paginate` is deprecated and will be removed in 0.5.0; "
+        "use `bedrock.database.paginate_models` or `bedrock.database.compile_query_schema` instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     limit = _validate_query_limit(limit)
     query, count_query = _search_statements(
         model,
@@ -365,6 +389,12 @@ async def asearch_filter_sort_paginate(
         ``"page_info"`` containing the query results and pagination
         metadata.
     """
+    warnings.warn(
+        "`bedrock.database.service.asearch_filter_sort_paginate` is deprecated and will be removed in 0.5.0; "
+        "use `bedrock.database.apaginate_models` or `bedrock.database.compile_query_schema` instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     limit = _validate_query_limit(limit)
     query, count_query = _search_statements(
         model,
