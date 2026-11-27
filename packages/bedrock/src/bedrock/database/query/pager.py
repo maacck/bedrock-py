@@ -632,9 +632,15 @@ def _build_keyset_where(keys: Sequence[_CursorSortKey], values: Sequence[Any]) -
 class CursorPager(BasePager[CursorParams, CursorPageInfo]):
     """Forward keyset cursor pager with opaque URL-safe Base64 JSON tokens.
 
-    Automatically appends the model's primary key columns as deterministic
-    tie-breakers (in declared PK order, ascending) whenever they are not
-    already present in ``query.sort``.
+    For single-table queries, automatically appends the model's primary key
+    columns as deterministic tie-breakers (in declared PK order, ascending)
+    whenever they are not already present in ``query.sort``.
+
+    For multi-table, joined, or subquery selects where the base model's primary
+    key may not uniquely identify each output row (for example a 1-to-N join),
+    callers must declare explicit row-unique sortable keys via
+    ``CursorPager(unique_keys=[...])``; otherwise a :class:`BadFilterFormatError`
+    is raised instead of silently skipping rows.
 
     By default ``include_total=True`` runs ``COUNT(*)`` so ``PageResult.total``
     and ``CursorPageInfo.total`` are populated consistently across all pagers.
@@ -645,7 +651,19 @@ class CursorPager(BasePager[CursorParams, CursorPageInfo]):
     params_model: ClassVar[type[PaginationParams]] = CursorParams
     page_info_model: ClassVar[type[BasePageInfo]] = CursorPageInfo
 
-    def __init__(self, *, include_total: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        include_total: bool = True,
+        unique_keys: Sequence[str] | None = None,
+    ) -> None:
+        if unique_keys is not None:
+            keys_tuple = tuple(unique_keys)
+            if not keys_tuple:
+                raise BadFilterFormatError("`unique_keys` must contain at least one sortable field name.")
+            self.unique_keys: tuple[str, ...] | None = keys_tuple
+        else:
+            self.unique_keys = None
         self.include_total = include_total
 
     def build_params_schema(self, policy: QueryPolicy) -> CoreSchema:
@@ -738,21 +756,44 @@ class CursorPager(BasePager[CursorParams, CursorPageInfo]):
             )
             seen.add(item.field)
 
-        for pk_name in resolved.primary_key_order:
-            if pk_name in seen:
+        froms = stmt.get_final_froms()
+        model_table = getattr(resolved.model, "__table__", None)
+        sole_from = froms[0]._deannotate() if len(froms) == 1 and hasattr(froms[0], "_deannotate") else None
+        is_single_model_table = len(froms) == 1 and (froms[0] is model_table or sole_from is model_table)
+
+        if self.unique_keys is not None:
+            tie_breaker_names: tuple[str, ...] = self.unique_keys
+        elif is_single_model_table:
+            tie_breaker_names = resolved.primary_key_order
+        else:
+            raise BadFilterFormatError(
+                "CursorPager requires explicit `unique_keys` for multi-table or joined queries; "
+                "pass `CursorPager(unique_keys=[...])` or use PagePager/LimitOffsetPager."
+            )
+
+        for key_name in tie_breaker_names:
+            if key_name in seen:
                 continue
-            pk_field = resolved.fields[pk_name]
+            expr = resolved.sortable_expressions.get(key_name)
+            if expr is None:
+                raise BadFilterFormatError(
+                    f"Cursor unique key `{key_name}` is not a sortable field on {resolved.model.__name__}."
+                )
+            field_meta = resolved.fields.get(key_name)
+            if field_meta is None:
+                field_meta = _infer_sort_expression_field(key_name, expr)
+            nullable = field_meta is None or field_meta.nullable
             keys.append(
                 _CursorSortKey(
-                    name=pk_name,
-                    expr=pk_field.expression,
+                    name=key_name,
+                    expr=expr,
                     direction="asc",
-                    nulls=None,
-                    field=pk_field,
+                    nulls="last" if nullable else None,
+                    field=field_meta,
                     nulls_first=False,
                 )
             )
-            seen.add(pk_name)
+            seen.add(key_name)
 
         if not keys:
             raise BadFilterFormatError(

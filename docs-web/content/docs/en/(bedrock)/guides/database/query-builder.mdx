@@ -228,6 +228,7 @@ second = cursor_schema.paginate(
 ```
 
 - Tampered, malformed, or sort-mismatched cursors raise `InvalidCursorError` (a `BadFilterFormatError` subclass).
+- For multi-table / joined queries (such as `paginate_select()` with a `JOIN`), pass explicit row-unique sortable keys via `CursorPager(unique_keys=[...])` (e.g. `unique_keys=["id", "event_id"]` for a 1-to-N join); omitting `unique_keys` raises `BadFilterFormatError` to prevent silent row skips.
 - `CursorPager` rejects `group_by`, `DISTINCT`, `HAVING`, and aggregate projections with `BadFilterFormatError`; use `PagePager` or `LimitOffsetPager` for those queries.
 - `QuerySchema.apply(stmt, query, paginate=True)` delegates to `pager.apply(stmt, ctx)` (`OFFSET`/`LIMIT` for page & offset pagers; keyset `WHERE` + tie-breaker `ORDER BY` + `LIMIT` for `CursorPager`).
 

@@ -459,7 +459,7 @@ Queries use a strict JSON Schema DSL (`extra="forbid"` on every object) with top
 - **Pluggable Pagers (`pager=` on `QuerySchema` / `compile_query_schema` / `paginate_*`)**:
   - `PagePager()` (default): `{"page", "limit"}` -> `PageInfo` (`total`, `page`, `limit`, `offset`, `has_more`).
   - `LimitOffsetPager(include_total=True)`: `{"limit", "offset"}` -> `LimitOffsetPageInfo` (`total`, `limit`, `offset`, `has_more`).
-  - `CursorPager(include_total=True)`: `{"cursor", "limit"}` -> `CursorPageInfo` (`total`, `limit`, `has_more`, `next_cursor`); forward keyset pagination with opaque URL-safe Base64 JSON tokens, automatic PK tie-breakers, NULL-safe comparisons, and `InvalidCursorError` on tampered/sort-mismatched tokens.
+  - `CursorPager(include_total=True, unique_keys=None)`: `{"cursor", "limit"}` -> `CursorPageInfo` (`total`, `limit`, `has_more`, `next_cursor`); forward keyset pagination with opaque URL-safe Base64 JSON tokens, automatic PK tie-breakers on single-table queries (explicit `unique_keys` required for joined/multi-table selects), NULL-safe comparisons, and `InvalidCursorError` on tampered/sort-mismatched tokens.
   - Custom pagers subclass `PaginationParams` (inherits `limit`), `BasePageInfo`, and `BasePager`, returning `PageResult[T]` (`total: int | None`, `page_info: SerializeAsAny[BasePageInfo]`).
 
 ### Legacy `search_filter_sort_paginate` (Deprecated)

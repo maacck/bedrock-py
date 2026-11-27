@@ -168,6 +168,8 @@ class BasePageInfo(BedrockEntity):
 class PageInfo(BasePageInfo):
     """Page-number pagination metadata returned by :class:`PagePager`."""
 
+    model_config = ConfigDict(extra="forbid")
+
     total: int
     page: int
     offset: int
@@ -176,13 +178,20 @@ class PageInfo(BasePageInfo):
 class LimitOffsetPageInfo(BasePageInfo):
     """Offset-based pagination metadata returned by :class:`LimitOffsetPager`."""
 
+    model_config = ConfigDict(extra="forbid")
+
     offset: int
 
 
 class CursorPageInfo(BasePageInfo):
     """Forward keyset cursor pagination metadata returned by :class:`CursorPager`."""
 
+    model_config = ConfigDict(extra="forbid")
+
     next_cursor: str | None = None
+
+
+type BuiltinPageInfo = PageInfo | LimitOffsetPageInfo | CursorPageInfo | BasePageInfo
 
 
 class PageResult[M](BedrockEntity):
@@ -190,7 +199,7 @@ class PageResult[M](BedrockEntity):
 
     items: list[M]
     total: int | None = None
-    page_info: SerializeAsAny[BasePageInfo]
+    page_info: SerializeAsAny[BuiltinPageInfo]
 
 
 LogicalAndFilter.model_rebuild()

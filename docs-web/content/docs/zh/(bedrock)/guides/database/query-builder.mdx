@@ -225,6 +225,7 @@ second = cursor_schema.paginate(
 ```
 
 - 篡改、格式非法或与当前 `sort` 不匹配的游标会抛出 `InvalidCursorError`（`BadFilterFormatError` 子类）。
+- 跨表 / `JOIN` 查询（例如带联表的 `paginate_select()`）必须通过 `CursorPager(unique_keys=[...])` 显式声明行级唯一排序键（如 1-to-N 联表传 `unique_keys=["id", "event_id"]`）；未传时会直接抛出 `BadFilterFormatError`，避免主表主键不唯一导致静默漏行。
 - `CursorPager` 不支持 `group_by`、`DISTINCT`、`HAVING` 及聚合投影查询（会明确抛出 `BadFilterFormatError`），此类查询请使用 `PagePager` 或 `LimitOffsetPager`。
 - `QuerySchema.apply(stmt, query, paginate=True)` 会委托给 `pager.apply(stmt, ctx)`（页码/偏移分页拼 `OFFSET`/`LIMIT`，游标分页拼 keyset `WHERE` + 主键 tie-breaker `ORDER BY` + `LIMIT`）。
 

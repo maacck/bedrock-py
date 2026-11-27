@@ -590,20 +590,31 @@ class TestCursorPager:
         )
         assert page2.items == [{"code": "E-2"}, {"code": "E-3"}]
 
-        # Cross-table paginate_select with extra_fields sort
+        # Cross-table paginate_select requires explicit unique_keys to prevent silent fan-out skips
         join_stmt = (
             select(PagerEvent.code, PagerAccount.name.label("account_name"))
             .select_from(PagerEvent)
             .join(PagerAccount, PagerEvent.account_id == PagerAccount.id)
         )
         join_policy = QueryPolicy(extra_fields={"account_name": FieldPolicy(column=PagerAccount.name, sortable=True)})
+        with pytest.raises(BadFilterFormatError, match="unique_keys"):
+            paginate_select(
+                pager_sync_session,
+                PagerEvent,
+                join_stmt,
+                query={"sort": [{"field": "account_name", "direction": "desc"}], "pagination": {"limit": 2}},
+                policy=join_policy,
+                pager=pager,
+            )
+
+        n_to_1_pager = CursorPager(unique_keys=["id"])
         sel1 = paginate_select(
             pager_sync_session,
             PagerEvent,
             join_stmt,
             query={"sort": [{"field": "account_name", "direction": "desc"}], "pagination": {"limit": 2}},
             policy=join_policy,
-            pager=pager,
+            pager=n_to_1_pager,
         )
         assert sel1.items == [
             {"code": "E-3", "account_name": "Beta"},
@@ -618,11 +629,52 @@ class TestCursorPager:
                 "pagination": {"cursor": sel1.page_info.next_cursor, "limit": 2},  # type: ignore[attr-defined]
             },
             policy=join_policy,
-            pager=pager,
+            pager=n_to_1_pager,
         )
         assert sel2.items == [
             {"code": "E-1", "account_name": "Alpha"},
             {"code": "E-2", "account_name": "Alpha"},
+        ]
+
+        # 1-to-N fan-out join (Account -> Events): rejected without unique_keys, lossless with unique_keys=["id", "event_id"]
+        fanout_stmt = (
+            select(PagerAccount.name.label("account_name"), PagerEvent.code.label("event_code"))
+            .select_from(PagerAccount)
+            .join(PagerEvent, PagerEvent.account_id == PagerAccount.id)
+        )
+        fanout_policy = QueryPolicy(extra_fields={"event_id": FieldPolicy(column=PagerEvent.id, sortable=True)})
+        with pytest.raises(BadFilterFormatError, match="unique_keys"):
+            paginate_select(
+                pager_sync_session,
+                PagerAccount,
+                fanout_stmt,
+                query={"pagination": {"limit": 1}},
+                policy=fanout_policy,
+                pager=CursorPager(),
+            )
+
+        fanout_pager = CursorPager(unique_keys=["id", "event_id"])
+        seen_pairs: list[tuple[str, str]] = []
+        cursor: str | None = None
+        while True:
+            fp_page = paginate_select(
+                pager_sync_session,
+                PagerAccount,
+                fanout_stmt,
+                query={"pagination": {"cursor": cursor, "limit": 1}},
+                policy=fanout_policy,
+                pager=fanout_pager,
+            )
+            seen_pairs.extend((row["account_name"], row["event_code"]) for row in fp_page.items)
+            if not fp_page.page_info.has_more:
+                break
+            cursor = fp_page.page_info.next_cursor  # type: ignore[attr-defined]
+        assert seen_pairs == [
+            ("Alpha", "E-1"),
+            ("Alpha", "E-2"),
+            ("Alpha", "E-5"),
+            ("Beta", "E-3"),
+            ("Beta", "E-4"),
         ]
 
         # group_by is explicitly rejected by CursorPager
@@ -960,3 +1012,49 @@ class TestCustomExternalPager:
                 break
             cursor = page.page_info.next_cursor  # type: ignore[attr-defined]
         assert ranks_seen == ["E-2", "E-4", "E-1", "E-5", "E-3"]
+
+    def test_page_result_round_trips_concrete_page_info_types_and_exposes_json_schema(self, pager_sync_session):
+        # PageInfo round-trip
+        p_page = paginate_fields(
+            pager_sync_session,
+            PagerEvent,
+            fields=["code"],
+            query={"pagination": {"page": 2, "limit": 2}},
+        )
+        p_reloaded = PageResult[dict[str, Any]].model_validate_json(p_page.model_dump_json())
+        assert isinstance(p_reloaded.page_info, PageInfo)
+        assert p_reloaded.page_info.page == 2
+        assert p_reloaded.page_info.offset == 2
+        assert p_reloaded.page_info.total == 5
+
+        # LimitOffsetPageInfo round-trip
+        o_page = paginate_fields(
+            pager_sync_session,
+            PagerEvent,
+            fields=["code"],
+            query={"pagination": {"offset": 1, "limit": 2}},
+            pager=LimitOffsetPager(),
+        )
+        o_reloaded = PageResult[dict[str, Any]].model_validate_json(o_page.model_dump_json())
+        assert isinstance(o_reloaded.page_info, LimitOffsetPageInfo)
+        assert o_reloaded.page_info.offset == 1
+        assert o_reloaded.page_info.total == 5
+
+        # CursorPageInfo round-trip preserves next_cursor so subsequent pages can be fetched
+        c_page = paginate_fields(
+            pager_sync_session,
+            PagerEvent,
+            fields=["code"],
+            query={"pagination": {"limit": 2}},
+            pager=CursorPager(),
+        )
+        c_reloaded = PageResult[dict[str, Any]].model_validate_json(c_page.model_dump_json())
+        assert isinstance(c_reloaded.page_info, CursorPageInfo)
+        assert c_reloaded.page_info.next_cursor == c_page.page_info.next_cursor  # type: ignore[attr-defined]
+        assert c_reloaded.page_info.next_cursor is not None
+
+        # Generated JSON Schema exposes concrete page_info fields (page, offset, next_cursor)
+        result_schema = json.dumps(PageResult[dict[str, Any]].model_json_schema())
+        assert '"page"' in result_schema
+        assert '"offset"' in result_schema
+        assert '"next_cursor"' in result_schema
