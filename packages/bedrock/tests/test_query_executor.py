@@ -468,3 +468,71 @@ class TestCustomSelectExecutors:
             policy=report_policy,
         )
         assert rows == [{"country": "US", "status": "paid", "gmv": 300}]
+
+    def test_paginated_executors_normalize_prior_limit_and_offset_consistently_sync(self, sync_session):
+        limited_base = select(ExecOrder).limit(1).offset(2)
+
+        model_page = paginate_models(
+            sync_session,
+            ExecOrder,
+            base_select=limited_base,
+            query={"pagination": {"page": 1, "limit": 10}},
+        )
+        assert model_page.total == 4
+        assert len(model_page.items) == 4
+        assert model_page.page_info.has_more is False
+
+        fields_page = paginate_fields(
+            sync_session,
+            ExecOrder,
+            fields=["code"],
+            base_select=limited_base,
+            query={"pagination": {"page": 1, "limit": 10}},
+        )
+        assert fields_page.total == 4
+        assert len(fields_page.items) == 4
+        assert fields_page.page_info.has_more is False
+
+        select_page = paginate_select(
+            sync_session,
+            ExecOrder,
+            select(ExecOrder.code).limit(1).offset(2),
+            query={"pagination": {"page": 1, "limit": 10}},
+        )
+        assert select_page.total == 4
+        assert len(select_page.items) == 4
+        assert select_page.page_info.has_more is False
+
+    @pytest.mark.asyncio
+    async def test_paginated_executors_normalize_prior_limit_and_offset_consistently_async(
+        self, async_session: AsyncSession
+    ):
+        limited_base = select(ExecOrder).limit(1).offset(2)
+
+        model_page = await apaginate_models(
+            async_session,
+            ExecOrder,
+            base_select=limited_base,
+            query={"pagination": {"page": 1, "limit": 10}},
+        )
+        assert model_page.total == 4
+        assert len(model_page.items) == 4
+
+        fields_page = await apaginate_fields(
+            async_session,
+            ExecOrder,
+            fields=["code"],
+            base_select=limited_base,
+            query={"pagination": {"page": 1, "limit": 10}},
+        )
+        assert fields_page.total == 4
+        assert len(fields_page.items) == 4
+
+        select_page = await apaginate_select(
+            async_session,
+            ExecOrder,
+            select(ExecOrder.code).limit(1).offset(2),
+            query={"pagination": {"page": 1, "limit": 10}},
+        )
+        assert select_page.total == 4
+        assert len(select_page.items) == 4

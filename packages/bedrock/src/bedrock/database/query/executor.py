@@ -66,12 +66,23 @@ def _resolve_projection_exprs(
 
 def _is_plain_model_column(expr: Any, model: type[Any]) -> bool:
     """Return ``True`` only when *expr* projects a plain column on *model* (1:1 row cardinality)."""
+    model_table = getattr(model, "__table__", None)
     target = expr.element if isinstance(expr, Label) else expr
     if isinstance(target, InstrumentedAttribute):
-        return bool(target.class_ is model and hasattr(target.property, "columns"))
+        cols = getattr(target.property, "columns", None)
+        return bool(
+            target.class_ is model
+            and cols
+            and all(isinstance(col, Column) and col.table is model_table for col in cols)
+        )
     if isinstance(target, Column):
-        return target.table is getattr(model, "__table__", None)
+        return target.table is model_table
     return False
+
+
+def _count_subquery(stmt: Select[Any]) -> Select[Any]:
+    """Count rows of *stmt* after clearing ordering and any prior pagination clauses."""
+    return select(func.count()).select_from(stmt.order_by(None).limit(None).offset(None).fetch(None).subquery())
 
 
 def _build_page_result[T](items: list[T], total: int, *, page: int, limit: int) -> PageResult[T]:
@@ -195,11 +206,11 @@ class QuerySchema[M: BedrockModel]:
 
         if paginated:
             page, limit = self._pagination_bounds(spec)
-            data_stmt = data_stmt.offset((page - 1) * limit).limit(limit)
+            data_stmt = data_stmt.fetch(None).offset((page - 1) * limit).limit(limit)
             if base_select is None:
                 count_stmt: Select[Any] | None = select(func.count()).select_from(self.model).where(where_clause)
             else:
-                count_stmt = select(func.count()).select_from(filtered.order_by(None).subquery())
+                count_stmt = _count_subquery(filtered)
             return data_stmt, count_stmt, page, limit
 
         cap = _validate_server_limit(server_limit)
@@ -241,12 +252,12 @@ class QuerySchema[M: BedrockModel]:
 
         if paginated:
             page, limit = self._pagination_bounds(spec)
-            data_stmt = data_stmt.offset((page - 1) * limit).limit(limit)
+            data_stmt = data_stmt.fetch(None).offset((page - 1) * limit).limit(limit)
             all_plain_columns = all(_is_plain_model_column(expr, self.model) for expr in projected)
             if not grouped and base_select is None and all_plain_columns:
                 count_stmt: Select[Any] | None = select(func.count()).select_from(self.model).where(where_clause)
             else:
-                count_stmt = select(func.count()).select_from(filtered.order_by(None).subquery())
+                count_stmt = _count_subquery(filtered)
             return data_stmt, count_stmt, page, limit
 
         cap = _validate_server_limit(server_limit)
@@ -271,8 +282,8 @@ class QuerySchema[M: BedrockModel]:
 
         if paginated:
             page, limit = self._pagination_bounds(spec)
-            data_stmt = data_stmt.offset((page - 1) * limit).limit(limit)
-            count_stmt: Select[Any] | None = select(func.count()).select_from(filtered.order_by(None).subquery())
+            data_stmt = data_stmt.fetch(None).offset((page - 1) * limit).limit(limit)
+            count_stmt: Select[Any] | None = _count_subquery(filtered)
             return data_stmt, count_stmt, page, limit
 
         cap = _validate_server_limit(server_limit)

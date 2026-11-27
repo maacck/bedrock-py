@@ -345,8 +345,8 @@ def _resolve_scalar_field(
             attr = getattr(model, name)
             col = mapper.column_attrs[name].columns[0]
             expression = attr
-            sql_type = col.type
-            inferred_nullable = bool(col.nullable)
+            sql_type = getattr(col, "type", None)
+            inferred_nullable = bool(getattr(col, "nullable", True))
         elif name in mapper.all_orm_descriptors:
             descriptor = mapper.all_orm_descriptors[name]
             ext = getattr(descriptor, "extension_type", None)

@@ -31,7 +31,7 @@ from sqlalchemy import (
     Enum as SAEnum,
 )
 from sqlalchemy.ext.hybrid import hybrid_property
-from sqlalchemy.orm import DeclarativeBase, relationship, sessionmaker
+from sqlalchemy.orm import DeclarativeBase, column_property, relationship, sessionmaker
 
 
 class StatusEnum(enum.StrEnum):
@@ -134,6 +134,16 @@ class CategoryNode(PolicyBase):
     parent = relationship("CategoryNode", remote_side=[id])
 
 
+class ComputedPropertyModel(PolicyBase):
+    __tablename__ = "policy_computed_props"
+    __filterable_fields__ = "__all__"
+
+    id = Column(Integer, primary_key=True)
+    first_name = Column(String(50), nullable=False)
+    last_name = Column(String(50), nullable=False)
+    full_name = column_property(first_name + " " + last_name)
+
+
 class EscapedSearchItem(BedrockModel):
     __tablename__ = "policy_escaped_search_items"
     __searchable_columns__ = ["name"]
@@ -217,6 +227,19 @@ class TestPolicyResolution:
     def test_hybrid_without_explicit_value_type_raises_at_compile_time(self):
         with pytest.raises(BadFilterFormatError, match="value_type"):
             resolve_model_policy(RichOrder, policy=QueryPolicy(fields={"label_code": FieldPolicy()}))
+
+    def test_calculated_column_property_infers_nullable_safely(self):
+        resolved = resolve_model_policy(ComputedPropertyModel)
+        assert resolved.fields["full_name"].scalar_kind == "str"
+        assert resolved.fields["full_name"].nullable is True
+        assert "is_null" in resolved.fields["full_name"].operators
+
+        non_nullable = resolve_model_policy(
+            ComputedPropertyModel,
+            policy=QueryPolicy(fields={"full_name": FieldPolicy(nullable=False)}),
+        )
+        assert non_nullable.fields["full_name"].nullable is False
+        assert "is_null" not in non_nullable.fields["full_name"].operators
 
     def test_text_search_escapes_like_wildcards(self):
         engine = create_engine("sqlite:///:memory:")
