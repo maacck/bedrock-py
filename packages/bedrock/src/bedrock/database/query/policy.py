@@ -207,16 +207,22 @@ class ResolvedModelPolicy:
     model: type[Any]
     policy: QueryPolicy
     primary_keys: frozenset[str]
+    primary_key_order: tuple[str, ...]
     fields: dict[str, ResolvedField]
     dotted_fields: dict[str, ResolvedDottedField]
     relations: dict[str, ResolvedRelation]
     sortable_expressions: dict[str, Any]
 
 
+def primary_key_order(model: type[Any]) -> tuple[str, ...]:
+    """Return the mapped attribute names of *model*'s primary-key columns in declared PK order."""
+    mapper: Mapper[Any] = inspect(model)
+    return tuple(mapper.get_property_by_column(col).key for col in mapper.primary_key)
+
+
 def primary_key_names(model: type[Any]) -> frozenset[str]:
     """Return the mapped attribute names of *model*'s primary-key columns."""
-    mapper: Mapper[Any] = inspect(model)
-    return frozenset(mapper.get_property_by_column(col).key for col in mapper.primary_key)
+    return frozenset(primary_key_order(model))
 
 
 def _merge_policies(base: QueryPolicy | None, override: QueryPolicy | None) -> QueryPolicy:
@@ -532,12 +538,13 @@ def resolve_model_policy(
     merged = _merge_policies(model_policy, policy)
     _validate_policy_budgets(merged)
 
-    pks = primary_key_names(model)
+    pk_order = primary_key_order(model)
+    pks = frozenset(pk_order)
     is_all, declared_names = _declared_allowlist(model)
 
     # Determine allowed scalar attribute names and relationship names.
     # "__all__" expands all mapped columns on this model, NEVER relationships (ADR-4).
-    allowed_scalar_names: list[str] = sorted(pks)
+    allowed_scalar_names: list[str] = list(pk_order)
     allowed_relation_names: list[str] = []
 
     if is_all:
@@ -595,6 +602,7 @@ def resolve_model_policy(
         model=model,
         policy=merged,
         primary_keys=pks,
+        primary_key_order=pk_order,
         fields=fields,
         dotted_fields={},
         relations=relations,
@@ -617,6 +625,7 @@ def resolve_model_policy(
         model=model,
         policy=merged,
         primary_keys=pks,
+        primary_key_order=pk_order,
         fields=fields,
         dotted_fields=dotted_fields,
         relations=relations,

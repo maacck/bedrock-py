@@ -3,7 +3,15 @@
 from collections.abc import Mapping
 from typing import Any, Literal
 
-from pydantic import ConfigDict, Field, SerializerFunctionWrapHandler, StrictInt, model_serializer, model_validator
+from pydantic import (
+    ConfigDict,
+    Field,
+    SerializeAsAny,
+    SerializerFunctionWrapHandler,
+    StrictInt,
+    model_serializer,
+    model_validator,
+)
 from sqlalchemy.orm import InstrumentedAttribute
 from sqlalchemy.sql.elements import ColumnElement
 
@@ -105,11 +113,36 @@ class SortSpec(_StrictQueryEntity):
     nulls: NullsOrder | None = None
 
 
-class PaginationSpec(_StrictQueryEntity):
-    """1-based page pagination specification."""
+class PaginationParams(_StrictQueryEntity):
+    """Base pagination input parameters shared by all pagers.
+
+    External custom pagers should subclass :class:`PaginationParams` so ``limit``
+    is automatically validated against the query policy's ``default_limit`` and
+    ``max_limit`` bounds.
+    """
+
+    limit: StrictInt = Field(default=10, ge=1)
+
+
+class PaginationSpec(PaginationParams):
+    """1-based page pagination parameters (used by :class:`PagePager`)."""
 
     page: StrictInt = Field(default=1, ge=1)
-    limit: StrictInt = Field(default=10, ge=1)
+
+
+class LimitOffsetParams(PaginationParams):
+    """Offset-based pagination parameters (used by :class:`LimitOffsetPager`)."""
+
+    offset: StrictInt = Field(default=0, ge=0)
+
+
+class CursorParams(PaginationParams):
+    """Forward keyset cursor pagination parameters (used by :class:`CursorPager`)."""
+
+    cursor: str | None = None
+
+
+type BuiltinPaginationParams = PaginationSpec | LimitOffsetParams | CursorParams | PaginationParams
 
 
 class QuerySpec(_StrictQueryEntity):
@@ -118,28 +151,46 @@ class QuerySpec(_StrictQueryEntity):
     filter: FilterNode | None = None
     sort: list[SortSpec] = Field(default_factory=list)
     search: str | None = None
-    pagination: PaginationSpec | None = None
+    pagination: SerializeAsAny[BuiltinPaginationParams] | None = None
 
 
 type QueryInput = str | bytes | Mapping[str, Any] | QuerySpec | None
 
 
-class PageInfo(BedrockEntity):
-    """Pagination metadata returned alongside paged query items."""
+class BasePageInfo(BedrockEntity):
+    """Base pagination metadata shared by all pagers."""
+
+    total: int | None = None
+    limit: int
+    has_more: bool
+
+
+class PageInfo(BasePageInfo):
+    """Page-number pagination metadata returned by :class:`PagePager`."""
 
     total: int
     page: int
-    limit: int
     offset: int
-    has_more: bool
+
+
+class LimitOffsetPageInfo(BasePageInfo):
+    """Offset-based pagination metadata returned by :class:`LimitOffsetPager`."""
+
+    offset: int
+
+
+class CursorPageInfo(BasePageInfo):
+    """Forward keyset cursor pagination metadata returned by :class:`CursorPager`."""
+
+    next_cursor: str | None = None
 
 
 class PageResult[M](BedrockEntity):
     """Typed container returned by paginated query executors."""
 
     items: list[M]
-    total: int
-    page_info: PageInfo
+    total: int | None = None
+    page_info: SerializeAsAny[BasePageInfo]
 
 
 LogicalAndFilter.model_rebuild()

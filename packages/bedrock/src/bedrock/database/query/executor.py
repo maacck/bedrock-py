@@ -20,12 +20,12 @@ from .ast import (
     FieldExpr,
     FilterNode,
     GroupByExpr,
-    PageInfo,
     PageResult,
     QueryInput,
     QuerySpec,
 )
 from .compiler import compile_order_by, compile_where
+from .pager import BasePager, PagePager, PaginationContext
 from .policy import QueryPolicy, ResolvedModelPolicy, resolve_model_policy
 from .schema import CompiledQueryValidator
 
@@ -92,22 +92,6 @@ def _count_subquery(stmt: Select[Any]) -> Select[Any]:
     return select(func.count()).select_from(stmt.order_by(None).limit(None).offset(None).fetch(None).subquery())
 
 
-def _build_page_result[T](items: list[T], total: int, *, page: int, limit: int) -> PageResult[T]:
-    """Assemble a typed ``PageResult`` from executed rows and total count."""
-    offset = (page - 1) * limit
-    return PageResult[T](
-        items=items,
-        total=total,
-        page_info=PageInfo(
-            total=total,
-            page=page,
-            limit=limit,
-            offset=offset,
-            has_more=total > offset + limit,
-        ),
-    )
-
-
 class QuerySchema[M: BedrockModel]:
     """Compiled JSON Schema query contract, validator, SQLAlchemy compiler, and executor.
 
@@ -117,11 +101,18 @@ class QuerySchema[M: BedrockModel]:
     entities without HTTP coupling in ``bedrock-core``.
     """
 
-    def __init__(self, model: type[M], *, policy: QueryPolicy | None = None) -> None:
+    def __init__(
+        self,
+        model: type[M],
+        *,
+        policy: QueryPolicy | None = None,
+        pager: BasePager[Any, Any] | None = None,
+    ) -> None:
         self.model: type[M] = model
         self._resolved: ResolvedModelPolicy = resolve_model_policy(model, policy=policy)
         self.policy: QueryPolicy = self._resolved.policy
-        self._validator = CompiledQueryValidator(self._resolved)
+        self.pager: BasePager[Any, Any] = pager if pager is not None else PagePager()
+        self._validator = CompiledQueryValidator(self._resolved, pager=self.pager)
 
     def __get_pydantic_core_schema__(
         self,
@@ -176,65 +167,82 @@ class QuerySchema[M: BedrockModel]:
         spec = self.validate(query)
         where_clause = compile_where(spec, self._resolved)
         order_clauses = compile_order_by(spec, self._resolved)
-        out = stmt.where(where_clause)
-        if order_clauses:
-            out = out.order_by(*order_clauses)
-        if paginate:
-            page, limit = self._pagination_bounds(spec)
-            out = out.offset((page - 1) * limit).limit(limit)
-        return out
+        filtered = stmt.where(where_clause)
+        if not paginate:
+            return filtered.order_by(*order_clauses) if order_clauses else filtered
 
-    def _pagination_bounds(self, spec: QuerySpec) -> tuple[int, int]:
-        if spec.pagination is None:
-            return 1, self.policy.default_limit
-        return spec.pagination.page, spec.pagination.limit
+        params = self.pager.parse_params(spec.pagination, self.policy)
+        ctx: PaginationContext[Any, Any] = PaginationContext(
+            filtered_stmt=filtered,
+            order_clauses=order_clauses,
+            spec=spec,
+            params=params,
+            resolved=self._resolved,
+            count_stmt=_count_subquery(filtered),
+            mode="select",
+            has_group_by=bool(getattr(filtered, "_group_by_clauses", ())),
+        )
+        return self.pager.apply(filtered, ctx)
 
-    def _model_statements(
+    def _model_search_stmt(
         self,
         query: QueryInput,
         *,
         base_select: Select[Any] | None,
         options: Sequence[ExecutableOption] | None,
-        paginated: bool,
         server_limit: int | None = None,
-    ) -> tuple[Select[Any], Select[Any] | None, int, int]:
+    ) -> Select[Any]:
         spec = self.validate(query)
         where_clause = compile_where(spec, self._resolved)
         order_clauses = compile_order_by(spec, self._resolved)
 
         base = select(self.model) if base_select is None else base_select
-        filtered = base.where(where_clause)
-
-        data_stmt = filtered
+        data_stmt = base.where(where_clause)
         if order_clauses:
             data_stmt = data_stmt.order_by(*order_clauses)
         if options:
             data_stmt = data_stmt.options(*options)
-
-        if paginated:
-            page, limit = self._pagination_bounds(spec)
-            data_stmt = data_stmt.fetch(None).offset((page - 1) * limit).limit(limit)
-            if base_select is None:
-                count_stmt: Select[Any] | None = select(func.count()).select_from(self.model).where(where_clause)
-            else:
-                count_stmt = _count_subquery(filtered)
-            return data_stmt, count_stmt, page, limit
-
         cap = _validate_server_limit(server_limit)
         if cap is not None:
             data_stmt = data_stmt.limit(cap)
-        return data_stmt, None, 1, 0
+        return data_stmt
 
-    def _fields_statements(
+    def _model_pagination_ctx(
+        self,
+        query: QueryInput,
+        *,
+        base_select: Select[Any] | None,
+        options: Sequence[ExecutableOption] | None,
+    ) -> PaginationContext[M, Any]:
+        spec = self.validate(query)
+        where_clause = compile_where(spec, self._resolved)
+        order_clauses = compile_order_by(spec, self._resolved)
+        base = select(self.model) if base_select is None else base_select
+        filtered = base.where(where_clause)
+        if base_select is None:
+            count_stmt: Select[Any] = select(func.count()).select_from(self.model).where(where_clause)
+        else:
+            count_stmt = _count_subquery(filtered)
+        return PaginationContext(
+            filtered_stmt=filtered,
+            order_clauses=order_clauses,
+            spec=spec,
+            params=self.pager.parse_params(spec.pagination, self.policy),
+            resolved=self._resolved,
+            count_stmt=count_stmt,
+            mode="models",
+            options=options,
+            has_group_by=bool(getattr(filtered, "_group_by_clauses", ())),
+        )
+
+    def _fields_base(
         self,
         fields: Sequence[FieldExpr],
         query: QueryInput,
         *,
         group_by: Sequence[GroupByExpr] | None,
         base_select: Select[Any] | None,
-        paginated: bool,
-        server_limit: int | None = None,
-    ) -> tuple[Select[Any], Select[Any] | None, int, int]:
+    ) -> tuple[QuerySpec, Select[Any], ColumnElement[bool], list[ColumnElement[Any]], list[Any], list[Any]]:
         if not fields:
             raise BadFilterFormatError("`fields` must contain at least one column or expression.")
 
@@ -252,51 +260,95 @@ class QuerySchema[M: BedrockModel]:
         filtered = base.where(where_clause)
         if grouped:
             filtered = filtered.group_by(*grouped)
+        return spec, filtered, where_clause, order_clauses, projected, grouped
 
-        data_stmt = filtered
-        if order_clauses:
-            data_stmt = data_stmt.order_by(*order_clauses)
-
-        if paginated:
-            page, limit = self._pagination_bounds(spec)
-            data_stmt = data_stmt.fetch(None).offset((page - 1) * limit).limit(limit)
-            all_plain_columns = all(_is_plain_model_column(expr, self.model) for expr in projected)
-            if not grouped and base_select is None and all_plain_columns:
-                count_stmt: Select[Any] | None = select(func.count()).select_from(self.model).where(where_clause)
-            else:
-                count_stmt = _count_subquery(filtered)
-            return data_stmt, count_stmt, page, limit
-
+    def _fields_search_stmt(
+        self,
+        fields: Sequence[FieldExpr],
+        query: QueryInput,
+        *,
+        group_by: Sequence[GroupByExpr] | None,
+        base_select: Select[Any] | None,
+        server_limit: int | None = None,
+    ) -> Select[Any]:
+        _, filtered, _, order_clauses, _, _ = self._fields_base(
+            fields,
+            query,
+            group_by=group_by,
+            base_select=base_select,
+        )
+        data_stmt = filtered.order_by(*order_clauses) if order_clauses else filtered
         cap = _validate_server_limit(server_limit)
         if cap is not None:
             data_stmt = data_stmt.limit(cap)
-        return data_stmt, None, 1, 0
+        return data_stmt
 
-    def _select_statements(
+    def _fields_pagination_ctx(
+        self,
+        fields: Sequence[FieldExpr],
+        query: QueryInput,
+        *,
+        group_by: Sequence[GroupByExpr] | None,
+        base_select: Select[Any] | None,
+    ) -> PaginationContext[dict[str, Any], Any]:
+        spec, filtered, where_clause, order_clauses, projected, grouped = self._fields_base(
+            fields,
+            query,
+            group_by=group_by,
+            base_select=base_select,
+        )
+        all_plain_columns = all(_is_plain_model_column(expr, self.model) for expr in projected)
+        if not grouped and base_select is None and all_plain_columns:
+            count_stmt: Select[Any] = select(func.count()).select_from(self.model).where(where_clause)
+        else:
+            count_stmt = _count_subquery(filtered)
+        return PaginationContext(
+            filtered_stmt=filtered,
+            order_clauses=order_clauses,
+            spec=spec,
+            params=self.pager.parse_params(spec.pagination, self.policy),
+            resolved=self._resolved,
+            count_stmt=count_stmt,
+            mode="fields",
+            has_group_by=bool(grouped) or bool(getattr(filtered, "_group_by_clauses", ())),
+        )
+
+    def _select_search_stmt(
         self,
         stmt: Select[Any],
         query: QueryInput,
         *,
-        paginated: bool,
         server_limit: int | None = None,
-    ) -> tuple[Select[Any], Select[Any] | None, int, int]:
+    ) -> Select[Any]:
         spec = self.validate(query)
         where_clause = compile_where(spec, self._resolved)
         order_clauses = compile_order_by(spec, self._resolved)
-
         filtered = stmt.where(where_clause)
         data_stmt = filtered.order_by(*order_clauses) if order_clauses else filtered
-
-        if paginated:
-            page, limit = self._pagination_bounds(spec)
-            data_stmt = data_stmt.fetch(None).offset((page - 1) * limit).limit(limit)
-            count_stmt: Select[Any] | None = _count_subquery(filtered)
-            return data_stmt, count_stmt, page, limit
-
         cap = _validate_server_limit(server_limit)
         if cap is not None:
             data_stmt = data_stmt.limit(cap)
-        return data_stmt, None, 1, 0
+        return data_stmt
+
+    def _select_pagination_ctx(
+        self,
+        stmt: Select[Any],
+        query: QueryInput,
+    ) -> PaginationContext[dict[str, Any], Any]:
+        spec = self.validate(query)
+        where_clause = compile_where(spec, self._resolved)
+        order_clauses = compile_order_by(spec, self._resolved)
+        filtered = stmt.where(where_clause)
+        return PaginationContext(
+            filtered_stmt=filtered,
+            order_clauses=order_clauses,
+            spec=spec,
+            params=self.pager.parse_params(spec.pagination, self.policy),
+            resolved=self._resolved,
+            count_stmt=_count_subquery(filtered),
+            mode="select",
+            has_group_by=bool(getattr(filtered, "_group_by_clauses", ())),
+        )
 
     # --- 1. Model entity search & paginate ---
 
@@ -314,11 +366,10 @@ class QuerySchema[M: BedrockModel]:
         Validates *query* (including ``pagination`` if present) and silently
         ignores ``query.pagination`` without running a ``COUNT(*)`` query.
         """
-        data_stmt, _, _, _ = self._model_statements(
+        data_stmt = self._model_search_stmt(
             query,
             base_select=base_select,
             options=options,
-            paginated=False,
             server_limit=limit,
         )
         return list(session.execute(data_stmt).unique().scalars().all())
@@ -333,11 +384,10 @@ class QuerySchema[M: BedrockModel]:
         limit: int | None = None,
     ) -> list[M]:
         """Asynchronous counterpart of :meth:`search` for ``AsyncSession``."""
-        data_stmt, _, _, _ = self._model_statements(
+        data_stmt = self._model_search_stmt(
             query,
             base_select=base_select,
             options=options,
-            paginated=False,
             server_limit=limit,
         )
         result = await session.execute(data_stmt)
@@ -352,16 +402,8 @@ class QuerySchema[M: BedrockModel]:
         options: Sequence[ExecutableOption] | None = None,
     ) -> PageResult[M]:
         """Execute a paginated entity search returning :class:`PageResult`."""
-        data_stmt, count_stmt, page, limit = self._model_statements(
-            query,
-            base_select=base_select,
-            options=options,
-            paginated=True,
-        )
-        assert count_stmt is not None
-        total = int(session.execute(count_stmt).scalar() or 0)
-        items = list(session.execute(data_stmt).unique().scalars().all())
-        return _build_page_result(items, total, page=page, limit=limit)
+        ctx = self._model_pagination_ctx(query, base_select=base_select, options=options)
+        return self.pager.paginate(session, ctx)
 
     async def apaginate(
         self,
@@ -372,16 +414,8 @@ class QuerySchema[M: BedrockModel]:
         options: Sequence[ExecutableOption] | None = None,
     ) -> PageResult[M]:
         """Asynchronous counterpart of :meth:`paginate` for ``AsyncSession``."""
-        data_stmt, count_stmt, page, limit = self._model_statements(
-            query,
-            base_select=base_select,
-            options=options,
-            paginated=True,
-        )
-        assert count_stmt is not None
-        total = int((await session.execute(count_stmt)).scalar() or 0)
-        items = list((await session.execute(data_stmt)).unique().scalars().all())
-        return _build_page_result(items, total, page=page, limit=limit)
+        ctx = self._model_pagination_ctx(query, base_select=base_select, options=options)
+        return await self.pager.apaginate(session, ctx)
 
     # --- 2. Field projection / aggregation search & paginate ---
 
@@ -396,12 +430,11 @@ class QuerySchema[M: BedrockModel]:
         limit: int | None = None,
     ) -> list[dict[str, Any]]:
         """Execute an unpaginated column/aggregate projection returning dict rows."""
-        data_stmt, _, _, _ = self._fields_statements(
+        data_stmt = self._fields_search_stmt(
             fields,
             query,
             group_by=group_by,
             base_select=base_select,
-            paginated=False,
             server_limit=limit,
         )
         return [dict(row) for row in session.execute(data_stmt).mappings().all()]
@@ -417,12 +450,11 @@ class QuerySchema[M: BedrockModel]:
         limit: int | None = None,
     ) -> list[dict[str, Any]]:
         """Asynchronous counterpart of :meth:`search_fields` for ``AsyncSession``."""
-        data_stmt, _, _, _ = self._fields_statements(
+        data_stmt = self._fields_search_stmt(
             fields,
             query,
             group_by=group_by,
             base_select=base_select,
-            paginated=False,
             server_limit=limit,
         )
         result = await session.execute(data_stmt)
@@ -438,17 +470,8 @@ class QuerySchema[M: BedrockModel]:
         base_select: Select[Any] | None = None,
     ) -> PageResult[dict[str, Any]]:
         """Execute a paginated column/aggregate projection returning ``PageResult[dict]``."""
-        data_stmt, count_stmt, page, limit = self._fields_statements(
-            fields,
-            query,
-            group_by=group_by,
-            base_select=base_select,
-            paginated=True,
-        )
-        assert count_stmt is not None
-        total = int(session.execute(count_stmt).scalar() or 0)
-        items = [dict(row) for row in session.execute(data_stmt).mappings().all()]
-        return _build_page_result(items, total, page=page, limit=limit)
+        ctx = self._fields_pagination_ctx(fields, query, group_by=group_by, base_select=base_select)
+        return self.pager.paginate(session, ctx)
 
     async def apaginate_fields(
         self,
@@ -460,17 +483,8 @@ class QuerySchema[M: BedrockModel]:
         base_select: Select[Any] | None = None,
     ) -> PageResult[dict[str, Any]]:
         """Asynchronous counterpart of :meth:`paginate_fields` for ``AsyncSession``."""
-        data_stmt, count_stmt, page, limit = self._fields_statements(
-            fields,
-            query,
-            group_by=group_by,
-            base_select=base_select,
-            paginated=True,
-        )
-        assert count_stmt is not None
-        total = int((await session.execute(count_stmt)).scalar() or 0)
-        items = [dict(row) for row in (await session.execute(data_stmt)).mappings().all()]
-        return _build_page_result(items, total, page=page, limit=limit)
+        ctx = self._fields_pagination_ctx(fields, query, group_by=group_by, base_select=base_select)
+        return await self.pager.apaginate(session, ctx)
 
     # --- 3. Custom cross-table Select search & paginate ---
 
@@ -483,7 +497,7 @@ class QuerySchema[M: BedrockModel]:
         limit: int | None = None,
     ) -> list[dict[str, Any]]:
         """Apply *query* to an explicit SQLAlchemy ``Select`` and return dict rows."""
-        data_stmt, _, _, _ = self._select_statements(stmt, query, paginated=False, server_limit=limit)
+        data_stmt = self._select_search_stmt(stmt, query, server_limit=limit)
         return [dict(row) for row in session.execute(data_stmt).mappings().all()]
 
     async def asearch_select(
@@ -495,7 +509,7 @@ class QuerySchema[M: BedrockModel]:
         limit: int | None = None,
     ) -> list[dict[str, Any]]:
         """Asynchronous counterpart of :meth:`search_select` for ``AsyncSession``."""
-        data_stmt, _, _, _ = self._select_statements(stmt, query, paginated=False, server_limit=limit)
+        data_stmt = self._select_search_stmt(stmt, query, server_limit=limit)
         result = await session.execute(data_stmt)
         return [dict(row) for row in result.mappings().all()]
 
@@ -506,11 +520,8 @@ class QuerySchema[M: BedrockModel]:
         query: QueryInput = None,
     ) -> PageResult[dict[str, Any]]:
         """Apply *query* to an explicit SQLAlchemy ``Select`` and return paginated dict rows."""
-        data_stmt, count_stmt, page, limit = self._select_statements(stmt, query, paginated=True)
-        assert count_stmt is not None
-        total = int(session.execute(count_stmt).scalar() or 0)
-        items = [dict(row) for row in session.execute(data_stmt).mappings().all()]
-        return _build_page_result(items, total, page=page, limit=limit)
+        ctx = self._select_pagination_ctx(stmt, query)
+        return self.pager.paginate(session, ctx)
 
     async def apaginate_select(
         self,
@@ -519,27 +530,25 @@ class QuerySchema[M: BedrockModel]:
         query: QueryInput = None,
     ) -> PageResult[dict[str, Any]]:
         """Asynchronous counterpart of :meth:`paginate_select` for ``AsyncSession``."""
-        data_stmt, count_stmt, page, limit = self._select_statements(stmt, query, paginated=True)
-        assert count_stmt is not None
-        total = int((await session.execute(count_stmt)).scalar() or 0)
-        items = [dict(row) for row in (await session.execute(data_stmt)).mappings().all()]
-        return _build_page_result(items, total, page=page, limit=limit)
+        ctx = self._select_pagination_ctx(stmt, query)
+        return await self.pager.apaginate(session, ctx)
 
 
 def compile_query_schema[M: BedrockModel](
     model: type[M],
     *,
     policy: QueryPolicy | None = None,
+    pager: BasePager[Any, Any] | None = None,
 ) -> QuerySchema[M]:
     """Compile (or reuse cached) :class:`QuerySchema` for *model*.
 
-    Default-policy schemas (``policy=None``) are cached in a
-    ``WeakKeyDictionary`` keyed by *model*. When a custom *policy* is passed,
-    a dedicated schema is returned for the caller (such as a router module) to
-    hold without growing global cache memory.
+    Default schemas (``policy=None`` and ``pager=None``) are cached in a
+    ``WeakKeyDictionary`` keyed by *model*. When a custom *policy* or *pager*
+    is passed, a dedicated schema is returned for the caller (such as a router
+    module) to hold without growing global cache memory.
     """
-    if policy is not None:
-        return QuerySchema(model, policy=policy)
+    if policy is not None or pager is not None:
+        return QuerySchema(model, policy=policy, pager=pager)
     with _CACHE_LOCK:
         cached = _DEFAULT_SCHEMA_CACHE.get(model)
         if cached is not None:
@@ -558,9 +567,10 @@ def search_models[M: BedrockModel](
     options: Sequence[ExecutableOption] | None = None,
     limit: int | None = None,
     policy: QueryPolicy | None = None,
+    pager: BasePager[Any, Any] | None = None,
 ) -> list[M]:
     """Execute an unpaginated entity search against *model*."""
-    return compile_query_schema(model, policy=policy).search(
+    return compile_query_schema(model, policy=policy, pager=pager).search(
         session,
         query,
         base_select=base_select,
@@ -578,9 +588,10 @@ async def asearch_models[M: BedrockModel](
     options: Sequence[ExecutableOption] | None = None,
     limit: int | None = None,
     policy: QueryPolicy | None = None,
+    pager: BasePager[Any, Any] | None = None,
 ) -> list[M]:
     """Asynchronous counterpart of :func:`search_models` for ``AsyncSession``."""
-    return await compile_query_schema(model, policy=policy).asearch(
+    return await compile_query_schema(model, policy=policy, pager=pager).asearch(
         session,
         query,
         base_select=base_select,
@@ -597,9 +608,10 @@ def paginate_models[M: BedrockModel](
     base_select: Select[Any] | None = None,
     options: Sequence[ExecutableOption] | None = None,
     policy: QueryPolicy | None = None,
+    pager: BasePager[Any, Any] | None = None,
 ) -> PageResult[M]:
     """Execute a paginated entity search against *model*."""
-    return compile_query_schema(model, policy=policy).paginate(
+    return compile_query_schema(model, policy=policy, pager=pager).paginate(
         session,
         query,
         base_select=base_select,
@@ -615,9 +627,10 @@ async def apaginate_models[M: BedrockModel](
     base_select: Select[Any] | None = None,
     options: Sequence[ExecutableOption] | None = None,
     policy: QueryPolicy | None = None,
+    pager: BasePager[Any, Any] | None = None,
 ) -> PageResult[M]:
     """Asynchronous counterpart of :func:`paginate_models` for ``AsyncSession``."""
-    return await compile_query_schema(model, policy=policy).apaginate(
+    return await compile_query_schema(model, policy=policy, pager=pager).apaginate(
         session,
         query,
         base_select=base_select,
@@ -635,9 +648,10 @@ def search_fields[M: BedrockModel](
     base_select: Select[Any] | None = None,
     limit: int | None = None,
     policy: QueryPolicy | None = None,
+    pager: BasePager[Any, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Execute an unpaginated column/aggregate projection against *model*."""
-    return compile_query_schema(model, policy=policy).search_fields(
+    return compile_query_schema(model, policy=policy, pager=pager).search_fields(
         session,
         fields,
         query,
@@ -657,9 +671,10 @@ async def asearch_fields[M: BedrockModel](
     base_select: Select[Any] | None = None,
     limit: int | None = None,
     policy: QueryPolicy | None = None,
+    pager: BasePager[Any, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Asynchronous counterpart of :func:`search_fields` for ``AsyncSession``."""
-    return await compile_query_schema(model, policy=policy).asearch_fields(
+    return await compile_query_schema(model, policy=policy, pager=pager).asearch_fields(
         session,
         fields,
         query,
@@ -678,9 +693,10 @@ def paginate_fields[M: BedrockModel](
     group_by: Sequence[GroupByExpr] | None = None,
     base_select: Select[Any] | None = None,
     policy: QueryPolicy | None = None,
+    pager: BasePager[Any, Any] | None = None,
 ) -> PageResult[dict[str, Any]]:
     """Execute a paginated column/aggregate projection against *model*."""
-    return compile_query_schema(model, policy=policy).paginate_fields(
+    return compile_query_schema(model, policy=policy, pager=pager).paginate_fields(
         session,
         fields,
         query,
@@ -698,9 +714,10 @@ async def apaginate_fields[M: BedrockModel](
     group_by: Sequence[GroupByExpr] | None = None,
     base_select: Select[Any] | None = None,
     policy: QueryPolicy | None = None,
+    pager: BasePager[Any, Any] | None = None,
 ) -> PageResult[dict[str, Any]]:
     """Asynchronous counterpart of :func:`paginate_fields` for ``AsyncSession``."""
-    return await compile_query_schema(model, policy=policy).apaginate_fields(
+    return await compile_query_schema(model, policy=policy, pager=pager).apaginate_fields(
         session,
         fields,
         query,
@@ -717,9 +734,10 @@ def search_select[M: BedrockModel](
     *,
     limit: int | None = None,
     policy: QueryPolicy | None = None,
+    pager: BasePager[Any, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Execute an unpaginated query over an explicit SQLAlchemy ``Select``."""
-    return compile_query_schema(model, policy=policy).search_select(
+    return compile_query_schema(model, policy=policy, pager=pager).search_select(
         session,
         stmt,
         query,
@@ -735,9 +753,10 @@ async def asearch_select[M: BedrockModel](
     *,
     limit: int | None = None,
     policy: QueryPolicy | None = None,
+    pager: BasePager[Any, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Asynchronous counterpart of :func:`search_select` for ``AsyncSession``."""
-    return await compile_query_schema(model, policy=policy).asearch_select(
+    return await compile_query_schema(model, policy=policy, pager=pager).asearch_select(
         session,
         stmt,
         query,
@@ -752,9 +771,10 @@ def paginate_select[M: BedrockModel](
     query: QueryInput = None,
     *,
     policy: QueryPolicy | None = None,
+    pager: BasePager[Any, Any] | None = None,
 ) -> PageResult[dict[str, Any]]:
     """Execute a paginated query over an explicit SQLAlchemy ``Select``."""
-    return compile_query_schema(model, policy=policy).paginate_select(
+    return compile_query_schema(model, policy=policy, pager=pager).paginate_select(
         session,
         stmt,
         query,
@@ -768,9 +788,10 @@ async def apaginate_select[M: BedrockModel](
     query: QueryInput = None,
     *,
     policy: QueryPolicy | None = None,
+    pager: BasePager[Any, Any] | None = None,
 ) -> PageResult[dict[str, Any]]:
     """Asynchronous counterpart of :func:`paginate_select` for ``AsyncSession``."""
-    return await compile_query_schema(model, policy=policy).apaginate_select(
+    return await compile_query_schema(model, policy=policy, pager=pager).apaginate_select(
         session,
         stmt,
         query,

@@ -189,6 +189,94 @@ order_clauses = order_schema.compile_order_by(raw_json)
 stmt = order_schema.apply(select(Order), raw_json, paginate=False)
 ```
 
+## 可扩展分页器（`PagePager`、`LimitOffsetPager`、`CursorPager` 与自定义拓展）
+
+`QuerySchema` 默认使用 1-based `PagePager`（`page` + `limit`），并支持通过 `QuerySchema(Model, pager=...)`、`compile_query_schema(Model, pager=...)` 或顶层 `paginate_*` / `search_*` 助手传入任意 `BasePager` 子类。所有分页器统一返回 `PageResult[M]`（`items`、`total: int | None`、`page_info`），仅在输入参数模型（统一继承含 `limit` 的 `PaginationParams`）与 `page_info` 子类（继承 `BasePageInfo`）上区分：
+
+| 分页器 | 输入（`query.pagination`） | `page_info` 类型 | `COUNT(*)` / `total` |
+|--------|----------------------------|------------------|----------------------|
+| `PagePager()`（默认） | `{"page": 1, "limit": 20}`（`PaginationSpec`） | `PageInfo`（`total`、`page`、`limit`、`offset`、`has_more`） | 始终执行 `COUNT(*)` |
+| `LimitOffsetPager(include_total=True)` | `{"limit": 20, "offset": 40}`（`LimitOffsetParams`） | `LimitOffsetPageInfo`（`total`、`limit`、`offset`、`has_more`） | 默认执行 `COUNT(*)`；`include_total=False` 改查 `limit + 1` 且 `total=None` |
+| `CursorPager(include_total=True)` | `{"cursor": "<token>", "limit": 20}`（`CursorParams`） | `CursorPageInfo`（`total`、`limit`、`has_more`、`next_cursor`） | 默认执行 `COUNT(*)`；`include_total=False` 跳过 `COUNT(*)` |
+
+### 内置 `LimitOffsetPager` 与 `CursorPager`
+
+```python
+from bedrock.database import CursorPager, LimitOffsetPager, compile_query_schema, db
+
+# Limit/Offset 分页（大表可传 include_total=False 跳过 COUNT(*)）
+offset_schema = compile_query_schema(Order, pager=LimitOffsetPager())
+page = offset_schema.paginate(db.session, query={"pagination": {"offset": 20, "limit": 10}})
+
+# 单向 Keyset 游标分页（不透明 URL-safe Base64 JSON）
+# 自动按模型声明的主键顺序追加 PK 作为 tie-breaker，避免 created_at 同值导致的丢行或重复行
+cursor_schema = compile_query_schema(Order, pager=CursorPager(include_total=False))
+first = cursor_schema.paginate(
+    db.session,
+    query={"sort": [{"field": "created_at", "direction": "desc"}], "pagination": {"limit": 20}},
+)
+second = cursor_schema.paginate(
+    db.session,
+    query={
+        "sort": [{"field": "created_at", "direction": "desc"}],
+        "pagination": {"cursor": first.page_info.next_cursor, "limit": 20},
+    },
+)
+```
+
+- 篡改、格式非法或与当前 `sort` 不匹配的游标会抛出 `InvalidCursorError`（`BadFilterFormatError` 子类）。
+- `CursorPager` 不支持 `group_by`、`DISTINCT`、`HAVING` 及聚合投影查询（会明确抛出 `BadFilterFormatError`），此类查询请使用 `PagePager` 或 `LimitOffsetPager`。
+- `QuerySchema.apply(stmt, query, paginate=True)` 会委托给 `pager.apply(stmt, ctx)`（页码/偏移分页拼 `OFFSET`/`LIMIT`，游标分页拼 keyset `WHERE` + 主键 tie-breaker `ORDER BY` + `LIMIT`）。
+
+### 外部自定义 Pager
+
+只需继承 `PaginationParams`、`BasePageInfo` 与 `BasePager`，`QuerySchema` 会自动继承并校验 `limit` 上限（`policy.default_limit` / `policy.max_limit`），并自动生成 Draft 2020-12 JSON Schema 与 FastAPI OpenAPI 文档：
+
+```python
+from typing import Any
+from pydantic import Field, StrictInt
+from sqlalchemy import Select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Session
+from bedrock.database import BasePageInfo, BasePager, PageResult, PaginationContext, PaginationParams, QuerySchema
+
+class WindowParams(PaginationParams):
+    window: StrictInt = Field(default=0, ge=0)
+
+class WindowPageInfo(BasePageInfo):
+    window: int
+
+class WindowPager(BasePager[WindowParams, WindowPageInfo]):
+    params_model = WindowParams
+    page_info_model = WindowPageInfo
+
+    def apply(self, stmt: Select[Any], ctx: PaginationContext[Any, WindowParams]) -> Select[Any]:
+        out = stmt.order_by(*ctx.order_clauses) if ctx.order_clauses else stmt
+        return out.fetch(None).offset(ctx.params.window * ctx.params.limit).limit(ctx.params.limit)
+
+    def paginate[T](self, session: Session, ctx: PaginationContext[T, WindowParams]) -> PageResult[T]:
+        total = ctx.fetch_total(session)
+        items = ctx.fetch_rows(session, self.apply(ctx.filtered_stmt, ctx))
+        offset = ctx.params.window * ctx.params.limit
+        return PageResult[T](
+            items=items,
+            total=total,
+            page_info=WindowPageInfo(total=total, limit=ctx.params.limit, has_more=total > offset + ctx.params.limit, window=ctx.params.window),
+        )
+
+    async def apaginate[T](self, session: AsyncSession, ctx: PaginationContext[T, WindowParams]) -> PageResult[T]:
+        total = await ctx.afetch_total(session)
+        items = await ctx.afetch_rows(session, self.apply(ctx.filtered_stmt, ctx))
+        offset = ctx.params.window * ctx.params.limit
+        return PageResult[T](
+            items=items,
+            total=total,
+            page_info=WindowPageInfo(total=total, limit=ctx.params.limit, has_more=total > offset + ctx.params.limit, window=ctx.params.window),
+        )
+
+window_schema = QuerySchema(Order, pager=WindowPager())
+```
+
 ## 查询 JSON DSL 参考
 
 所有对象严格禁止未知键（`additionalProperties: false`）。顶层 `QuerySpec` 支持 4 个可选键：
@@ -196,7 +284,7 @@ stmt = order_schema.apply(select(Order), raw_json, paginate=False)
 - `filter`：过滤条件树
 - `sort`：多字段排序列表 `{"field": "<name>", "direction": "asc" | "desc", "nulls": "first" | "last" | null}`
 - `search`：全文搜索词（始终出现在导出 JSON Schema 中；未声明 `__searchable_columns__` 时为 no-op）
-- `pagination`：`{"page": 1, "limit": 20}`（默认 `page=1`、`limit=policy.default_limit`）
+- `pagination`：随分页器而定的分页对象（默认 `PagePager` 为 `{"page": 1, "limit": policy.default_limit}`，`LimitOffsetPager` 为 `{"limit", "offset"}`，`CursorPager` 为 `{"cursor", "limit"}`，或外部自定义 `PaginationParams` 字段）
 
 ### 逻辑组合节点
 
@@ -257,6 +345,7 @@ stmt = order_schema.apply(select(Order), raw_json, paginate=False)
 | `max_relation_depth` | `2` | `FilterDepthExceededError`（`relation` 节点与点号路径共享跳数上限） |
 | `max_in_items` | `200` | `BadFilterFormatError` |
 | `max_limit` | `1000` | `InvalidQueryLimitError` |
+| 游标令牌 | 合法且匹配当前 `sort` 的 URL-safe Base64 JSON | `InvalidCursorError`（`BadFilterFormatError` 子类） |
 
 ## 旧版 `search_filter_sort_paginate`（已弃用）
 

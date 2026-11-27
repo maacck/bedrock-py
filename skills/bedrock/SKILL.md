@@ -308,6 +308,7 @@ page = paginate_models(
 - **Models** (`list[M]` / `PageResult[M]`): `search_models` / `asearch_models`, `paginate_models` / `apaginate_models` (explicit `options` and `base_select`; no `group_by`).
 - **Single-table fields & multi-column `group_by`** (`list[dict]` / `PageResult[dict]`): `search_fields` / `asearch_fields`, `paginate_fields` / `apaginate_fields`.
 - **Cross-table explicit `Select`** (`list[dict]` / `PageResult[dict]`): `search_select` / `asearch_select`, `paginate_select` / `apaginate_select` (explicit `JOIN` / `LEFT JOIN` / `aliased()` with `QueryPolicy(extra_fields=..., sort_expressions=...)`; zero `auto_join` / `auto_loads`).
+- **Pluggable Pagers** (`pager=` on `QuerySchema` / `compile_query_schema` / `paginate_*`): `PagePager()` (default), `LimitOffsetPager(include_total=True)`, `CursorPager(include_total=True)` (opaque URL-safe Base64 JSON, automatic PK tie-breaker, `InvalidCursorError`), or external `BasePager` / `PaginationParams` / `BasePageInfo` subclasses returning unified `PageResult[T]`.
 
 Client-supplied filters and sorts may only name primary keys, fields in `__filterable_fields__`, or fields configured in `QueryPolicy` / `__query_policy__`. `"__all__"` expands mapped columns on that model only (never relationships). Hidden and missing fields raise identical `BadFilterFormatError` by default (`reveal_allowed_fields=False`).
 

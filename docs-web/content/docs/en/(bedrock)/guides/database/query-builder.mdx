@@ -191,6 +191,95 @@ order_clauses = order_schema.compile_order_by(raw_json)
 stmt = order_schema.apply(select(Order), raw_json, paginate=False)
 ```
 
+## Extensible Pagers (`PagePager`, `LimitOffsetPager`, `CursorPager`, Custom)
+
+`QuerySchema` defaults to 1-based `PagePager` (`page` + `limit`), and accepts any `BasePager` subclass via `QuerySchema(Model, pager=...)`, `compile_query_schema(Model, pager=...)`, or the top-level `paginate_*` / `search_*` helpers. Every pager shares the unified `PageResult[M]` envelope (`items`, `total: int | None`, `page_info`), differing only in its `PaginationParams` input model (all inheriting `limit`) and `BasePageInfo` subclass:
+
+| Pager | Input (`query.pagination`) | `page_info` Type | `COUNT(*)` / `total` |
+|-------|----------------------------|------------------|----------------------|
+| `PagePager()` (default) | `{"page": 1, "limit": 20}` (`PaginationSpec`) | `PageInfo` (`total`, `page`, `limit`, `offset`, `has_more`) | Always runs `COUNT(*)` |
+| `LimitOffsetPager(include_total=True)` | `{"limit": 20, "offset": 40}` (`LimitOffsetParams`) | `LimitOffsetPageInfo` (`total`, `limit`, `offset`, `has_more`) | Runs `COUNT(*)` by default; `include_total=False` fetches `limit + 1` and sets `total=None` |
+| `CursorPager(include_total=True)` | `{"cursor": "<token>", "limit": 20}` (`CursorParams`) | `CursorPageInfo` (`total`, `limit`, `has_more`, `next_cursor`) | Runs `COUNT(*)` by default; `include_total=False` skips `COUNT(*)` |
+
+### Built-in `LimitOffsetPager` & `CursorPager`
+
+```python
+from bedrock.database import CursorPager, LimitOffsetPager, compile_query_schema, db
+
+# Limit/Offset pagination (skip COUNT(*) with include_total=False on huge tables)
+offset_schema = compile_query_schema(Order, pager=LimitOffsetPager())
+page = offset_schema.paginate(db.session, query={"pagination": {"offset": 20, "limit": 10}})
+
+# Forward keyset cursor pagination (opaque URL-safe Base64 JSON token)
+# Primary keys are appended automatically in declared PK order as tie-breakers
+# so duplicate sort values (e.g. identical created_at) never skip or duplicate rows.
+cursor_schema = compile_query_schema(Order, pager=CursorPager(include_total=False))
+first = cursor_schema.paginate(
+    db.session,
+    query={"sort": [{"field": "created_at", "direction": "desc"}], "pagination": {"limit": 20}},
+)
+second = cursor_schema.paginate(
+    db.session,
+    query={
+        "sort": [{"field": "created_at", "direction": "desc"}],
+        "pagination": {"cursor": first.page_info.next_cursor, "limit": 20},
+    },
+)
+```
+
+- Tampered, malformed, or sort-mismatched cursors raise `InvalidCursorError` (a `BadFilterFormatError` subclass).
+- `CursorPager` rejects `group_by`, `DISTINCT`, `HAVING`, and aggregate projections with `BadFilterFormatError`; use `PagePager` or `LimitOffsetPager` for those queries.
+- `QuerySchema.apply(stmt, query, paginate=True)` delegates to `pager.apply(stmt, ctx)` (`OFFSET`/`LIMIT` for page & offset pagers; keyset `WHERE` + tie-breaker `ORDER BY` + `LIMIT` for `CursorPager`).
+
+### Custom External Pager
+
+Subclass `PaginationParams`, `BasePageInfo`, and `BasePager` — `QuerySchema` automatically enforces `policy.default_limit` / `policy.max_limit` and exports Draft 2020-12 JSON Schema & FastAPI OpenAPI definitions for your custom parameters:
+
+```python
+from typing import Any
+from pydantic import Field, StrictInt
+from sqlalchemy import Select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Session
+from bedrock.database import BasePageInfo, BasePager, PageResult, PaginationContext, PaginationParams, QuerySchema
+
+class WindowParams(PaginationParams):
+    window: StrictInt = Field(default=0, ge=0)
+
+class WindowPageInfo(BasePageInfo):
+    window: int
+
+class WindowPager(BasePager[WindowParams, WindowPageInfo]):
+    params_model = WindowParams
+    page_info_model = WindowPageInfo
+
+    def apply(self, stmt: Select[Any], ctx: PaginationContext[Any, WindowParams]) -> Select[Any]:
+        out = stmt.order_by(*ctx.order_clauses) if ctx.order_clauses else stmt
+        return out.fetch(None).offset(ctx.params.window * ctx.params.limit).limit(ctx.params.limit)
+
+    def paginate[T](self, session: Session, ctx: PaginationContext[T, WindowParams]) -> PageResult[T]:
+        total = ctx.fetch_total(session)
+        items = ctx.fetch_rows(session, self.apply(ctx.filtered_stmt, ctx))
+        offset = ctx.params.window * ctx.params.limit
+        return PageResult[T](
+            items=items,
+            total=total,
+            page_info=WindowPageInfo(total=total, limit=ctx.params.limit, has_more=total > offset + ctx.params.limit, window=ctx.params.window),
+        )
+
+    async def apaginate[T](self, session: AsyncSession, ctx: PaginationContext[T, WindowParams]) -> PageResult[T]:
+        total = await ctx.afetch_total(session)
+        items = await ctx.afetch_rows(session, self.apply(ctx.filtered_stmt, ctx))
+        offset = ctx.params.window * ctx.params.limit
+        return PageResult[T](
+            items=items,
+            total=total,
+            page_info=WindowPageInfo(total=total, limit=ctx.params.limit, has_more=total > offset + ctx.params.limit, window=ctx.params.window),
+        )
+
+window_schema = QuerySchema(Order, pager=WindowPager())
+```
+
 ## Query JSON DSL Reference
 
 All objects strictly forbid unknown keys (`additionalProperties: false`). Top-level `QuerySpec` accepts:
@@ -198,7 +287,7 @@ All objects strictly forbid unknown keys (`additionalProperties: false`). Top-le
 - `filter`: filter node tree (optional)
 - `sort`: list of `{"field": "<name>", "direction": "asc" | "desc", "nulls": "first" | "last" | null}` (optional)
 - `search`: free-text search string applied to `__searchable_columns__` (always present in exported JSON Schema; no-op when empty)
-- `pagination`: `{"page": 1, "limit": 20}` (optional; defaults to `page=1`, `limit=policy.default_limit`)
+- `pagination`: pager-specific pagination object (optional; defaults to `PagePager` `{"page": 1, "limit": policy.default_limit}`, or `{"limit", "offset"}` for `LimitOffsetPager`, `{"cursor", "limit"}` for `CursorPager`, or custom `PaginationParams` fields)
 
 ### Logical Combinators
 
@@ -261,6 +350,7 @@ All relationship filters compile to correlated `EXISTS` subqueries so main-query
 | `max_relation_depth` | `2` | `FilterDepthExceededError` (shared across `relation` nodes and dotted paths) |
 | `max_in_items` | `200` | `BadFilterFormatError` |
 | `max_limit` | `1000` | `InvalidQueryLimitError` |
+| Cursor token | Valid URL-safe Base64 JSON matching `sort` | `InvalidCursorError` (`BadFilterFormatError` subclass) |
 
 ## Legacy `search_filter_sort_paginate` (Deprecated)
 
