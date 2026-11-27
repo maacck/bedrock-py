@@ -596,3 +596,18 @@ class TestAsyncSearchFilterSortPaginate:
 
         [(item, scaled)] = result["items"]
         assert (item.name, scaled) == ("delta", 90)
+
+
+class TestLegacyDeprecationWarnings:
+    """Verify legacy query helpers emit DeprecationWarning once per call in 0.4.x."""
+
+    def test_search_filter_sort_paginate_warns_once(self, db_session):
+        with pytest.warns(DeprecationWarning, match="removed in 0.5.0") as record:
+            search_filter_sort_paginate(db_session=db_session, model=InventoryItem, limit=5, count_pk="id")
+        assert len(record) == 1
+
+    @pytest.mark.asyncio
+    async def test_asearch_filter_sort_paginate_warns_once(self, async_session: AsyncSession):
+        with pytest.warns(DeprecationWarning, match="removed in 0.5.0") as record:
+            await asearch_filter_sort_paginate(db_session=async_session, model=InventoryItem, limit=5, count_pk="id")
+        assert len(record) == 1

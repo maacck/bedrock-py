@@ -210,7 +210,7 @@ bedrock db revision myapp.users -m "custom index" --no-autogenerate
 - Dependencies on other modules are written automatically as qualified `app:revision` entries in `depends_on`, and must be direct manifest dependencies
 - With autogeneration, the app must be at head (`bedrock db upgrade <app>` first); an unapplied revision makes generation fail without writing a file. `--no-autogenerate` skips this check but still requires a single head
 
-Autogeneration compares only the target module's tables on both the database and model sides. Ordinary ORM models are owned by their defining module, not by modules importing them. Unmapped `Table` objects require `info={"bedrock_module": "myapp.users"}`. Missing, conflicting, or unloaded owners raise `MigrationError` before a revision is written; there is no all-tables fallback. See [Table Ownership](/docs/guides/database#table-ownership).
+Autogeneration compares only the target module's tables on both the database and model sides. Ordinary ORM models are owned by their defining module, not by modules importing them. Unmapped `Table` objects require `info={"bedrock_module": "myapp.users"}`. Missing, conflicting, or unloaded owners raise `MigrationError` before a revision is written; there is no all-tables fallback. See [Table Ownership](/docs/guides/database/migrations#table-ownership).
 
 The generated file is a reviewable draft: review and commit it. Runtime ordering uses only the committed `depends_on` graph, never foreign keys.
 
@@ -254,7 +254,7 @@ bedrock db upgrade myapp.users 0002_add_email
 
 Upgrade and downgrade take a migration lock. PostgreSQL uses an advisory lock, MySQL and MariaDB use `GET_LOCK`, and the wait is `DATABASE_MIGRATION_LOCK_TIMEOUT` seconds (default 30). SQLite migrations are not locked; run them from one process. A timeout fails the command.
 
-The CLI records migrations in one ledger, `bedrock_migrations` by default. Set `DATABASE_MIGRATION_VERSION_TABLE` (lowercase simple SQL identifier, at most 57 characters) to use another name; there is no CLI flag for it. Never rename the table to switch ledgers. See [Custom Version Table](/docs/guides/database#custom-version-table-and-independent-module-sets).
+The CLI records migrations in one ledger, `bedrock_migrations` by default. Set `DATABASE_MIGRATION_VERSION_TABLE` (lowercase simple SQL identifier, at most 57 characters) to use another name; there is no CLI flag for it. Never rename the table to switch ledgers. See [Custom Version Table](/docs/guides/database/migrations#custom-version-table-and-independent-module-sets).
 
 ---
 
@@ -274,7 +274,7 @@ bedrock db downgrade <app_import_path> <target>
 | `-1` | Downgrade one step |
 | `<revision_name>` | Undo the app's applied descendants of this full revision name (the revision itself stays) |
 
-Only the specified app's revisions move; a target that is not a revision name of this app fails with an error. If applied migrations of other modules depend on what would be undone, the command fails and changes nothing. Pass `--cascade` to undo those dependents first; dependents whose modules are not loaded are always an error, so add `--load <app>` for each one. Baseline rows imported by `adopt` cannot be undone. `downgrade <app> base` is the CLI way to remove a module's schema; there is no `bedrock db uninstall` command. Review the module's existing `downgrade()` scripts first (see [existing migration safety](/docs/guides/database#existing-migration-safety)); ownership filtering protects new autogeneration, not old scripts or arbitrary SQL.
+Only the specified app's revisions move; a target that is not a revision name of this app fails with an error. If applied migrations of other modules depend on what would be undone, the command fails and changes nothing. Pass `--cascade` to undo those dependents first; dependents whose modules are not loaded are always an error, so add `--load <app>` for each one. Baseline rows imported by `adopt` cannot be undone. `downgrade <app> base` is the CLI way to remove a module's schema; there is no `bedrock db uninstall` command. Review the module's existing `downgrade()` scripts first (see [existing migration safety](/docs/guides/database/migrations#existing-migration-safety)); ownership filtering protects new autogeneration, not old scripts or arbitrary SQL.
 
 **Options:**
 
@@ -398,7 +398,7 @@ Load every module that has migrations; each old head must belong to exactly one 
 2. Writes one `baseline` row for every revision up to those heads, then publishes the table atomically. If `bedrock_migrations` already exists it reports the database as initialised and does not import again.
 3. Leaves `alembic_version` untouched as an audit snapshot. No migration script is executed.
 
-Baseline rows assume the schema is already in place and are protected: a downgrade or cascade that would undo one fails before any DDL runs. Back up first and follow [Adopting an Existing Database](/docs/guides/database#adopting-an-existing-database).
+Baseline rows assume the schema is already in place and are protected: a downgrade or cascade that would undo one fails before any DDL runs. Back up first and follow [Adopting an Existing Database](/docs/guides/database/migrations#adopting-an-existing-database).
 
 **Example:**
 

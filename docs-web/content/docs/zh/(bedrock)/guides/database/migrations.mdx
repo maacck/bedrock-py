@@ -1,0 +1,226 @@
+---
+title: 迁移
+description: 按 module 隔离的 bedrock_migrations 账本、表归属、跨 module 依赖、接管已有数据库、合并迁移与迁移锁
+---
+
+Bedrock 自己执行迁移。每个应用都有自己的一组迁移脚本，并以其导入路径作为标识；已执行的迁移记录在 `bedrock_migrations` 表中，主键为 `(app, revision)`。脚本通过 Alembic 的库 API（operations 和 autogenerate）执行和生成；不使用 Alembic 的命令层、`env.py`、分支标签和 `alembic_version`。`MigrationsManager` 负责处理 revision 创建、感知依赖的升级与降级、安装，以及旧数据库的接管。
+
+完整的迁移 CLI 参考见 [CLI 参考 — 数据库命令](/docs/guides/cli#database-commands-bedrock-db)。
+
+## 表归属
+
+自动生成会解析共享 metadata 中每张表的归属。普通 ORM 模型无需新增声明：根据模型类实际定义的 Python 包，选择最长匹配的已加载 Bedrock module 导入路径。已导入 domain package 中的模型同样参与解析；导入或重新导出其他 module 的模型不会转移表归属。需要使用的 domain 模型应由 `models.py` 导入，Bedrock 不会扫描未导入的模型文件。
+
+无 ORM 映射的 `Table`（例如关联表）通过 SQLAlchemy 的 `info` 字典声明 owner。例如，在 `myapp.tags.models` 中，users module 已经在共享 metadata 定义了 `users` 表之后：
+
+```python
+from sqlalchemy import Column, ForeignKey, Integer, String, Table
+from bedrock.database import BedrockModel
+
+user_labels = Table(
+    "user_labels",
+    BedrockModel.metadata,
+    Column("user_id", Integer, ForeignKey("users.id"), primary_key=True),
+    Column("label", String(50), primary_key=True),
+    info={"bedrock_module": "myapp.tags"},
+)
+```
+
+在 tags module 的 manifest `depends_on` 中声明 `myapp.users`。跨 module 外键仍能通过完整 metadata 解析，但引用其他表不会获得其所有权。module 之间的迁移顺序记录在脚本的 `depends_on` 中（参见[跨 module 依赖](#跨-module-依赖)）。
+
+ORM 模型也可以声明 `__table_args__ = {"info": {"bedrock_module": "myapp.tags"}}`，但必须与实际定义 module 一致。归属缺失、声明无效、owner 未加载、owner 没有 `models` module 或多 module 映射同表冲突时，在写出 revision 前抛出 `MigrationError`，不会回退到全部表。同一张表的映射应放在同一个 module：支持同 module 单表继承，拒绝跨 module 单表映射，联合表继承按各自的 local table 分别确定归属。
+
+同表的每个映射类都必须能确定归属，不能因为其中一个类已找到 owner 就忽略其他未解析的类。有效的显式表归属声明可以补足缺失归属，但不能覆盖已加载 module 之间的已知冲突。
+
+归属记录是单次操作的快照，不是数据库归属表或全局注册钩子。表身份包含 schema；显式默认 schema 与隐式默认 schema 指向同一物理表，重复声明同一物理表会被拒绝。反射限制为目标 schema 和表，metadata 对象也会过滤。归属表集合为空时不创建任何表。
+
+模型移除后，无法从当前 metadata 推断数据库旧表的历史归属，因此不会自动认领或删除它。需要删除时，使用 `bedrock db revision <app> -m "drop obsolete table" --no-autogenerate` 编写经过审查的显式迁移。历史升级／回滚、手写 revision 和离线 SQL 输出不要求当前归属快照。不携带 Bedrock 管理上下文的原生 Alembic 调用仍使用完整 metadata，不属于此隔离保证的范围。
+
+## 通过代码使用
+
+```python
+from bedrock.module import apps
+from bedrock.database import MigrationsManager
+
+migrations = MigrationsManager(
+    registry=apps,
+    database_url=db.settings.SQLALCHEMY_DATABASE_URI,
+)
+
+# Create a new revision
+migrations.revision("myapp.users", "add email column")
+
+# Apply migrations
+migrations.upgrade("myapp.users")
+
+# Check current state
+migrations.current("myapp.users")
+
+# View history
+history = migrations.get_history("myapp.users")
+```
+
+## 迁移脚本
+
+每个 module 的脚本放在 `<package_dir>/migrations/*.py`，以 `_` 开头的文件会被跳过。脚本声明字符串 `revision`、`down_revision`（同一 module 的某个 revision，或 `None`），以及可选的 `depends_on`。文件名（不含扩展名）就是 revision 名称。`bedrock db revision` 生成的名称形如 `0001_initial`、`0002_add_email`：取该 module 当前最大编号加一，再加上消息的 slug（完整名称最长 64 个字符）。已有的随机 revision ID 保持不变；下一个生成的名称延续编号，并以旧 head 作为 `down_revision`。revision 名称只需在 module 内唯一，因此两个 module 可以各有一个 `0001_initial`。
+
+`branch_labels` 会被忽略，仍声明它的旧脚本可以继续加载。脚本没有定义 `revision`、`down_revision` 不是同一 module 的 revision、revision 重复或依赖成环时，会抛出 `MigrationError`。每条迁移在独立事务中执行。SQLite 的 DDL 在事务内执行；MySQL 和 MariaDB 无法回滚 DDL，失败后重试前请对照真实 schema 与版本表。脚本不得自行提交或使用 `autocommit_block()`；升级前请先检查待执行脚本是否有此类用法。
+
+## 跨 module 依赖
+
+`depends_on` 列出带限定的 `app:revision` 引用，例如 `("myapp.users:0002_email",)`。裸 revision 名称会被拒绝，目标必须属于拥有者 manifest `depends_on` 中直接声明的 module。升级一个 module 时，会先按依赖顺序执行它依赖的全部迁移，且只执行这些：无关 module 和依赖方更晚的 revision 都不会被改动。
+
+`bedrock db revision` 会自动写入这些引用：记录新 revision 所依赖 module 的 head，只有该 module 出现更新的 head 时才再次写入。自动生成前要求该 module 已处于 head（先执行 `bedrock db upgrade <app>`）；无论是否自动生成都要求只有一个 head。
+
+生成的 revision 只是可审阅的草稿：阅读、必要时修改，并随 module 一起提交。运行时 Bedrock 只使用已提交脚本中声明的依赖图（`down_revision` 加限定的 `depends_on`），从不根据外键、表名或当前模型推断顺序；脚本需要其他 module 的表而生成未记录时，请手动补充 `depends_on`。
+
+## 回滚
+
+`downgrade` 按依赖的逆序撤销一个 module 的迁移。如果其他 module 已执行的迁移依赖它们，命令会抛出 `MigrationError`，列出这些迁移，并且不做任何改动。传入 `cascade=True`（CLI 为 `--cascade`）会先回滚依赖方。依赖方未加载时，即使指定 `cascade` 也一律报错：先加载这些 module（CLI 使用 `--load <app>`）并回滚它们。回滚不会影响无关 module，即使它们的 revision 名称相同。
+
+通过 CLI 移除 module 的 schema 使用 `bedrock db downgrade <app> base`；不存在 `bedrock db uninstall` 命令。Python 的 `MigrationsManager.uninstall()` 保留，等价于把该 module 回退到 base。
+
+## 首次安装
+
+`ensure_schema()` 会把该 module 的迁移脚本连同其依赖的迁移执行到 head，并返回 `"created"`（该 module 的首次执行）、`"upgraded"` 或 `"up-to-date"`。它不再用 `create_all` 根据 metadata 建表并 stamp，因此有 models 但没有迁移脚本的 module 会抛出 `MigrationError`：先用 `bedrock db revision <app> -m "initial schema"` 生成初始迁移。
+
+表归属在生成 revision 时生效。安装成功现在意味着记录的脚本确实执行过，因此回滚会执行其 `upgrade()` 已运行过的脚本的 `downgrade()`。
+
+`bedrock app install <target>` 只对目标调用 `ensure_schema()`。无论是否传入 `--with-dependencies`，都会应用迁移闭包（目标的迁移，以及它们依赖的其他 module 的迁移）；`--with-dependencies` 额外对每个依赖执行其自身的 schema 步骤和安装钩子，`--skip-migrations` 只跳过 schema 步骤。
+
+## 接管已有数据库
+
+旧版本 Bedrock 创建的数据库把迁移记录在 Alembic 的 `alembic_version` 表中。在接管一次之前，所有迁移命令都会拒绝在这样的数据库上运行。不要再对 Bedrock 管理的数据库使用 Alembic 原生 CLI。
+
+1. 暂停迁移命令，备份数据库、已部署的程序包和原始迁移脚本。记录每个环境的 `alembic_version` 以及真实的表结构和数据。
+2. 加载 `alembic_version` 中出现的每个 module，执行 `bedrock db adopt <app> ...`。每个旧 head 必须唯一归属于一个已加载的 module。Bedrock 通过该部署自身的 revision 图解析它；今天 manifest 中的依赖边不能证明历史上执行过什么。head 缺失、有歧义或历史无法解析时不会写入任何内容；修正脚本或已加载的 module 后重试。
+3. `adopt` 把每个直到这些 head 的 revision 以 `origin = 'baseline'` 行写入暂存表，核对后原子改名为 `bedrock_migrations`。旧的 `alembic_version` 表保留为审计快照。发布前中断只会留下暂存状态，可以重试；已发布的表不会被删除或重新导入。
+4. 基线行受保护。它们表示“假定已经存在”，而不是“由 Bedrock 执行过”：这些脚本不会被重放，需要撤销基线行的 downgrade 或 cascade 会在第一条 DDL 之前失败。回滚到基线本身是允许的。疑似漏跑的数据迁移需要人工对账，接管不会重放它们。
+5. 新版本写过数据库之后，不要把旧程序切回同一份数据。需要恢复时，把匹配的数据库、程序和迁移文件一起恢复；不要让旧代码重新读取 `alembic_version`。
+
+### 接管前：只转换引用格式，不改写已发布历史
+
+以**实际部署的脚本**为准。先记录 `SELECT version_num FROM alembic_version` 的所有 head，在各模块的 `migrations/` 中逐一定位；文件缺失或旧 ID 有多个可能的归属时停止，不要猜。已发布的随机 ID 不必改为 `0001_*`。
+
+例如 `myapp.orders/migrations/` 中的旧脚本声明 `revision = "c91a"`、`down_revision = "c900"`、`depends_on = "a12f"`，并已从原部署核实 `a12f` 属于 `myapp.auth`。接管前，在新版部署副本中只改为：
+
+```python
+revision = "c91a"
+down_revision = "c900"
+depends_on = ("myapp.auth:a12f",)
+```
+
+保留 `upgrade()`、`downgrade()`、本地 parent 和合并节点的全部父 ID；旧 `branch_labels` 可保留但不用于判断归属。确保 `myapp.auth` 是 orders manifest 的直接依赖。不要把未知历史依赖替换成上游今天的 head，也不要从当前模型重新生成历史文件。旧图如果不能在不改变依赖含义的情况下按模块拆分，先人工核对，不要 stamp 或修改数据库行来绕过。
+
+先在恢复的数据库副本上用正常模式检查脚本，再接管并确认版本位置：
+
+```bash
+bedrock db history myapp.orders
+bedrock db adopt myapp.auth myapp.orders
+bedrock db current myapp.orders
+bedrock db check myapp.orders
+```
+
+核对 `current` 与原部署对应模块的位置；若本就有待执行迁移，`check` 报 `behind` 是预期结果。只用新的未执行迁移修正实际差异，不要重跑基线。以上针对旧 `alembic_version`，不是早期开发版 Bedrock ledger 的原地升级步骤。
+
+### 接管后新增独立的 module registry
+
+`adopt` 接管既有迁移历史；`init-ledger` 只用于接管后新增、没有既有历史的独立 registry。
+
+| 场景 | 命令 |
+|------|------|
+| 旧数据库，尚未接管 | `bedrock db adopt <app> ...` |
+| 已接管的数据库，有新 revision 要应用 | `bedrock db upgrade <app>` |
+| 已接管的库；独立模块从未执行迁移，也没有已有业务表 | `bedrock db init-ledger <root> [<root> ...] --adopted-ledger <source-name>` |
+
+```bash
+export DATABASE_MIGRATION_VERSION_TABLE=billing_migrations
+bedrock db init-ledger myapp.billing --adopted-ledger bedrock_migrations
+```
+
+编程接口：用新 registry 和目标 `version_table` 构造 manager，调用 `mgr.init_ledger(adopted_ledger="bedrock_migrations")`，返回 `None`。
+
+`init-ledger` 只建空目标表，不导入基线、不执行迁移，不放宽普通 `upgrade` 的保护。操作者须核实不存在未记录的数据迁移或手工创建的历史结构。
+
+操作前检查，按顺序：
+
+1. 暂停迁移命令，对数据库、已部署的程序包和迁移脚本做经过验证的备份。
+2. 确认源账本已由 `adopt` 发布，且覆盖核心旧 head；新模块与其历史互不重叠。
+3. 只加载新 registry 的 module，并先在恢复出的副本上演练。
+
+出现以下任一情况时会拒绝执行，且不写入任何内容：
+
+- 旧的 `alembic_version` 表不存在，或源 ledger 不是有效的已接管 ledger、缺少旧 head 的证据；
+- 源 ledger 中已有已加载 module 的行；
+- 已加载 module 的模型所拥有的表已存在于数据库中；
+- 目标 ledger，或源/目标的暂存表已存在。
+
+修复所报告的原因后重试；不要手工创建或修改 ledger 行来绕过拒绝。
+
+## 合并迁移
+
+建议在开发环境生成和演练。合并保留操作，不是按最终模型计算差异；一个新脚本只占一个迁移事务，不再是三个。仅加载可信模块，生命周期钩子和脚本导入可能有副作用。
+
+1. 在活动迁移目录外生成并审查候选，一次性替换全部旧文件。用相同的种子数据分别回放新旧路径，比较数据、索引、约束和回滚结果。无法检查尚未加载、也未在库中执行的第三方插件。
+2. 公布含原脚本的桥接版本。若合并 0002_add 到 0004_finalize，部分执行的数据库必须先用旧版本升到 0004_finalize；部分执行或冲突的区间会被升级拒绝。保留末端 ID 后，0005_ship 等后继无需改写。
+3. 部署新代码并执行普通升级（`bedrock db upgrade`，或启动时的 `ensure_schema`）。升级目标祖先中完整的已批准区间会在业务迁移之前自动对账且不重放：空库执行替换脚本，已切换的库跳过；只读命令不会修改数据库。交接或恢复时，先暂停写入和安装、迁移任务并备份，再用 `bedrock db squash apply` 预览，核对数据库、账本与行变更后加 `--apply` 手动切换。
+
+生成后续迁移时仍会保留已退役的 ID；新 ID 不能使用 CLI 目标 `head` 或 `base`。旧 Alembic revision 的归属有歧义时，请在桥接版本上接管。手写替换脚本必须提供同步、非泛型的 `upgrade()` 和 `downgrade()` 函数。
+
+MySQL/MariaDB 业务脚本失败可能已部分提交 DDL，应检查真实结构，不可盲目重跑。账本切换的幂等重试不是业务迁移的恢复策略；回到旧历史必须恢复匹配的代码、脚本和数据库，不能用过期备份覆盖新数据。
+
+## 已有迁移的安全处置
+
+Bedrock 不会重写已经生成的脚本。对受影响 module 执行升级或回滚前：
+
+1. 暂停这些操作，备份数据库与迁移文件，并记录每个部署环境的 `alembic_version`（或 `bedrock_migrations`）和真实表结构／数据状态。
+2. 审查核心与插件 module 中 `upgrade()`、`downgrade()` 两侧的表、列、索引、约束和原始 SQL。脚本声明了正确的 module 不是表操作安全的证据，自动生成过滤也不是迁移脚本执行沙箱。
+3. 只有确认所有环境都未应用，才能重新生成或修正未发布 revision。已发布／已应用的 revision 需要跨部署协调并审查修复，不要随意删除 revision 或修改名称。只追加一个新 revision 无法消除回滚时仍会执行的旧危险 downgrade。
+4. 升级中途失败后，即使没有记录 revision，也要检查残留 DDL。已经丢失的数据应通过经过验证的备份或数据库恢复机制恢复；重新建表不会恢复数据行。
+5. 在生产数据的隔离副本上验证实际安装／升级／回滚路径，再恢复操作。
+
+## 迁移锁
+
+`upgrade` 和 `downgrade`（包括 `ensure_schema()` 和 `uninstall()`）会获取数据库锁，避免两个进程同时迁移同一个数据库。
+
+| 方言 | 锁 | 等待 |
+|---------|------|------|
+| PostgreSQL | `pg_try_advisory_lock` | 轮询直到 `DATABASE_MIGRATION_LOCK_TIMEOUT`（默认 30 秒） |
+| MySQL、MariaDB | `GET_LOCK` | 同一超时时间，向上取整到整秒 |
+| SQLite | 无 | 只在单个进程中运行迁移 |
+
+超时会抛出 `MigrationError`。这个管理器不为 SQLite 提供跨进程锁。
+
+## 自定义版本表与独立 module 集合
+
+版本表默认为 `bedrock_migrations`。可以用 `MigrationsManager(..., version_table="...")` 或宿主设置 `DATABASE_MIGRATION_VERSION_TABLE` 修改。名称必须是小写的简单 SQL 标识符（`[a-z_][a-z0-9_]*`），最长 57 个字符。名称本身和 `<name>_adopt`（接管时的暂存表）都被保留，名称也不能以 `_adopt` 结尾。
+
+通过编程方式，可以在同一个数据库上运行多个相互独立的 registry，每个 registry 有自己的账本：
+
+```python
+from bedrock.database import MigrationsManager
+from bedrock.module.registry import ModuleRegistry
+
+billing, search = ModuleRegistry(), ModuleRegistry()
+billing.populate(["myproject.modules.billing"])
+search.populate(["myproject.modules.search"])
+
+url = "postgresql://user:pass@localhost/mydb"
+MigrationsManager(billing, url, version_table="billing_migrations").ensure_schema("myproject.modules.billing")
+MigrationsManager(search, url, version_table="search_migrations").ensure_schema("myproject.modules.search")
+```
+
+规则：
+
+- 这些 module 集合必须相互独立：模型表不相交，且没有迁移依赖另一个账本中的 module。Bedrock 不会跨账本检查这一点。
+- 同一数据库上的所有 manager 共用同一把迁移锁，因此彼此串行。
+- 宿主应用和 `bedrock` CLI 只使用一个已配置的根集合和一个账本，由 `DATABASE_MIGRATION_VERSION_TABLE` 决定。没有对应的 CLI 参数或 manifest 字段。
+  ```bash
+  DATABASE_MIGRATION_VERSION_TABLE=billing_migrations bedrock db upgrade myproject.modules.billing
+  ```
+- 不要通过重命名表来切换账本。改名只会让 Bedrock 指向另一个（可能为空的）账本，已应用的迁移会显得尚未执行。
+- `adopt` 会把*整个*旧的 `alembic_version` 基线导入已配置的账本，因此必须加载所有 module 后再接管。只拥有部分旧历史的 module 集合无法接管。
+
+## `bedrock db check`
+
+`bedrock db check <app>` 会打印该应用，以及已经带有迁移脚本的其他已安装应用的当前版本和 head 版本。它不修改数据库，也不会创建 `bedrock_migrations` 表。任一 module 处于 `behind` 或 `unknown` 时，进程以状态码 1 退出。`unknown` 包含从未执行过迁移的数据库。可以把它用作对外提供流量之前的部署门禁。参见 [CLI 参考 — 数据库命令](/docs/guides/cli#database-commands-bedrock-db)。

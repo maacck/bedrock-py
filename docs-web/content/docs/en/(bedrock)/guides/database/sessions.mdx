@@ -1,0 +1,162 @@
+---
+title: Sessions
+description: Context-local sync and async session scopes, decorators, independent transactions, and engine shutdown
+---
+
+Bedrock uses context-local sessions backed by a `ContextVar`. New async tasks inherit their creator's context, including any bound session; clear or establish separate bindings at task and request boundaries rather than sharing a session concurrently.
+
+## How It Works
+
+The `SessionFactory` wraps SQLAlchemy's `sessionmaker`. `db.session` returns the session stored in the `ContextVar` and never creates one. Something at the entry point binds it:
+
+| Entry point | Binds the session with |
+|-------------|------------------------|
+| Script, CLI command, custom worker, WebSocket handler, startup hook | `with db.session_scope():` or `@db.session_scope()` |
+| FastAPI HTTP request | `DbSessionMiddleware` / `AsyncDbSessionMiddleware` from `bedrock-fastapi` |
+| Test | `with db.session_scope():` in the test; the `db_session` fixture from `bedrock.testing` rolls it back |
+| Session managed by another framework | `db.set_session(...)` |
+
+Services read `db.session` and commit; they never open a scope themselves:
+
+```python
+from bedrock.database import db
+
+# service.py
+def create_product(name: str) -> None:
+    db.session.add(Product(name=name))
+    db.session.commit()
+
+# entry point
+db.init()
+with db.session_scope():
+    create_product("Widget")
+
+create_product("Gadget")  # raises SessionNotBoundError: no scope is open
+```
+
+## Transaction Scopes with `session_scope()`
+
+The recommended way to manage transactions is `session_scope()`. It creates a new session, binds it to the current context, and guarantees commit on clean exit or rollback on exception:
+
+```python
+from bedrock.database import db
+
+db.init()
+
+# Automatic commit on success
+with db.session_scope() as session:
+    product = Product(name="Widget")
+    session.add(product)
+    # Session commits automatically when block exits cleanly
+
+# Automatic rollback on exception
+try:
+    with db.session_scope() as session:
+        session.add(Product(name="Gadget"))
+        raise ValueError("Something went wrong")  # Rolls back
+except ValueError:
+    pass  # "Gadget" was never persisted
+```
+
+**Key behaviors:**
+- Binds the session to `ContextVar` so `db.session` works inside the block
+- Commits on clean exit, rolls back on any exception (including `BaseException`)
+- Always closes the session and resets the `ContextVar` on exit
+- Raises `SessionAlreadyBoundError` (a `BedrockExc` that is also a `RuntimeError`) if called while a session is already bound (prevents nesting)
+
+## Decorating Entry Points
+
+`session_scope()` and `asession_scope()` also work as decorators. Every call opens a new scope, so each invocation gets its own session and transaction. The decorator can be applied before `db.init()`, because the database is only used when the function is called:
+
+```python
+from bedrock.database import db
+
+@db.session_scope()
+def import_products(path: str) -> None:
+    for name in read_names(path):
+        db.session.add(Product(name=name))
+
+@db.asession_scope()
+async def sync_inventory() -> None:
+    await refresh_stock(db.asession)
+```
+
+Note the parentheses: `@db.session_scope()`, not `@db.session_scope`. The function's return value passes through unchanged. Do not decorate a function that is called while a session is already bound, such as a service called from a request: the nested scope raises `SessionAlreadyBoundError`.
+
+## Independent Sessions with `independent_session()`
+
+For side-effect writes that must not interfere with the current transaction, use `independent_session()`. It creates an isolated session that does **not** bind to the `ContextVar`:
+
+```python
+from bedrock.database import db
+
+db.init()
+
+with db.session_scope() as session:
+    # Main transaction
+    order = Order(total=100)
+    session.add(order)
+
+    # Write an audit log in a separate transaction
+    with db.independent_session() as audit_session:
+        audit_log = AuditLog(action="order_started")
+        audit_session.add(audit_log)
+        # Commits independently — does not affect the outer session
+
+    # db.session still returns the outer session
+    assert db.session is session
+```
+
+**Use cases for `independent_session()`:**
+- Audit logging (must persist even if the main transaction rolls back)
+- Event publishing with an independent transaction (a transactional outbox must instead share the main transaction)
+- Reads that must not see uncommitted data from the caller
+- Background tasks that need their own transaction lifecycle
+
+## Async Sessions
+
+Async services use the same scoping rules with an `a` prefix. Set `DATABASE_ASYNC_DRIVER` and install the extra that provides that driver:
+
+| Driver | Install |
+|--------|---------|
+| `aiosqlite` | `pip install 'bedrock-core[async-sqlite]'` |
+| `asyncpg` | `pip install 'bedrock-core[async-postgresql]'` |
+| `asyncmy` | `pip install 'bedrock-core[async-mysql]'` |
+| `psycopg`, `aiomysql` | Install the driver package itself (`pip install psycopg` / `pip install aiomysql`) |
+
+`db.asession_scope()` commits on a clean exit, rolls back on any exception, and refuses to nest when an async session is already bound. `db.aindependent_session()` does not bind `db.asession`. The async session uses its own context variable, so a sync session in the same task stays in place. A missing driver package raises `DatabaseConfigurationError` and names the extra to install.
+
+```python
+from bedrock.database import db, DbSettings
+
+db.init(settings=DbSettings(ASYNC_DRIVER="aiosqlite"))
+
+async with db.asession_scope() as session:
+    session.add(Product(name="Widget"))
+
+await db.aclose()
+db.close()
+```
+
+## Closing Engines
+
+Call `db.close()` for the synchronous engine and `await db.aclose()` for the asynchronous engine. If both were built, call both. Calling either method again does nothing further to that side. After `close()`, synchronous access raises `DatabaseNotConfiguredError` until `db.init()`, while an async engine that was already built still works. After `aclose()`, the synchronous engine still works, and the next async access builds a new async engine when synchronous configuration remains. These methods do not shut down the module registry. To stop a process, call `bedrock.shutdown()` (or `await bedrock.ashutdown()`): it stops every module and then calls `db.close()` and, if an async engine exists, `db.aclose()` once each, so both pools are released after every module hook, even when one failed. A never-initialized database is left alone. Inside a running event loop with an async engine, use `await bedrock.ashutdown()`; `bedrock.shutdown()` raises `ModuleAsyncRequiredError` before changing anything.
+
+`db.init()` disposes the previous synchronous engine. It does not synchronously dispose an async engine that has already opened a connection: that close runs outside the event loop and fails with `MissingGreenlet`. Await `db.aclose()` before `db.init()` when that async engine should be closed. An async engine that has not opened a connection is disposed during `init()`.
+
+## Binding an External Session
+
+When working with frameworks that manage their own sessions (like FastAPI's dependency injection), you can bind an existing session:
+
+For FastAPI, prefer the [DB session middlewares](/docs/integrations/fastapi#database-sessions) from the FastAPI integration.
+
+```python
+from bedrock.database import db
+
+# Bind a session from an external source
+db.set_session(framework_session)
+try:
+    product = db.session.query(Product).first()
+finally:
+    db.clear_session()  # Closes the session, then unbinds it
+```

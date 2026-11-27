@@ -1,0 +1,10 @@
+{
+  "title": "Database",
+  "pages": [
+    "index",
+    "sessions",
+    "models",
+    "query-builder",
+    "migrations"
+  ]
+}
