@@ -229,7 +229,7 @@ class QuerySchema[M: BedrockModel]:
         if base_select is None:
             base: Select[Any] = select(*projected).select_from(self.model)
         else:
-            base = base_select.with_only_columns(*projected)
+            base = base_select.with_only_columns(*projected, maintain_column_froms=True)
 
         filtered = base.where(where_clause)
         if grouped:

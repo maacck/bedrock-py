@@ -330,6 +330,47 @@ class TestFieldProjectionExecutors:
         assert page.items == [{"cnt": 4}]
         assert page.page_info.has_more is False
 
+    def test_base_select_preserves_from_clause_for_columnless_projection_sync(self, sync_session):
+        rows = search_fields(
+            sync_session,
+            ExecOrder,
+            fields=[func.count().label("count")],
+            base_select=select(ExecOrder),
+        )
+        assert rows == [{"count": 4}]
+
+        page = paginate_fields(
+            sync_session,
+            ExecOrder,
+            fields=[func.count().label("count")],
+            base_select=select(ExecOrder),
+            query={"pagination": {"page": 1, "limit": 10}},
+        )
+        assert page.total == 1
+        assert page.items == [{"count": 4}]
+        assert page.page_info.has_more is False
+
+    @pytest.mark.asyncio
+    async def test_base_select_preserves_from_clause_for_columnless_projection_async(self, async_session: AsyncSession):
+        rows = await asearch_fields(
+            async_session,
+            ExecOrder,
+            fields=[func.count().label("count")],
+            base_select=select(ExecOrder),
+        )
+        assert rows == [{"count": 4}]
+
+        page = await apaginate_fields(
+            async_session,
+            ExecOrder,
+            fields=[func.count().label("count")],
+            base_select=select(ExecOrder),
+            query={"pagination": {"page": 1, "limit": 10}},
+        )
+        assert page.total == 1
+        assert page.items == [{"count": 4}]
+        assert page.page_info.has_more is False
+
 
 class TestCustomSelectExecutors:
     """Verify search_select / paginate_select with explicit JOIN, aliased(), and extra_fields."""
