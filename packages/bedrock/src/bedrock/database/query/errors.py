@@ -81,6 +81,7 @@ def precheck_raw_query(
     max_nodes: int,
     max_relation_depth: int,
     max_limit: int,
+    pager: Any = None,
 ) -> None:
     """Iteratively validate top-level query shape, pagination bounds, and filter budgets.
 
@@ -90,6 +91,7 @@ def precheck_raw_query(
         max_nodes: Maximum permitted filter tree node count.
         max_relation_depth: Maximum permitted relationship hops.
         max_limit: Maximum permitted ``pagination.limit``.
+        pager: Optional :class:`BasePager` validating pager-specific pagination keys.
 
     Raises:
         BadFilterFormatError: If *raw* is not a mapping or exceeds node count.
@@ -103,16 +105,19 @@ def precheck_raw_query(
 
     pagination = raw.get("pagination")
     if pagination is not None:
-        if not isinstance(pagination, Mapping):
-            raise InvalidQueryLimitError("`pagination` must be an object.")
-        if "page" in pagination:
-            page = pagination["page"]
-            if isinstance(page, bool) or not isinstance(page, int) or page < 1:
-                raise InvalidQueryLimitError("`pagination.page` must be an integer >= 1.")
-        if "limit" in pagination:
-            limit = pagination["limit"]
-            if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= max_limit:
-                raise InvalidQueryLimitError(f"`pagination.limit` must be an integer between 1 and {max_limit}.")
+        if pager is not None:
+            pager.precheck_raw(pagination, max_limit=max_limit)
+        else:
+            if not isinstance(pagination, Mapping):
+                raise InvalidQueryLimitError("`pagination` must be an object.")
+            if "page" in pagination:
+                page = pagination["page"]
+                if isinstance(page, bool) or not isinstance(page, int) or page < 1:
+                    raise InvalidQueryLimitError("`pagination.page` must be an integer >= 1.")
+            if "limit" in pagination:
+                limit = pagination["limit"]
+                if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= max_limit:
+                    raise InvalidQueryLimitError(f"`pagination.limit` must be an integer between 1 and {max_limit}.")
 
     filter_node = raw.get("filter")
     if filter_node is not None:

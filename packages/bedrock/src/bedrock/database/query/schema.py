@@ -16,14 +16,15 @@ from .ast import (
     LogicalAndFilter,
     LogicalNotFilter,
     LogicalOrFilter,
-    PaginationSpec,
+    PaginationParams,
     QueryInput,
     QuerySpec,
     RelationFilter,
     SortSpec,
 )
 from .errors import normalize_validation_error, precheck_raw_filter, precheck_raw_query
-from .policy import ResolvedField, ResolvedModelPolicy, resolve_model_policy
+from .pager import BasePager, PagePager
+from .policy import QueryPolicy, ResolvedField, ResolvedModelPolicy, resolve_model_policy
 
 
 def _reject_bool_for_decimal(value: Any) -> Any:
@@ -245,7 +246,12 @@ def _dict_to_filter_node(data: Any) -> FilterNode:
     )
 
 
-def _dict_to_query_spec(data: Any) -> QuerySpec:
+def _dict_to_query_spec(
+    data: Any,
+    *,
+    pager: BasePager[Any, Any],
+    policy: QueryPolicy,
+) -> QuerySpec:
     """Convert a validated raw query dict into the canonical ``QuerySpec`` AST."""
     if isinstance(data, QuerySpec):
         return data
@@ -267,15 +273,9 @@ def _dict_to_query_spec(data: Any) -> QuerySpec:
         for item in raw_sort
     ]
 
-    pagination = None
+    pagination: PaginationParams | None = None
     if raw_pagination is not None:
-        if isinstance(raw_pagination, PaginationSpec):
-            pagination = raw_pagination
-        else:
-            pagination = PaginationSpec.model_construct(
-                page=raw_pagination.get("page", 1),
-                limit=raw_pagination.get("limit", 10),
-            )
+        pagination = pager.parse_params(raw_pagination, policy)
 
     return QuerySpec.model_construct(
         filter=_dict_to_filter_node(raw_filter) if raw_filter is not None else None,
@@ -320,7 +320,7 @@ def _query_spec_to_dict(spec: QuerySpec) -> dict[str, Any]:
     if spec.search is not None:
         payload["search"] = spec.search
     if spec.pagination is not None:
-        payload["pagination"] = {"page": spec.pagination.page, "limit": spec.pagination.limit}
+        payload["pagination"] = spec.pagination.model_dump(mode="python", by_alias=True)
     return payload
 
 
@@ -479,11 +479,17 @@ class _FilterNodeSource:
 class _QueryDictSource:
     """Pydantic metadata source building the full model-scoped query ``CoreSchema``."""
 
-    __slots__ = ("_filter_source", "_resolved")
+    __slots__ = ("_filter_source", "_pager", "_resolved")
 
-    def __init__(self, resolved: ResolvedModelPolicy, filter_source: _FilterNodeSource) -> None:
+    def __init__(
+        self,
+        resolved: ResolvedModelPolicy,
+        filter_source: _FilterNodeSource,
+        pager: BasePager[Any, Any],
+    ) -> None:
         self._resolved = resolved
         self._filter_source = filter_source
+        self._pager = pager
 
     def __get_pydantic_core_schema__(self, source_type: Any, handler: GetCoreSchemaHandler) -> CoreSchema:
         resolved = self._resolved
@@ -517,22 +523,7 @@ class _QueryDictSource:
         else:
             sort_list_schema = core_schema.list_schema(core_schema.any_schema(), max_length=0)
 
-        pagination_schema = core_schema.typed_dict_schema(
-            {
-                "page": core_schema.typed_dict_field(
-                    core_schema.with_default_schema(core_schema.int_schema(strict=True, ge=1), default=1),
-                    required=False,
-                ),
-                "limit": core_schema.typed_dict_field(
-                    core_schema.with_default_schema(
-                        core_schema.int_schema(strict=True, ge=1, le=resolved.policy.max_limit),
-                        default=resolved.policy.default_limit,
-                    ),
-                    required=False,
-                ),
-            },
-            extra_behavior="forbid",
-        )
+        pagination_schema = self._pager.build_params_schema(resolved.policy)
 
         return core_schema.typed_dict_schema(
             {
@@ -569,8 +560,14 @@ class _QueryDictSource:
 class CompiledQueryValidator:
     """Memory-light compiled Pydantic v2 validator and lazy JSON Schema generator."""
 
-    def __init__(self, resolved: ResolvedModelPolicy) -> None:
+    def __init__(
+        self,
+        resolved: ResolvedModelPolicy,
+        *,
+        pager: BasePager[Any, Any] | None = None,
+    ) -> None:
         self.resolved = resolved
+        self.pager: BasePager[Any, Any] = pager if pager is not None else PagePager()
         self._schema_tag = f"{id(self):x}"
         root_ref = _filter_ref(
             resolved.model,
@@ -585,7 +582,7 @@ class CompiledQueryValidator:
             ref=root_ref,
             schema_tag=self._schema_tag,
         )
-        self._query_source = _QueryDictSource(resolved, self._filter_source)
+        self._query_source = _QueryDictSource(resolved, self._filter_source, self.pager)
         self._query_adapter: TypeAdapter[Any] = TypeAdapter(Annotated[Any, self._query_source])
         self._filter_adapter: TypeAdapter[Any] = TypeAdapter(Annotated[Any, self._filter_source])
 
@@ -596,6 +593,7 @@ class CompiledQueryValidator:
     ) -> CoreSchema:
         """Build a ``CoreSchema`` for ``Annotated[QuerySpec | FilterNode, schema]``."""
         policy = self.resolved.policy
+        pager = self.pager
         serializer = core_schema.plain_serializer_function_ser_schema(_serialize_ast_model, info_arg=True)
 
         if source_type is QuerySpec:
@@ -611,13 +609,20 @@ class CompiledQueryValidator:
                             max_nodes=policy.max_nodes,
                             max_relation_depth=policy.max_relation_depth,
                             max_limit=policy.max_limit,
+                            pager=pager,
                         )
                     except BedrockExc as err:
                         raise ValueError(err.detail) from err
                 return raw
 
+            def _to_query_spec(validated: Any) -> QuerySpec:
+                try:
+                    return _dict_to_query_spec(validated, pager=pager, policy=policy)
+                except BedrockExc as err:
+                    raise ValueError(err.detail) from err
+
             return core_schema.no_info_after_validator_function(
-                _dict_to_query_spec,
+                _to_query_spec,
                 core_schema.no_info_before_validator_function(_precheck_query, inner),
                 serialization=serializer,
             )
@@ -690,12 +695,13 @@ class CompiledQueryValidator:
             max_nodes=policy.max_nodes,
             max_relation_depth=policy.max_relation_depth,
             max_limit=policy.max_limit,
+            pager=self.pager,
         )
         try:
             validated = self._query_adapter.validate_python(payload)
         except ValidationError as err:
             raise normalize_validation_error(err, resolved=self.resolved, raw_payload=payload) from err
-        return _dict_to_query_spec(validated)
+        return _dict_to_query_spec(validated, pager=self.pager, policy=policy)
 
     def validate_filter(self, raw: str | bytes | Mapping[str, Any] | FilterNode) -> FilterNode:
         """Validate a standalone filter payload into a canonical ``FilterNode``."""
