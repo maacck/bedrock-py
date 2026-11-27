@@ -3,7 +3,7 @@
 from collections.abc import Mapping
 from typing import Any, Literal
 
-from pydantic import ConfigDict, Field, StrictInt, model_validator
+from pydantic import ConfigDict, Field, SerializerFunctionWrapHandler, StrictInt, model_serializer, model_validator
 from sqlalchemy.orm import InstrumentedAttribute
 from sqlalchemy.sql.elements import ColumnElement
 
@@ -56,6 +56,13 @@ class FieldFilter(_StrictQueryEntity):
         if self.op in UNARY_OPS and self.value is not None:
             raise ValueError(f"Operator `{self.op}` does not accept a `value`.")
         return self
+
+    @model_serializer(mode="wrap")
+    def _serialize_field_filter(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        data: dict[str, Any] = handler(self)
+        if self.op in UNARY_OPS:
+            data.pop("value", None)
+        return data
 
 
 class LogicalAndFilter(_StrictQueryEntity):

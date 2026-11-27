@@ -427,8 +427,21 @@ class TestSchemaValidationMatrix:
         WrappedRequest.model_rebuild(_types_namespace={"schema": schema})
         req = WrappedRequest.model_validate(
             {
-                "query": {"filter": {"field": "quantity", "op": "gte", "value": 2}},
-                "extra_filter": {"field": "owner.name", "op": "eq", "value": "ann"},
+                "query": {
+                    "filter": {
+                        "logic": "and",
+                        "conditions": [
+                            {"field": "quantity", "op": "gte", "value": 2},
+                            {"field": "created_at", "op": "is_null"},
+                            {
+                                "relation": "owner",
+                                "quantifier": "has",
+                                "filter": {"field": "name", "op": "eq", "value": "ann"},
+                            },
+                        ],
+                    }
+                },
+                "extra_filter": {"field": "created_at", "op": "is_not_null"},
             }
         )
         with warnings.catch_warnings(record=True) as caught:
@@ -437,5 +450,14 @@ class TestSchemaValidationMatrix:
             dumped_json = req.model_dump_json()
 
         assert caught == []
-        assert dumped["query"]["filter"]["field"] == "quantity"
-        assert '"owner.name"' in dumped_json
+        assert dumped["extra_filter"] == {"field": "created_at", "op": "is_not_null"}
+        assert "value" not in dumped["query"]["filter"]["conditions"][1]
+        assert '"owner"' in dumped_json
+
+        # Must round-trip cleanly through both Pydantic JSON validation and QuerySchema.validate_json()
+        reloaded = WrappedRequest.model_validate_json(dumped_json)
+        assert reloaded == req
+        replayed = schema.validate_json(json.dumps(dumped["query"]))
+        assert replayed == req.query
+        replayed_filter = schema.validate_filter(json.dumps(dumped["extra_filter"]))
+        assert replayed_filter == req.extra_filter

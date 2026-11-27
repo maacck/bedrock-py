@@ -62,7 +62,10 @@ class TestQueryAst:
             QuerySpec.model_validate({"unknown": True})
 
     def test_unary_operator_rejects_value(self):
-        assert FieldFilter(field="deleted_at", op="is_null").value is None
+        unary = FieldFilter(field="deleted_at", op="is_null")
+        assert unary.value is None
+        assert unary.model_dump() == {"field": "deleted_at", "op": "is_null"}
+        assert "value" not in unary.model_dump_json()
         with pytest.raises(ValidationError, match="does not accept a `value`"):
             FieldFilter(field="deleted_at", op="is_null", value=False)
 
