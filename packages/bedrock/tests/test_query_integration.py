@@ -213,3 +213,45 @@ class TestEndToEndQueryWorkflow:
         )
         assert pct_page.total == 1
         assert pct_page.items == [{"number": "INV-100%", "amount": 500}]
+
+    def test_fastapi_annotated_route_returns_422_not_500_on_budget_violations(self):
+        fastapi = pytest.importorskip("fastapi")
+        from fastapi.testclient import TestClient
+
+        strict_schema = QuerySchema(
+            IntInvoice,
+            policy=QueryPolicy(default_limit=5, max_limit=5, max_depth=2, max_nodes=3),
+        )
+
+        async def strict_search(query: Any) -> dict[str, Any]:
+            return {"limit": query.pagination.limit if query.pagination else None}
+
+        strict_search.__annotations__["query"] = Annotated[QuerySpec, strict_schema]
+        app = fastapi.FastAPI()
+        app.post("/invoices/strict-search")(strict_search)
+
+        client = TestClient(app, raise_server_exceptions=False)
+
+        # Valid request -> 200
+        ok = client.post("/invoices/strict-search", json={"pagination": {"page": 1, "limit": 5}})
+        assert ok.status_code == 200
+        assert ok.json() == {"limit": 5}
+
+        # Limit exceeded -> 422 (never 500)
+        over_limit = client.post("/invoices/strict-search", json={"pagination": {"page": 1, "limit": 999}})
+        assert over_limit.status_code == 422
+
+        # Depth exceeded -> 422 (never 500)
+        deep_filter: dict[str, Any] = {"field": "amount", "op": "eq", "value": 100}
+        for _ in range(4):
+            deep_filter = {"logic": "not", "condition": deep_filter}
+        over_depth = client.post("/invoices/strict-search", json={"filter": deep_filter})
+        assert over_depth.status_code == 422
+
+        # Node budget exceeded -> 422 (never 500)
+        wide_filter = {
+            "logic": "or",
+            "conditions": [{"field": "amount", "op": "eq", "value": i} for i in range(5)],
+        }
+        over_nodes = client.post("/invoices/strict-search", json={"filter": wide_filter})
+        assert over_nodes.status_code == 422

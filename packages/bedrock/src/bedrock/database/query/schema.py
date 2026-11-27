@@ -9,7 +9,7 @@ import orjson
 from pydantic import GetCoreSchemaHandler, TypeAdapter, ValidationError
 from pydantic_core import CoreSchema, core_schema
 
-from ...exc import BadFilterFormatError
+from ...exc import BadFilterFormatError, BedrockExc
 from .ast import (
     FieldFilter,
     FilterNode,
@@ -54,11 +54,50 @@ def _reject_non_time_input(value: Any) -> Any:
     return value
 
 
-def _coerce_enum_member(value: Any) -> Any:
-    """Unwrap Python Enum instances to their underlying value before literal check."""
-    if isinstance(value, enum.Enum):
-        return value.value
+def _make_enum_coercer(*, allow_bool: bool) -> Any:
+    """Build an enum before-validator that unwraps Enum instances and optionally rejects booleans."""
+
+    def _coerce(value: Any) -> Any:
+        if not allow_bool and isinstance(value, bool):
+            raise ValueError("Input should be a valid enum value, not a boolean.")
+        if isinstance(value, enum.Enum):
+            return value.value
+        return value
+
+    return _coerce
+
+
+def _serialize_ast_model(value: Any, info: core_schema.SerializationInfo) -> Any:
+    """Serialize validated ``QuerySpec`` / ``FilterNode`` AST models cleanly without warnings."""
+    if hasattr(value, "model_dump"):
+        return value.model_dump(mode=info.mode)
     return value
+
+
+def _discriminate_filter_node(value: Any) -> str | None:
+    """Dispatch a raw filter mapping directly to its matching tagged-union branch."""
+    if not isinstance(value, Mapping):
+        return None
+    if "logic" in value:
+        logic = value.get("logic")
+        return f"logic:{logic}" if isinstance(logic, str) else None
+    if "relation" in value:
+        rel = value.get("relation")
+        if not isinstance(rel, str):
+            return None
+        quant = value.get("quantifier")
+        return f"rel:{rel}:every" if quant == "every" else f"rel:{rel}:opt"
+    if "field" in value:
+        field_name = value.get("field")
+        if not isinstance(field_name, str):
+            return None
+        op = value.get("op")
+        if op in ("in", "between"):
+            return f"field:{field_name}:{op}"
+        if op in ("is_null", "is_not_null"):
+            return f"field:{field_name}:null"
+        return f"field:{field_name}:single"
+    return None
 
 
 def _scalar_core_schema(field: ResolvedField) -> CoreSchema:
@@ -69,7 +108,9 @@ def _scalar_core_schema(field: ResolvedField) -> CoreSchema:
     if kind == "int":
         return core_schema.int_schema(strict=True)
     if kind == "float":
-        return core_schema.union_schema([core_schema.int_schema(strict=True), core_schema.float_schema(strict=True)])
+        return core_schema.union_schema(
+            [core_schema.int_schema(strict=True), core_schema.float_schema(strict=True, allow_inf_nan=False)]
+        )
     if kind == "decimal":
         return core_schema.no_info_before_validator_function(
             _reject_bool_for_decimal,
@@ -98,8 +139,9 @@ def _scalar_core_schema(field: ResolvedField) -> CoreSchema:
         values = list(field.enum_values or ())
         if not values:
             return core_schema.str_schema(strict=True)
+        allow_bool = any(type(v) is bool for v in values)
         return core_schema.no_info_before_validator_function(
-            _coerce_enum_member,
+            _make_enum_coercer(allow_bool=allow_bool),
             core_schema.literal_schema(values),
         )
     raise BadFilterFormatError(f"Unsupported scalar kind `{kind}` for field `{field.name}`.")
@@ -110,65 +152,57 @@ def _field_predicate_branches(
     field: ResolvedField,
     *,
     max_in_items: int,
-) -> list[CoreSchema]:
-    """Generate strict typed-dict ``CoreSchema`` branches for one filterable field."""
-    branches: list[CoreSchema] = []
+) -> dict[str, CoreSchema]:
+    """Generate tagged-union ``CoreSchema`` branches for one filterable field."""
+    branches: dict[str, CoreSchema] = {}
     scalar = _scalar_core_schema(field)
     ops = field.operators
 
     single_ops = sorted(ops - {"in", "between", "is_null", "is_not_null"})
     if single_ops:
-        branches.append(
-            core_schema.typed_dict_schema(
-                {
-                    "field": core_schema.typed_dict_field(core_schema.literal_schema([field_name]), required=True),
-                    "op": core_schema.typed_dict_field(core_schema.literal_schema(single_ops), required=True),
-                    "value": core_schema.typed_dict_field(scalar, required=True),
-                },
-                extra_behavior="forbid",
-            )
+        branches[f"field:{field_name}:single"] = core_schema.typed_dict_schema(
+            {
+                "field": core_schema.typed_dict_field(core_schema.literal_schema([field_name]), required=True),
+                "op": core_schema.typed_dict_field(core_schema.literal_schema(single_ops), required=True),
+                "value": core_schema.typed_dict_field(scalar, required=True),
+            },
+            extra_behavior="forbid",
         )
 
     if "in" in ops:
-        branches.append(
-            core_schema.typed_dict_schema(
-                {
-                    "field": core_schema.typed_dict_field(core_schema.literal_schema([field_name]), required=True),
-                    "op": core_schema.typed_dict_field(core_schema.literal_schema(["in"]), required=True),
-                    "value": core_schema.typed_dict_field(
-                        core_schema.list_schema(scalar, min_length=0, max_length=max_in_items),
-                        required=True,
-                    ),
-                },
-                extra_behavior="forbid",
-            )
+        branches[f"field:{field_name}:in"] = core_schema.typed_dict_schema(
+            {
+                "field": core_schema.typed_dict_field(core_schema.literal_schema([field_name]), required=True),
+                "op": core_schema.typed_dict_field(core_schema.literal_schema(["in"]), required=True),
+                "value": core_schema.typed_dict_field(
+                    core_schema.list_schema(scalar, min_length=0, max_length=max_in_items),
+                    required=True,
+                ),
+            },
+            extra_behavior="forbid",
         )
 
     if "between" in ops:
-        branches.append(
-            core_schema.typed_dict_schema(
-                {
-                    "field": core_schema.typed_dict_field(core_schema.literal_schema([field_name]), required=True),
-                    "op": core_schema.typed_dict_field(core_schema.literal_schema(["between"]), required=True),
-                    "value": core_schema.typed_dict_field(
-                        core_schema.tuple_schema([scalar, scalar]),
-                        required=True,
-                    ),
-                },
-                extra_behavior="forbid",
-            )
+        branches[f"field:{field_name}:between"] = core_schema.typed_dict_schema(
+            {
+                "field": core_schema.typed_dict_field(core_schema.literal_schema([field_name]), required=True),
+                "op": core_schema.typed_dict_field(core_schema.literal_schema(["between"]), required=True),
+                "value": core_schema.typed_dict_field(
+                    core_schema.tuple_schema([scalar, scalar]),
+                    required=True,
+                ),
+            },
+            extra_behavior="forbid",
         )
 
     null_ops = sorted(ops & {"is_null", "is_not_null"})
     if null_ops:
-        branches.append(
-            core_schema.typed_dict_schema(
-                {
-                    "field": core_schema.typed_dict_field(core_schema.literal_schema([field_name]), required=True),
-                    "op": core_schema.typed_dict_field(core_schema.literal_schema(null_ops), required=True),
-                },
-                extra_behavior="forbid",
-            )
+        branches[f"field:{field_name}:null"] = core_schema.typed_dict_schema(
+            {
+                "field": core_schema.typed_dict_field(core_schema.literal_schema([field_name]), required=True),
+                "op": core_schema.typed_dict_field(core_schema.literal_schema(null_ops), required=True),
+            },
+            extra_behavior="forbid",
         )
 
     return branches
@@ -290,15 +324,15 @@ def _query_spec_to_dict(spec: QuerySpec) -> dict[str, Any]:
     return payload
 
 
-def _filter_ref(model: type[Any], depth: int, schema_tag: str) -> str:
-    """Return a unique, collision-free Pydantic ref for *(model, depth, schema_tag)*."""
-    return f"{model.__module__}.{model.__qualname__}:Filter:d{depth}:{schema_tag}"
+def _filter_ref(model: type[Any], depth: int, schema_tag: str, max_in_items: int) -> str:
+    """Return a unique, collision-free Pydantic ref for *(model, depth, schema_tag, max_in_items)*."""
+    return f"{model.__module__}.{model.__qualname__}:Filter:d{depth}:in{max_in_items}:{schema_tag}"
 
 
 class _FilterNodeSource:
     """Pydantic metadata source building a recursive model filter ``CoreSchema``."""
 
-    __slots__ = ("_include_dotted", "_ref", "_remaining_rel_depth", "_resolved", "_schema_tag")
+    __slots__ = ("_include_dotted", "_max_in_items", "_ref", "_remaining_rel_depth", "_resolved", "_schema_tag")
 
     def __init__(
         self,
@@ -308,74 +342,80 @@ class _FilterNodeSource:
         include_dotted: bool,
         ref: str,
         schema_tag: str,
+        max_in_items: int | None = None,
     ) -> None:
         self._resolved = resolved
         self._remaining_rel_depth = remaining_rel_depth
         self._include_dotted = include_dotted
         self._ref = ref
         self._schema_tag = schema_tag
+        self._max_in_items = (
+            resolved.policy.max_in_items if max_in_items is None else min(max_in_items, resolved.policy.max_in_items)
+        )
 
     def __get_pydantic_core_schema__(self, source_type: Any, handler: GetCoreSchemaHandler) -> CoreSchema:
         resolved = self._resolved
         ref = self._ref
-        branches: list[CoreSchema] = []
-        max_in = resolved.policy.max_in_items
+        choices: dict[str, CoreSchema] = {}
+        max_in = self._max_in_items
 
         # 1. Logical combinators referencing self via definition_reference_schema
         self_ref_schema = core_schema.definition_reference_schema(ref)
-        branches.append(
-            core_schema.typed_dict_schema(
-                {
-                    "logic": core_schema.typed_dict_field(core_schema.literal_schema(["and"]), required=True),
-                    "conditions": core_schema.typed_dict_field(
-                        core_schema.list_schema(self_ref_schema, min_length=1),
-                        required=True,
-                    ),
-                },
-                extra_behavior="forbid",
-            )
+        choices["logic:and"] = core_schema.typed_dict_schema(
+            {
+                "logic": core_schema.typed_dict_field(core_schema.literal_schema(["and"]), required=True),
+                "conditions": core_schema.typed_dict_field(
+                    core_schema.list_schema(self_ref_schema, min_length=1),
+                    required=True,
+                ),
+            },
+            extra_behavior="forbid",
         )
-        branches.append(
-            core_schema.typed_dict_schema(
-                {
-                    "logic": core_schema.typed_dict_field(core_schema.literal_schema(["or"]), required=True),
-                    "conditions": core_schema.typed_dict_field(
-                        core_schema.list_schema(self_ref_schema, min_length=1),
-                        required=True,
-                    ),
-                },
-                extra_behavior="forbid",
-            )
+        choices["logic:or"] = core_schema.typed_dict_schema(
+            {
+                "logic": core_schema.typed_dict_field(core_schema.literal_schema(["or"]), required=True),
+                "conditions": core_schema.typed_dict_field(
+                    core_schema.list_schema(self_ref_schema, min_length=1),
+                    required=True,
+                ),
+            },
+            extra_behavior="forbid",
         )
-        branches.append(
-            core_schema.typed_dict_schema(
-                {
-                    "logic": core_schema.typed_dict_field(core_schema.literal_schema(["not"]), required=True),
-                    "condition": core_schema.typed_dict_field(self_ref_schema, required=True),
-                },
-                extra_behavior="forbid",
-            )
+        choices["logic:not"] = core_schema.typed_dict_schema(
+            {
+                "logic": core_schema.typed_dict_field(core_schema.literal_schema(["not"]), required=True),
+                "condition": core_schema.typed_dict_field(self_ref_schema, required=True),
+            },
+            extra_behavior="forbid",
         )
 
         # 2. Direct allowlisted scalar fields
         for field_name, field in resolved.fields.items():
             if not field.filterable:
                 continue
-            branches.extend(_field_predicate_branches(field_name, field, max_in_items=max_in))
+            choices.update(_field_predicate_branches(field_name, field, max_in_items=max_in))
 
         # 3. Allowlisted to-one dotted path syntax sugar (root level only; expanded to has() EXISTS)
         if self._include_dotted:
             for dotted_path, dotted_field in resolved.dotted_fields.items():
-                branches.extend(_field_predicate_branches(dotted_path, dotted_field.target_field, max_in_items=max_in))
+                choices.update(
+                    _field_predicate_branches(
+                        dotted_path,
+                        dotted_field.target_field,
+                        max_in_items=min(max_in, dotted_field.max_in_items),
+                    )
+                )
 
         # 4. Allowlisted explicit relation quantifier branches
         if self._remaining_rel_depth > 0:
             for rel_name, rel in resolved.relations.items():
                 child_resolved = resolve_model_policy(rel.target_model, _collect_dotted=False)
+                child_max_in = min(max_in, child_resolved.policy.max_in_items)
                 child_ref = _filter_ref(
                     child_resolved.model,
                     self._remaining_rel_depth - 1,
                     self._schema_tag,
+                    child_max_in,
                 )
                 child_source = _FilterNodeSource(
                     child_resolved,
@@ -383,62 +423,57 @@ class _FilterNodeSource:
                     include_dotted=False,
                     ref=child_ref,
                     schema_tag=self._schema_tag,
+                    max_in_items=child_max_in,
                 )
                 child_schema = handler.generate_schema(Annotated[Any, child_source])
                 child_ref_only = core_schema.definition_reference_schema(child_ref)
 
                 if rel.uselist:
-                    branches.append(
-                        core_schema.typed_dict_schema(
-                            {
-                                "relation": core_schema.typed_dict_field(
-                                    core_schema.literal_schema([rel_name]), required=True
-                                ),
-                                "quantifier": core_schema.typed_dict_field(
-                                    core_schema.literal_schema(["some", "none"]), required=True
-                                ),
-                                "filter": core_schema.typed_dict_field(
-                                    core_schema.nullable_schema(child_schema),
-                                    required=False,
-                                ),
-                            },
-                            extra_behavior="forbid",
-                        )
+                    choices[f"rel:{rel_name}:opt"] = core_schema.typed_dict_schema(
+                        {
+                            "relation": core_schema.typed_dict_field(
+                                core_schema.literal_schema([rel_name]), required=True
+                            ),
+                            "quantifier": core_schema.typed_dict_field(
+                                core_schema.literal_schema(["some", "none"]), required=True
+                            ),
+                            "filter": core_schema.typed_dict_field(
+                                core_schema.nullable_schema(child_schema),
+                                required=False,
+                            ),
+                        },
+                        extra_behavior="forbid",
                     )
-                    branches.append(
-                        core_schema.typed_dict_schema(
-                            {
-                                "relation": core_schema.typed_dict_field(
-                                    core_schema.literal_schema([rel_name]), required=True
-                                ),
-                                "quantifier": core_schema.typed_dict_field(
-                                    core_schema.literal_schema(["every"]), required=True
-                                ),
-                                "filter": core_schema.typed_dict_field(child_ref_only, required=True),
-                            },
-                            extra_behavior="forbid",
-                        )
+                    choices[f"rel:{rel_name}:every"] = core_schema.typed_dict_schema(
+                        {
+                            "relation": core_schema.typed_dict_field(
+                                core_schema.literal_schema([rel_name]), required=True
+                            ),
+                            "quantifier": core_schema.typed_dict_field(
+                                core_schema.literal_schema(["every"]), required=True
+                            ),
+                            "filter": core_schema.typed_dict_field(child_ref_only, required=True),
+                        },
+                        extra_behavior="forbid",
                     )
                 else:
-                    branches.append(
-                        core_schema.typed_dict_schema(
-                            {
-                                "relation": core_schema.typed_dict_field(
-                                    core_schema.literal_schema([rel_name]), required=True
-                                ),
-                                "quantifier": core_schema.typed_dict_field(
-                                    core_schema.literal_schema(["has", "missing"]), required=True
-                                ),
-                                "filter": core_schema.typed_dict_field(
-                                    core_schema.nullable_schema(child_schema),
-                                    required=False,
-                                ),
-                            },
-                            extra_behavior="forbid",
-                        )
+                    choices[f"rel:{rel_name}:opt"] = core_schema.typed_dict_schema(
+                        {
+                            "relation": core_schema.typed_dict_field(
+                                core_schema.literal_schema([rel_name]), required=True
+                            ),
+                            "quantifier": core_schema.typed_dict_field(
+                                core_schema.literal_schema(["has", "missing"]), required=True
+                            ),
+                            "filter": core_schema.typed_dict_field(
+                                core_schema.nullable_schema(child_schema),
+                                required=False,
+                            ),
+                        },
+                        extra_behavior="forbid",
                     )
 
-        return core_schema.union_schema(branches, ref=ref)
+        return core_schema.tagged_union_schema(choices, discriminator=_discriminate_filter_node, ref=ref)
 
 
 class _QueryDictSource:
@@ -537,7 +572,12 @@ class CompiledQueryValidator:
     def __init__(self, resolved: ResolvedModelPolicy) -> None:
         self.resolved = resolved
         self._schema_tag = f"{id(self):x}"
-        root_ref = _filter_ref(resolved.model, resolved.policy.max_relation_depth, self._schema_tag)
+        root_ref = _filter_ref(
+            resolved.model,
+            resolved.policy.max_relation_depth,
+            self._schema_tag,
+            resolved.policy.max_in_items,
+        )
         self._filter_source = _FilterNodeSource(
             resolved,
             remaining_rel_depth=resolved.policy.max_relation_depth,
@@ -556,46 +596,64 @@ class CompiledQueryValidator:
     ) -> CoreSchema:
         """Build a ``CoreSchema`` for ``Annotated[QuerySpec | FilterNode, schema]``."""
         policy = self.resolved.policy
+        serializer = core_schema.plain_serializer_function_ser_schema(_serialize_ast_model, info_arg=True)
+
         if source_type is QuerySpec:
             inner = handler.generate_schema(Annotated[Any, self._query_source])
 
             def _precheck_query(value: Any) -> Any:
                 raw = _query_spec_to_dict(value) if isinstance(value, QuerySpec) else value
                 if isinstance(raw, Mapping):
-                    precheck_raw_query(
-                        raw,
-                        max_depth=policy.max_depth,
-                        max_nodes=policy.max_nodes,
-                        max_relation_depth=policy.max_relation_depth,
-                        max_limit=policy.max_limit,
-                    )
+                    try:
+                        precheck_raw_query(
+                            raw,
+                            max_depth=policy.max_depth,
+                            max_nodes=policy.max_nodes,
+                            max_relation_depth=policy.max_relation_depth,
+                            max_limit=policy.max_limit,
+                        )
+                    except BedrockExc as err:
+                        raise ValueError(err.detail) from err
                 return raw
 
             return core_schema.no_info_after_validator_function(
                 _dict_to_query_spec,
                 core_schema.no_info_before_validator_function(_precheck_query, inner),
+                serialization=serializer,
             )
 
-        inner = handler.generate_schema(Annotated[Any, self._filter_source])
+        if source_type == FilterNode:
+            inner = handler.generate_schema(Annotated[Any, self._filter_source])
 
-        def _precheck_filter(value: Any) -> Any:
-            raw = (
-                _filter_node_to_dict(value)
-                if isinstance(value, (FieldFilter, LogicalAndFilter, LogicalOrFilter, LogicalNotFilter, RelationFilter))
-                else value
-            )
-            if isinstance(raw, Mapping):
-                precheck_raw_filter(
-                    raw,
-                    max_depth=policy.max_depth,
-                    max_nodes=policy.max_nodes,
-                    max_relation_depth=policy.max_relation_depth,
+            def _precheck_filter(value: Any) -> Any:
+                raw = (
+                    _filter_node_to_dict(value)
+                    if isinstance(
+                        value, (FieldFilter, LogicalAndFilter, LogicalOrFilter, LogicalNotFilter, RelationFilter)
+                    )
+                    else value
                 )
-            return raw
+                if isinstance(raw, Mapping):
+                    try:
+                        precheck_raw_filter(
+                            raw,
+                            max_depth=policy.max_depth,
+                            max_nodes=policy.max_nodes,
+                            max_relation_depth=policy.max_relation_depth,
+                        )
+                    except BedrockExc as err:
+                        raise ValueError(err.detail) from err
+                return raw
 
-        return core_schema.no_info_after_validator_function(
-            _dict_to_filter_node,
-            core_schema.no_info_before_validator_function(_precheck_filter, inner),
+            return core_schema.no_info_after_validator_function(
+                _dict_to_filter_node,
+                core_schema.no_info_before_validator_function(_precheck_filter, inner),
+                serialization=serializer,
+            )
+
+        raise TypeError(
+            f"QuerySchema can only annotate `QuerySpec` or `FilterNode`, got {source_type!r}. "
+            "For optional fields, use `Annotated[QuerySpec, schema] | None`."
         )
 
     def json_schema(self) -> dict[str, Any]:

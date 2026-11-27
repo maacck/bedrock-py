@@ -1,12 +1,19 @@
 """Iterative safety prechecks and SEC-01 error normalization for query validation."""
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from pydantic import ValidationError
 
 from ...exc import BadFilterFormatError, BedrockExc, FilterDepthExceededError, InvalidQueryLimitError
 from .policy import ResolvedModelPolicy, resolve_model_policy
+
+_INTERNAL_LOC_PREFIXES = ("typed-dict", "function-", "union", "logic:", "rel:", "field:")
+
+
+def _is_sequence(value: Any) -> bool:
+    """Return ``True`` for list/tuple-like sequences while excluding strings and bytes."""
+    return isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray)
 
 
 def precheck_raw_filter(
@@ -59,7 +66,7 @@ def precheck_raw_filter(
                 stack.append((child_filter, depth + 1, next_rel_depth))
 
         conditions = node.get("conditions")
-        if isinstance(conditions, list):
+        if _is_sequence(conditions):
             for child in reversed(conditions):
                 stack.append((child, depth + 1, rel_depth))
 
@@ -117,18 +124,28 @@ def precheck_raw_query(
         )
 
 
+def _clean_loc_segments(loc: tuple[Any, ...]) -> list[int | str]:
+    """Strip internal Pydantic union/branch discriminator segments from *loc*."""
+    cleaned: list[int | str] = []
+    for segment in loc:
+        if isinstance(segment, int):
+            cleaned.append(segment)
+        else:
+            seg_str = str(segment)
+            if seg_str.startswith(_INTERNAL_LOC_PREFIXES):
+                continue
+            cleaned.append(seg_str)
+    return cleaned
+
+
 def _format_loc(loc: tuple[Any, ...]) -> str:
     """Render a Pydantic error location tuple as a concise JSONPath string."""
     parts = ["$"]
-    for segment in loc:
+    for segment in _clean_loc_segments(loc):
         if isinstance(segment, int):
             parts.append(f"[{segment}]")
         else:
-            # Skip internal Pydantic union branch labels such as "typed-dict"
-            seg_str = str(segment)
-            if seg_str.startswith(("typed-dict", "function-", "union")):
-                continue
-            parts.append(f".{seg_str}")
+            parts.append(f".{segment}")
     return "".join(parts)
 
 
@@ -148,7 +165,7 @@ def _find_disallowed_identifier(
 
     if not is_filter_only:
         sort_list = raw_payload.get("sort")
-        if isinstance(sort_list, list):
+        if _is_sequence(sort_list):
             for entry in sort_list:
                 if isinstance(entry, Mapping):
                     sort_field = entry.get("field")
@@ -190,7 +207,7 @@ def _find_disallowed_identifier(
                     stack.append((child_filter, child_policy))
 
         conditions = node.get("conditions")
-        if isinstance(conditions, list):
+        if _is_sequence(conditions):
             for child in reversed(conditions):
                 stack.append((child, current))
 
@@ -206,17 +223,25 @@ def _select_most_relevant_error(err: ValidationError) -> dict[str, Any]:
     if not errors:
         return {"loc": (), "msg": "Invalid query specification.", "type": "value_error"}
 
-    # Prefer non-missing / non-literal-discriminator errors (e.g. wrong value type or extra key)
-    priority_order = ("extra_forbidden", "too_long", "too_short", "greater_than_equal", "less_than_equal")
-    for err_type in priority_order:
-        for item in errors:
-            if item.get("type") == err_type:
-                return dict(item)
+    priority_rank = {
+        "too_long": 5,
+        "too_short": 5,
+        "greater_than_equal": 5,
+        "less_than_equal": 5,
+        "extra_forbidden": 4,
+        "literal_error": 3,
+    }
+    concrete = [
+        item for item in errors if item.get("type") not in ("missing", "union_tag_invalid", "union_tag_not_found")
+    ]
+    candidates = concrete or errors
 
-    # Prefer deeper errors over shallow union branch mismatches
-    non_missing = [item for item in errors if item.get("type") != "missing"]
-    candidates = non_missing or errors
-    return dict(max(candidates, key=lambda item: len(item.get("loc", ()))))
+    def _score(item: Any) -> tuple[int, int]:
+        depth = len(_clean_loc_segments(item.get("loc", ())))
+        rank = priority_rank.get(str(item.get("type", "")), 2)
+        return (depth, rank)
+
+    return dict(max(candidates, key=_score))
 
 
 def normalize_validation_error(
@@ -256,9 +281,10 @@ def normalize_validation_error(
 
         selected = _select_most_relevant_error(err)
         path = _format_loc(selected.get("loc", ()))
-        if selected.get("type") == "literal_error":
+        err_type = selected.get("type")
+        if err_type in ("literal_error", "union_tag_invalid", "union_tag_not_found"):
             return BadFilterFormatError(f"Invalid query value at {path}.")
-        if selected.get("type") == "extra_forbidden":
+        if err_type == "extra_forbidden":
             return BadFilterFormatError(f"Unexpected key at {path}.")
         return BadFilterFormatError(f"Invalid query specification at {path}: {selected.get('msg', 'invalid value')}.")
 

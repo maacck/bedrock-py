@@ -30,6 +30,7 @@ from sqlalchemy import (
 from sqlalchemy import (
     Enum as SAEnum,
 )
+from sqlalchemy.ext.associationproxy import association_proxy
 from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import DeclarativeBase, column_property, relationship, sessionmaker
 
@@ -240,6 +241,78 @@ class TestPolicyResolution:
         )
         assert non_nullable.fields["full_name"].nullable is False
         assert "is_null" not in non_nullable.fields["full_name"].operators
+
+    def test_partial_call_site_policy_preserves_model_level_budgets_and_flags(self):
+        class RestrictedOrder(PolicyBase):
+            __tablename__ = "policy_restricted_orders"
+            __filterable_fields__ = ["title", "owner"]
+            __query_policy__ = QueryPolicy(
+                max_limit=50,
+                default_limit=25,
+                max_depth=4,
+                max_nodes=20,
+                max_in_items=10,
+                allow_dotted_paths=False,
+            )
+
+            id = Column(Integer, primary_key=True)
+            title = Column(String(100), nullable=False)
+            owner_id = Column(Integer, ForeignKey("policy_owners.id"), nullable=True)
+            owner = relationship(Owner)
+
+        # Adding extra_fields/sort_expressions at call site must NOT reset model budgets/flags
+        merged = resolve_model_policy(
+            RestrictedOrder,
+            policy=QueryPolicy(extra_fields={"owner_name": FieldPolicy(column=Owner.name)}),
+        )
+        assert merged.policy.max_limit == 50
+        assert merged.policy.default_limit == 25
+        assert merged.policy.max_depth == 4
+        assert merged.policy.max_nodes == 20
+        assert merged.policy.max_in_items == 10
+        assert merged.policy.allow_dotted_paths is False
+        assert merged.dotted_fields == {}
+        assert "owner_name" in merged.fields
+
+        # Explicit call-site scalar overrides still win
+        overridden = resolve_model_policy(
+            RestrictedOrder,
+            policy=QueryPolicy(max_limit=100, allow_dotted_paths=True),
+        )
+        assert overridden.policy.max_limit == 100
+        assert overridden.policy.default_limit == 25
+        assert overridden.policy.allow_dotted_paths is True
+        assert "owner.name" in overridden.dotted_fields
+
+    def test_association_proxy_is_not_sortable_or_projectable(self):
+        from bedrock.database import search_fields
+
+        class ProxyMember(PolicyBase):
+            __tablename__ = "policy_proxy_members"
+            __filterable_fields__ = ["owner_name"]
+            __query_policy__ = QueryPolicy(fields={"owner_name": FieldPolicy(value_type=str)})
+
+            id = Column(Integer, primary_key=True)
+            owner_id = Column(Integer, ForeignKey("policy_owners.id"), nullable=True)
+            owner = relationship(Owner)
+            owner_name = association_proxy("owner", "name")
+
+        resolved = resolve_model_policy(ProxyMember)
+        assert resolved.fields["owner_name"].filterable is True
+        assert resolved.fields["owner_name"].sortable is False
+        assert resolved.fields["owner_name"].projectable is False
+        assert "owner_name" not in resolved.sortable_expressions
+
+        engine = create_engine("sqlite:///:memory:")
+        PolicyBase.metadata.create_all(engine)
+        session = sessionmaker(bind=engine)()
+        try:
+            with pytest.raises(BadFilterFormatError, match="cannot be projected"):
+                search_fields(session, ProxyMember, fields=["owner_name"])
+        finally:
+            session.close()
+            PolicyBase.metadata.drop_all(engine)
+            engine.dispose()
 
     def test_text_search_escapes_like_wildcards(self):
         engine = create_engine("sqlite:///:memory:")

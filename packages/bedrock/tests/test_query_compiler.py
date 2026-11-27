@@ -49,12 +49,13 @@ class CompOrder(BedrockModel):
 
 class CompLine(BedrockModel):
     __tablename__ = "comp_lines"
-    __filterable_fields__ = ["sku", "qty"]
+    __filterable_fields__ = ["sku", "qty", "tag"]
 
     id = Column(Integer, primary_key=True)
     order_id = Column(Integer, ForeignKey("comp_orders.id"), nullable=False)
     sku = Column(String(50), nullable=False)
     qty = Column(Integer, nullable=False)
+    tag = Column(String(50), nullable=True)
     order = relationship(CompOrder, back_populates="lines")
 
 
@@ -85,9 +86,9 @@ def comp_session():
             o1,
             o2,
             o3,
-            CompLine(order=o1, sku="A-1", qty=5),
-            CompLine(order=o1, sku="A-2", qty=10),
-            CompLine(order=o2, sku="B-1", qty=1),
+            CompLine(order=o1, sku="A-1", qty=5, tag="ok"),
+            CompLine(order=o1, sku="A-2", qty=10, tag="ok"),
+            CompLine(order=o2, sku="B-1", qty=1, tag=None),
         ]
     )
     session.commit()
@@ -147,6 +148,13 @@ class TestCompilerSqlSemantics:
         # every: all lines have qty >= 5 -> o1 (5, 10) and o3 (empty set vacuous truth)
         assert _run(
             {"relation": "lines", "quantifier": "every", "filter": {"field": "qty", "op": "gte", "value": 5}}
+        ) == [
+            "100% Widget",
+            "Orphan Order",
+        ]
+        # every on nullable column: NULL child value must NOT falsely satisfy predicate (SQL 3VL)
+        assert _run(
+            {"relation": "lines", "quantifier": "every", "filter": {"field": "tag", "op": "eq", "value": "ok"}}
         ) == [
             "100% Widget",
             "Orphan Order",

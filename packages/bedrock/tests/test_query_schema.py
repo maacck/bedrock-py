@@ -313,3 +313,129 @@ class TestSchemaValidationMatrix:
 
         enclosing_json_schema = DualEndpointInput.model_json_schema()
         assert len(enclosing_json_schema["$defs"]) >= 2
+
+    def test_max_in_items_propagates_to_relation_filters_and_respects_stricter_target(self):
+        from bedrock.database import QuerySchema
+
+        # Restrictive root policy must propagate into explicit relation filters
+        strict_root = QuerySchema(SchemaOrder, policy=QueryPolicy(max_in_items=2))
+        ok = strict_root.validate(
+            {
+                "filter": {
+                    "relation": "owner",
+                    "quantifier": "has",
+                    "filter": {"field": "name", "op": "in", "value": ["a", "b"]},
+                }
+            }
+        )
+        assert ok.filter is not None
+        with pytest.raises(BadFilterFormatError):
+            strict_root.validate(
+                {
+                    "filter": {
+                        "relation": "owner",
+                        "quantifier": "has",
+                        "filter": {"field": "name", "op": "in", "value": ["a", "b", "c"]},
+                    }
+                }
+            )
+
+        # Stricter target-model policy must still win over a looser root policy
+        class StrictTarget(SchemaBase):
+            __tablename__ = "schema_strict_targets"
+            __filterable_fields__ = ["code"]
+            __query_policy__ = QueryPolicy(max_in_items=1)
+
+            id = Column(Integer, primary_key=True)
+            code = Column(String(50), nullable=False)
+
+        class LooseParent(SchemaBase):
+            __tablename__ = "schema_loose_parents"
+            __filterable_fields__ = ["target"]
+
+            id = Column(Integer, primary_key=True)
+            target_id = Column(Integer, ForeignKey("schema_strict_targets.id"), nullable=True)
+            target = relationship(StrictTarget)
+
+        loose_schema = QuerySchema(LooseParent, policy=QueryPolicy(max_in_items=10))
+        assert loose_schema.validate(
+            {
+                "filter": {
+                    "relation": "target",
+                    "quantifier": "has",
+                    "filter": {"field": "code", "op": "in", "value": ["x"]},
+                }
+            }
+        )
+        with pytest.raises(BadFilterFormatError):
+            loose_schema.validate(
+                {
+                    "filter": {
+                        "relation": "target",
+                        "quantifier": "has",
+                        "filter": {"field": "code", "op": "in", "value": ["x", "y"]},
+                    }
+                }
+            )
+        with pytest.raises(BadFilterFormatError):
+            loose_schema.validate({"filter": {"field": "target.code", "op": "in", "value": ["x", "y"]}})
+
+    def test_int_enum_rejects_booleans_and_float_rejects_nan_inf(self):
+        from bedrock.database import QuerySchema
+
+        class PriorityLevel(enum.IntEnum):
+            LOW = 1
+            HIGH = 2
+
+        class EnumFloatModel(SchemaBase):
+            __tablename__ = "schema_enum_float"
+            __filterable_fields__ = ["level", "score"]
+
+            id = Column(Integer, primary_key=True)
+            level = Column(SAEnum(PriorityLevel), nullable=False)
+            score = Column(Float, nullable=False)
+
+        schema = QuerySchema(EnumFloatModel)
+        assert schema.validate({"filter": {"field": "level", "op": "eq", "value": 1}}).filter is not None
+        assert (
+            schema.validate({"filter": {"field": "level", "op": "eq", "value": PriorityLevel.HIGH}}).filter is not None
+        )
+
+        with pytest.raises(BadFilterFormatError):
+            schema.validate_json(b'{"filter": {"field": "level", "op": "eq", "value": true}}')
+        with pytest.raises(BadFilterFormatError):
+            schema.validate({"filter": {"field": "level", "op": "eq", "value": True}})
+        with pytest.raises(BadFilterFormatError):
+            schema.validate({"filter": {"field": "score", "op": "eq", "value": float("nan")}})
+        with pytest.raises(BadFilterFormatError):
+            schema.validate({"filter": {"field": "score", "op": "eq", "value": float("inf")}})
+
+    def test_annotated_rejects_unsupported_target_and_serializes_without_warnings(self):
+        import warnings
+
+        from bedrock.database import QuerySchema
+
+        schema = QuerySchema(SchemaOrder)
+
+        with pytest.raises(TypeError, match="QuerySpec"):
+            TypeAdapter(Annotated[QuerySpec | None, schema])
+
+        class WrappedRequest(BedrockEntity):
+            query: Annotated[QuerySpec, schema]
+            extra_filter: Annotated[FilterNode, schema] | None = None
+
+        WrappedRequest.model_rebuild(_types_namespace={"schema": schema})
+        req = WrappedRequest.model_validate(
+            {
+                "query": {"filter": {"field": "quantity", "op": "gte", "value": 2}},
+                "extra_filter": {"field": "owner.name", "op": "eq", "value": "ann"},
+            }
+        )
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            dumped = req.model_dump()
+            dumped_json = req.model_dump_json()
+
+        assert caught == []
+        assert dumped["query"]["filter"]["field"] == "quantity"
+        assert '"owner.name"' in dumped_json

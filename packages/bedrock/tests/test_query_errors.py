@@ -98,6 +98,14 @@ class TestPrechecks:
                 max_limit=1000,
             )
 
+    def test_tuple_conditions_cannot_bypass_depth_or_node_budgets(self):
+        tree: dict[str, object] = {"field": "total", "op": "eq", "value": 1}
+        for _ in range(6):
+            tree = {"logic": "and", "conditions": (tree,)}
+
+        with pytest.raises(FilterDepthExceededError, match="maximum depth"):
+            precheck_raw_filter(tree, max_depth=4, max_nodes=100, max_relation_depth=2)
+
 
 class TestErrorNormalization:
     """Verify SEC-01 redaction vs reveal_allowed_fields diagnostics."""
@@ -145,3 +153,36 @@ class TestErrorNormalization:
         assert isinstance(out, BadFilterFormatError)
         assert "$.total" in out.detail
         assert "integer" in out.detail.lower()
+
+    def test_query_schema_union_errors_report_accurate_paths_not_spurious_extra_key(self):
+        from bedrock.database import QuerySchema
+
+        schema = QuerySchema(SecretOrder, policy=QueryPolicy(max_in_items=2))
+
+        # Wrong value type reports $.filter.value, not $.filter.field
+        with pytest.raises(BadFilterFormatError) as wrong_type:
+            schema.validate({"filter": {"field": "total", "op": "eq", "value": "not-an-int"}})
+        assert "$.filter.value" in wrong_type.value.detail
+
+        # IN list overflow in nested relation reports $.filter.filter.value
+        with pytest.raises(BadFilterFormatError) as nested_in:
+            schema.validate(
+                {
+                    "filter": {
+                        "relation": "owner",
+                        "quantifier": "has",
+                        "filter": {"field": "name", "op": "in", "value": ["a", "b", "c"]},
+                    }
+                }
+            )
+        assert "$.filter.filter.value" in nested_in.value.detail
+
+        # Genuine unexpected key reports $.filter.bogus
+        with pytest.raises(BadFilterFormatError) as extra_key:
+            schema.validate({"filter": {"field": "total", "op": "eq", "value": 5, "bogus": 1}})
+        assert "$.filter.bogus" in extra_key.value.detail
+
+        # Tuple sort list still gets SEC-01 identifier redaction
+        with pytest.raises(BadFilterFormatError) as tuple_sort:
+            schema.validate({"sort": ({"field": "internal_note", "direction": "asc"},)})
+        assert tuple_sort.value.detail == "Field `internal_note` is not allowed on SecretOrder."

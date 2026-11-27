@@ -80,7 +80,10 @@ class FieldPolicy:
     allow_raw_like: bool = False
 
 
-@dataclass(frozen=True, slots=True)
+_UNSET: Any = object()
+
+
+@dataclass(frozen=True, slots=True, init=False)
 class QueryPolicy:
     """Model-level or call-site policy controlling schema generation and safety budgets.
 
@@ -107,18 +110,57 @@ class QueryPolicy:
             internal tools or agent self-correction loops.
     """
 
-    fields: dict[str, FieldPolicy] = dc_field(default_factory=dict)
-    relations: frozenset[str] | None = None
-    extra_fields: dict[str, FieldPolicy] = dc_field(default_factory=dict)
-    sort_expressions: dict[str, ColumnElement[Any]] = dc_field(default_factory=dict)
-    allow_dotted_paths: bool = True
-    max_depth: int = DEFAULT_MAX_DEPTH
-    max_nodes: int = DEFAULT_MAX_NODES
-    max_relation_depth: int = DEFAULT_MAX_RELATION_DEPTH
-    max_in_items: int = DEFAULT_MAX_IN_ITEMS
-    max_limit: int = DEFAULT_MAX_LIMIT
-    default_limit: int = DEFAULT_LIMIT
-    reveal_allowed_fields: bool = False
+    fields: dict[str, FieldPolicy]
+    relations: frozenset[str] | None
+    extra_fields: dict[str, FieldPolicy]
+    sort_expressions: dict[str, ColumnElement[Any]]
+    allow_dotted_paths: bool
+    max_depth: int
+    max_nodes: int
+    max_relation_depth: int
+    max_in_items: int
+    max_limit: int
+    default_limit: int
+    reveal_allowed_fields: bool
+    _provided: frozenset[str] = dc_field(init=False, repr=False, compare=False)
+
+    def __init__(
+        self,
+        fields: dict[str, FieldPolicy] | Any = _UNSET,
+        relations: frozenset[str] | None | Any = _UNSET,
+        extra_fields: dict[str, FieldPolicy] | Any = _UNSET,
+        sort_expressions: dict[str, ColumnElement[Any]] | Any = _UNSET,
+        allow_dotted_paths: bool | Any = _UNSET,
+        max_depth: int | Any = _UNSET,
+        max_nodes: int | Any = _UNSET,
+        max_relation_depth: int | Any = _UNSET,
+        max_in_items: int | Any = _UNSET,
+        max_limit: int | Any = _UNSET,
+        default_limit: int | Any = _UNSET,
+        reveal_allowed_fields: bool | Any = _UNSET,
+    ) -> None:
+        provided: set[str] = set()
+        raw_args: dict[str, tuple[Any, Any]] = {
+            "fields": (fields, {}),
+            "relations": (relations, None),
+            "extra_fields": (extra_fields, {}),
+            "sort_expressions": (sort_expressions, {}),
+            "allow_dotted_paths": (allow_dotted_paths, True),
+            "max_depth": (max_depth, DEFAULT_MAX_DEPTH),
+            "max_nodes": (max_nodes, DEFAULT_MAX_NODES),
+            "max_relation_depth": (max_relation_depth, DEFAULT_MAX_RELATION_DEPTH),
+            "max_in_items": (max_in_items, DEFAULT_MAX_IN_ITEMS),
+            "max_limit": (max_limit, DEFAULT_MAX_LIMIT),
+            "default_limit": (default_limit, DEFAULT_LIMIT),
+            "reveal_allowed_fields": (reveal_allowed_fields, False),
+        }
+        for attr, (val, default) in raw_args.items():
+            if val is _UNSET:
+                object.__setattr__(self, attr, default)
+            else:
+                provided.add(attr)
+                object.__setattr__(self, attr, val)
+        object.__setattr__(self, "_provided", frozenset(provided))
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,6 +174,7 @@ class ResolvedField:
     nullable: bool
     filterable: bool
     sortable: bool
+    projectable: bool = True
     datetime_timezone: bool = False
     enum_values: tuple[Any, ...] | None = None
     enum_type: type[enum.Enum] | None = None
@@ -154,6 +197,7 @@ class ResolvedDottedField:
     path: str
     hops: tuple[ResolvedRelation, ...]
     target_field: ResolvedField
+    max_in_items: int = DEFAULT_MAX_IN_ITEMS
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,21 +232,26 @@ def _merge_policies(base: QueryPolicy | None, override: QueryPolicy | None) -> Q
     merged_fields = {**base.fields, **override.fields}
     merged_extra = {**base.extra_fields, **override.extra_fields}
     merged_sort = {**base.sort_expressions, **override.sort_expressions}
-    merged_relations = override.relations if override.relations is not None else base.relations
-    return QueryPolicy(
+
+    def _pick(attr: str) -> Any:
+        return getattr(override, attr) if attr in override._provided else getattr(base, attr)
+
+    merged = QueryPolicy(
         fields=merged_fields,
-        relations=merged_relations,
+        relations=_pick("relations"),
         extra_fields=merged_extra,
         sort_expressions=merged_sort,
-        allow_dotted_paths=override.allow_dotted_paths,
-        max_depth=override.max_depth,
-        max_nodes=override.max_nodes,
-        max_relation_depth=override.max_relation_depth,
-        max_in_items=override.max_in_items,
-        max_limit=override.max_limit,
-        default_limit=override.default_limit,
-        reveal_allowed_fields=override.reveal_allowed_fields,
+        allow_dotted_paths=_pick("allow_dotted_paths"),
+        max_depth=_pick("max_depth"),
+        max_nodes=_pick("max_nodes"),
+        max_relation_depth=_pick("max_relation_depth"),
+        max_in_items=_pick("max_in_items"),
+        max_limit=_pick("max_limit"),
+        default_limit=_pick("default_limit"),
+        reveal_allowed_fields=_pick("reveal_allowed_fields"),
     )
+    object.__setattr__(merged, "_provided", base._provided | override._provided)
+    return merged
 
 
 def _unwrap_type_engine(sql_type: TypeEngine[Any]) -> TypeEngine[Any]:
@@ -333,6 +382,7 @@ def _resolve_scalar_field(
     expression: Any
     inferred_nullable = True
     sql_type: TypeEngine[Any] | None = None
+    is_assoc_proxy = False
 
     if is_extra:
         if field_policy.column is None:
@@ -354,6 +404,7 @@ def _resolve_scalar_field(
                 raise BadFilterFormatError(
                     f"Attribute `{name}` on {model.__name__} is not a supported filterable field."
                 )
+            is_assoc_proxy = ext == AssociationProxyExtensionType.ASSOCIATION_PROXY
             expression = getattr(model, name)
             sql_type = getattr(expression, "type", None)
             inferred_nullable = True
@@ -391,7 +442,8 @@ def _resolve_scalar_field(
         operators=ops,
         nullable=nullable,
         filterable=field_policy.filterable,
-        sortable=field_policy.sortable,
+        sortable=False if is_assoc_proxy else field_policy.sortable,
+        projectable=not is_assoc_proxy,
         datetime_timezone=dt_tz,
         enum_values=enum_vals,
         enum_type=enum_cls,
@@ -417,6 +469,7 @@ def _collect_dotted_fields(
     visited_models: frozenset[type[Any]],
     prefix_hops: tuple[ResolvedRelation, ...],
     prefix_path: str,
+    effective_max_in_items: int,
     target_out: dict[str, ResolvedDottedField],
 ) -> None:
     """Recursively collect allowlisted to-one dotted paths without cycles."""
@@ -430,6 +483,7 @@ def _collect_dotted_fields(
         next_hops = (*prefix_hops, rel)
         next_prefix = f"{prefix_path}.{rel.name}" if prefix_path else rel.name
         child_resolved = resolve_model_policy(rel.target_model, _collect_dotted=False)
+        child_max_in = min(effective_max_in_items, child_resolved.policy.max_in_items)
         for field_name, child_field in child_resolved.fields.items():
             if not child_field.filterable:
                 continue
@@ -438,6 +492,7 @@ def _collect_dotted_fields(
                 path=full_path,
                 hops=next_hops,
                 target_field=child_field,
+                max_in_items=child_max_in,
             )
         _collect_dotted_fields(
             resolved=child_resolved,
@@ -445,6 +500,7 @@ def _collect_dotted_fields(
             visited_models=visited_models | {rel.target_model},
             prefix_hops=next_hops,
             prefix_path=next_prefix,
+            effective_max_in_items=child_max_in,
             target_out=target_out,
         )
 
@@ -481,7 +537,7 @@ def resolve_model_policy(
 
     # Determine allowed scalar attribute names and relationship names.
     # "__all__" expands all mapped columns on this model, NEVER relationships (ADR-4).
-    allowed_scalar_names: list[str] = list(pks)
+    allowed_scalar_names: list[str] = sorted(pks)
     allowed_relation_names: list[str] = []
 
     if is_all:
@@ -553,6 +609,7 @@ def resolve_model_policy(
             visited_models=frozenset({model}),
             prefix_hops=(),
             prefix_path="",
+            effective_max_in_items=merged.max_in_items,
             target_out=dotted_fields,
         )
 

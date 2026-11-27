@@ -8,6 +8,7 @@ from weakref import WeakKeyDictionary
 from pydantic import GetCoreSchemaHandler
 from pydantic_core import CoreSchema
 from sqlalchemy import Column, Select, func, select
+from sqlalchemy.ext.associationproxy import AssociationProxyInstance
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import InstrumentedAttribute, Session
 from sqlalchemy.sql.base import ExecutableOption
@@ -58,8 +59,14 @@ def _resolve_projection_exprs(
                 raise BadFilterFormatError(
                     f"Field `{item}` is not allowed on {resolved.model.__name__} in `{param_name}`."
                 )
+            if not field.projectable:
+                raise BadFilterFormatError(
+                    f"Field `{item}` on {resolved.model.__name__} cannot be projected in `{param_name}`."
+                )
             expressions.append(field.expression)
         else:
+            if isinstance(item, AssociationProxyInstance):
+                raise BadFilterFormatError(f"Association proxy expressions cannot be projected in `{param_name}`.")
             expressions.append(item)
     return expressions
 

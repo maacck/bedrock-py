@@ -246,7 +246,7 @@ stmt = order_schema.apply(select(Order), raw_json, paginate=False)
 { "field": "customer.name", "op": "eq", "value": "Ann" }
 ```
 
-> 注：`every` 编译为 `~rel.any(~clause)`，遵循标准 SQL 空真（vacuous truth）语义，没有子记录的父行也会匹配。
+> 注：`every` 编译为 `~rel.any(clause.is_not(True))`，遵循标准 SQL 空真（vacuous truth）语义（没有子记录的父行也会匹配），同时将子表中的 `NULL` 正确视为不满足条件，避免 SQL 三值逻辑漏判。
 
 ### 安全预算与异常
 

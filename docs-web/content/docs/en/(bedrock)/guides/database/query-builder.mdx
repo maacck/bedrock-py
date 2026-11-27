@@ -250,7 +250,7 @@ All relationship filters compile to correlated `EXISTS` subqueries so main-query
 { "field": "customer.name", "op": "eq", "value": "Ann" }
 ```
 
-> Note: `every` compiles to `~rel.any(~clause)`, which follows standard SQL vacuous truth (records with zero related items match).
+> Note: `every` compiles to `~rel.any(clause.is_not(True))`, which follows standard SQL vacuous truth (records with zero related items match) while treating `NULL` child values as non-matching rather than silently ignoring them.
 
 ### Safety Budgets & Exceptions
 

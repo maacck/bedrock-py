@@ -129,7 +129,7 @@ def compile_filter_node(node: FilterNode, resolved: ResolvedModelPolicy) -> Colu
             if node.quantifier == "every":
                 if sub_clause is None:
                     raise BadFilterFormatError("Quantifier `every` requires a child `filter`.")
-                return not_(rel.attribute.any(not_(sub_clause)))
+                return not_(rel.attribute.any(sub_clause.is_not(True)))
             raise BadFilterFormatError(
                 f"Quantifier `{node.quantifier}` is not valid for collection relation `{node.relation}`."
             )
