@@ -208,7 +208,7 @@ bedrock db revision myapp.users -m "custom index" --no-autogenerate
 - 对其他 module 的依赖会自动以带限定的 `app:revision` 写入 `depends_on`，且必须是 manifest 中的直接依赖
 - 使用自动生成时，应用必须处于 head（先执行 `bedrock db upgrade <app>`）；存在未应用的 revision 时，生成会失败且不写任何文件。`--no-autogenerate` 不做此检查，但仍要求只有一个 head
 
-自动生成会在数据库侧和模型侧同时限制为目标 module 的表。普通 ORM 模型归定义它的 module，而不归导入它的 module。无 ORM 映射的 `Table` 必须声明 `info={"bedrock_module": "myapp.users"}`。归属缺失、冲突或 owner 未加载时，在写出 revision 前抛出 `MigrationError`，不会回退到全部表。参见[表归属](/docs/guides/database#表归属)。
+自动生成会在数据库侧和模型侧同时限制为目标 module 的表。普通 ORM 模型归定义它的 module，而不归导入它的 module。无 ORM 映射的 `Table` 必须声明 `info={"bedrock_module": "myapp.users"}`。归属缺失、冲突或 owner 未加载时，在写出 revision 前抛出 `MigrationError`，不会回退到全部表。参见[表归属](/docs/guides/database/migrations#表归属)。
 
 生成的文件是可审阅的草稿：请审阅并提交。运行时顺序只依据已提交的 `depends_on` 图，从不依据外键。
 
@@ -252,7 +252,7 @@ bedrock db upgrade myapp.users 0002_add_email
 
 升级和降级会获取迁移锁。PostgreSQL 使用 advisory lock，MySQL 和 MariaDB 使用 `GET_LOCK`，等待时间为 `DATABASE_MIGRATION_LOCK_TIMEOUT` 秒（默认 30）。SQLite 迁移不加锁，请只在一个进程中运行。超时会导致命令失败。
 
-CLI 只使用一个账本，默认是 `bedrock_migrations`。设置 `DATABASE_MIGRATION_VERSION_TABLE`（小写简单 SQL 标识符，最长 57 个字符）即可改用其他名称；没有对应的 CLI 参数。不要通过重命名表来切换账本。见[自定义版本表](/docs/guides/database#自定义版本表与独立-module-集合)。
+CLI 只使用一个账本，默认是 `bedrock_migrations`。设置 `DATABASE_MIGRATION_VERSION_TABLE`（小写简单 SQL 标识符，最长 57 个字符）即可改用其他名称；没有对应的 CLI 参数。不要通过重命名表来切换账本。见[自定义版本表](/docs/guides/database/migrations#自定义版本表与独立-module-集合)。
 
 ---
 
@@ -386,7 +386,7 @@ Revision                Down Revision    Depends On                Message
 
 `bedrock db uninstall` 已移除。要移除模块的 schema，使用 `bedrock db downgrade <app> base`（见上文 `bedrock db downgrade`）。
 
-**先审查已有脚本。** 回滚会执行该 module 每个已应用版本的 `downgrade()`，包括此前版本编写的脚本。归属过滤保护新的自动生成，不会修复旧污染脚本或拦截任意 SQL。回滚受影响应用前，先备份并遵循[已有迁移的安全处置](/docs/guides/database#已有迁移的安全处置)。
+**先审查已有脚本。** 回滚会执行该 module 每个已应用版本的 `downgrade()`，包括此前版本编写的脚本。归属过滤保护新的自动生成，不会修复旧污染脚本或拦截任意 SQL。回滚受影响应用前，先备份并遵循[已有迁移的安全处置](/docs/guides/database/migrations#已有迁移的安全处置)。
 
 ---
 
@@ -405,7 +405,7 @@ bedrock db adopt <app_import_path> [<app_import_path> ...]
 2. 为每个直到这些 head 的 revision 写入一行 `baseline`，然后原子发布该表。如果 `bedrock_migrations` 已存在，会报告数据库已初始化，不会重复导入。
 3. 原样保留 `alembic_version` 作为审计快照。不会执行任何迁移脚本。
 
-基线行假定 schema 已经就位，并受到保护：需要撤销基线行的 downgrade 或 cascade 会在任何 DDL 执行之前失败。先备份，并遵循[接管已有数据库](/docs/guides/database#接管已有数据库)。
+基线行假定 schema 已经就位，并受到保护：需要撤销基线行的 downgrade 或 cascade 会在任何 DDL 执行之前失败。先备份，并遵循[接管已有数据库](/docs/guides/database/migrations#接管已有数据库)。
 
 **示例：**
 

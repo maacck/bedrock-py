@@ -1,6 +1,6 @@
 [project]
 name = "bedrock-mono"
-version = "0.4.1"
+version = "0.4.2"
 description = "Bedrock monorepo workspace coordinator"
 requires-python = ">=3.12"
 dependencies = []

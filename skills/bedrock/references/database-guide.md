@@ -366,203 +366,105 @@ my_app/users/
 
 ## Query Patterns
 
-### search_filter_sort_paginate
+`bedrock.database` provides a JSON Schema (Draft 2020-12)-driven SQLAlchemy 2.0 query builder centered on `QuerySchema[M]` (`compile_query_schema`). All parsing, validation, JSON Schema export, and pure SQLAlchemy clause compilation live in `QuerySchema`; there is no `auto_join`, no `auto_loads`, and no entity-level `group_by`.
 
-The primary query builder for filtered, sorted, paginated results.
+### Compiling `QuerySchema` & FastAPI `Annotated` Integration
 
 ```python
-from bedrock.database import db
-from bedrock.database.service import search_filter_sort_paginate
+from typing import Annotated
+from bedrock.database import QuerySpec, FilterNode, compile_query_schema
 
-result = search_filter_sort_paginate(
-    db_session=db.session,
-    model=UserModel,
-    filter_specs=[
-        {"field": "is_active", "op": "==", "value": True},
-    ],
-    sort_key="name",
-    sort_dir="asc",
-    page=1,
-    limit=10,
-)
+user_schema = compile_query_schema(UserModel)  # default policy cached per model class
+json_schema = user_schema.json_schema()        # Draft 2020-12 JSON Schema
+filter_schema = user_schema.filter_json_schema()
+
+# FastAPI / Pydantic v2 native integration (zero HTTP coupling in bedrock-core):
+type UserQuery = Annotated[QuerySpec, user_schema]
+type UserFilter = Annotated[FilterNode, user_schema]
 ```
 
-**Return value**:
+### Three Orthogonal Sync/Async Executor Pairs
+
+| Scenario | Unpaginated | Paginated | Return type | Notes |
+|---|---|---|---|---|
+| **Models** | `search_models` / `asearch_models` | `paginate_models` / `apaginate_models` | `list[M]` / `PageResult[M]` | Supports `base_select`, `options` (data query only), optional server `limit`; no `group_by` |
+| **Fields** | `search_fields` / `asearch_fields` | `paginate_fields` / `apaginate_fields` | `list[dict]` / `PageResult[dict]` | Single-table column projection and multi-column `group_by` |
+| **Select** | `search_select` / `asearch_select` | `paginate_select` / `apaginate_select` | `list[dict]` / `PageResult[dict]` | Explicit cross-table `JOIN` / `LEFT JOIN` / `aliased()` / aggregation `Select` |
+
+All six pairs are also available as methods on `QuerySchema[M]` (`search`, `paginate`, `search_fields`, `paginate_fields`, `search_select`, `paginate_select` and `a`-prefixed async twins). Non-paginated `search_*` calls validate `query` (including `pagination` if present) and silently ignore `query.pagination` without running `COUNT(*)`, so the same client JSON works directly for exports.
 
 ```python
-{
-    "items": [<UserModel>, ...],
-    "total": 42,
-    "page_info": {
-        "total": 42,
-        "limit": 10,
-        "offset": 0,
-        "page": 1,
-        "query": "",
-        "filters": [...],
-        "paginated": True,
-        "has_more": True,
+from sqlalchemy import func, select
+from sqlalchemy.orm import selectinload
+from bedrock.database import (
+    FieldPolicy,
+    QueryPolicy,
+    apaginate_models,
+    db,
+    paginate_fields,
+    paginate_models,
+    paginate_select,
+    search_models,
+)
+
+# 1. Paginated model search
+page = paginate_models(
+    db.session,
+    UserModel,
+    query={
+        "filter": {"field": "is_active", "op": "eq", "value": True},
+        "sort": [{"field": "name", "direction": "asc"}],
+        "pagination": {"page": 1, "limit": 10},
     },
-}
-```
+    options=[selectinload(UserModel.department)],
+)
+# Async: await apaginate_models(db.asession, UserModel, query=..., options=[selectinload(UserModel.department)])
 
-### asearch_filter_sort_paginate
+# 2. Single-table projection / multi-column group_by
+grouped = paginate_fields(
+    db.session,
+    UserModel,
+    fields=[UserModel.is_active, func.count(UserModel.id).label("cnt")],
+    group_by=[UserModel.is_active],
+    query={"pagination": {"page": 1, "limit": 20}},
+)
 
-Async services use `asearch_filter_sort_paginate` with `db.asession`. Arguments and return value are identical. Load relationships you read on the items through `options` (for example `selectinload`), because async sessions cannot lazy-load.
-
-```python
-from bedrock.database import db
-from bedrock.database.service import asearch_filter_sort_paginate
-
-result = await asearch_filter_sort_paginate(
-    db_session=db.asession,
-    model=UserModel,
-    filter_specs=[{"field": "is_active", "op": "==", "value": True}],
-    page=1,
-    limit=10,
+# 3. Cross-table explicit JOIN Select
+stmt = select(UserModel.id, DepartmentModel.name.label("dept_name")).select_from(UserModel).join(UserModel.department)
+rows = paginate_select(
+    db.session,
+    UserModel,
+    stmt,
+    query={"filter": {"field": "dept_name", "op": "starts_with", "value": "Eng"}},
+    policy=QueryPolicy(extra_fields={"dept_name": FieldPolicy(column=DepartmentModel.name, sortable=True)}),
 )
 ```
-
-### Full Parameter Reference
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `db_session` | `Session` | **required** | SQLAlchemy session |
-| `model` | `Type[BedrockModel]` | **required** | Target model class |
-| `limit` | `int` | `10` | Results per page; integer from 1 through 1000, excluding booleans |
-| `page` | `int` | `1` | Page number (1-indexed) |
-| `sort_key` | `SortKey \| None` (`str \| list[tuple[str, str \| None]]`) | `None` | Column name or list of column/direction pairs |
-| `sort_dir` | `str \| None` | `None` | Direction for a string `sort_key`; `"desc"` descends, otherwise ascending |
-| `q` | `str \| None` | `None` | Search term passed to `model.text_search()` |
-| `filter_specs` | `dict \| list[dict] \| None` | `None` | Filter specification or list (see Filter Syntax) |
-| `sqla_filters` | `list` | `None` | Pre-built SQLAlchemy filter clauses |
-| `join_models` | `list` | `None` | Explicit join targets |
-| `options` | `list` | `None` | SQLAlchemy query options (e.g. `joinedload`) |
-| `additional_select` | `list \| None` | `None` | Extra selected expressions; use `return_raw=True` to access them |
-| `show_all` | `bool` | `False` | Disable pagination (return all results) |
-| `count_pk` | `str \| None` | `None` | Primary key to count; defaults to the first primary key. Other names raise `BadFilterFormatError` |
-| `return_raw` | `bool` | `False` | Return raw rows instead of scalars |
-| `group_by` | `GroupBy \| None` (`str \| ColumnElement`) | `None` | Column name (checked against `__filterable_fields__`) or SQL expression to GROUP BY; `total` then counts groups |
-| `auto_join_` | `bool` | `True` | Auto-join relationships from filters |
-
-`limit` is validated even with `show_all=True`; invalid values raise `bedrock.exc.InvalidQueryLimitError`. With `show_all=True`, pagination is disabled but `page_info.has_more` is still calculated from `offset` and `limit`.
-
-`q` searches the model's `__searchable_columns__` using `__search_op__` (default `ilike`); an empty searchable-column list produces a no-op filter. Counts reflect joined rows, not distinct model instances. With `group_by`, `total` is the number of groups (the grouped query is counted as a subquery), and `0` when nothing matches.
 
 ---
 
 ## Filter Syntax
 
-Filters are JSON-serializable dicts passed as `filter_specs` to `search_filter_sort_paginate`. A single dict or a list is accepted; list entries are combined with AND. The default operator is `eq`. Filter trees are limited to depth 50 and deeper trees raise `FilterDepthExceededError`.
+Queries use a strict JSON Schema DSL (`extra="forbid"` on every object) with top-level keys `filter`, `sort`, `search`, and `pagination`.
 
-`filter_specs`, `sort_key`, and string `group_by` may only reference primary keys and names listed in the model's `__filterable_fields__` (columns, hybrids, association proxies, relationships). Each hop of a dotted or colon path is checked on its own model. Other names raise `BadFilterFormatError` with the same message whether the field is hidden or missing. Never list secret columns. `__filterable_fields__ = "__all__"` disables the check for that model only (related models keep their own setting); use it only when the caller already validates field names.
+- **Allowlist & policies**: Primary keys are always allowed. Other columns, hybrids (declare `FieldPolicy(value_type=...)`), and relationships must appear in `__filterable_fields__` or `QueryPolicy` / `__query_policy__`. `"__all__"` expands mapped columns on that model only, **never** relationships. Hidden and missing fields raise indistinguishable `BadFilterFormatError` by default (`reveal_allowed_fields=False`).
+- **Safety budgets** (defaults in `QueryPolicy`): `max_depth=16`, `max_nodes=100`, `max_relation_depth=2`, `max_in_items=200`, `max_limit=1000`.
+- **Logical combinators**: `{"logic": "and" | "or", "conditions": [...]}`, `{"logic": "not", "condition": ...}`.
+- **Leaf predicates**: `{"field": "<name>", "op": "<op>", "value": ...}` (unary `is_null` / `is_not_null` forbid `value`).
+  - Numeric/Temporal: `eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `in`, `between` (strict 2-item array); `DateTime` values align automatically with column `timezone=True|False`.
+  - String: `eq`, `ne`, `in`, `contains`, `icontains`, `starts_with`, `ends_with` (auto-escapes `%`, `_`, `\`; raw `like`/`ilike` require `FieldPolicy(allow_raw_like=True)`).
+  - Boolean: `eq`, `ne`; Enum/UUID: `eq`, `ne`, `in`.
+- **Relationships (always compiled to `EXISTS`, never `JOIN`)**:
+  - Explicit quantifier: `{"relation": "orders", "quantifier": "some" | "none" | "every", "filter": ...}` (collections; `every` requires `filter`) or `{"relation": "department", "quantifier": "has" | "missing", "filter": ...}` (to-one).
+  - To-one dotted path syntax sugar: `{"field": "department.name", "op": "eq", "value": "Engineering"}` compiles to `UserModel.department.has(DepartmentModel.name == "Engineering")`.
+- **Pluggable Pagers (`pager=` on `QuerySchema` / `compile_query_schema` / `paginate_*`)**:
+  - `PagePager()` (default): `{"page", "limit"}` -> `PageInfo` (`total`, `page`, `limit`, `offset`, `has_more`).
+  - `LimitOffsetPager(include_total=True)`: `{"limit", "offset"}` -> `LimitOffsetPageInfo` (`total`, `limit`, `offset`, `has_more`).
+  - `CursorPager(include_total=True, unique_keys=None)`: `{"cursor", "limit"}` -> `CursorPageInfo` (`total`, `limit`, `has_more`, `next_cursor`); forward keyset pagination with opaque URL-safe Base64 JSON tokens, automatic PK tie-breakers on single-table queries (explicit `unique_keys` required for joined/multi-table selects), NULL-safe comparisons, and `InvalidCursorError` on tampered/sort-mismatched tokens.
+  - Custom pagers subclass `PaginationParams` (inherits `limit`), `BasePageInfo`, and `BasePager`, returning `PageResult[T]` (`total: int | None`, `page_info: SerializeAsAny[BasePageInfo]`).
 
-### Basic Filter
+### Legacy `search_filter_sort_paginate` (Deprecated)
 
-```python
-{"field": "name", "op": "==", "value": "Alice"}
-```
-
-### Available Operators
-
-| Operator | Alias | Description | Example Value |
-|----------|-------|-------------|---------------|
-| `==` | `eq` | Equal | `"Alice"` |
-| `!=` | `neq` | Not equal | `"Bob"` |
-| `>` | `gt` | Greater than | `30` |
-| `<` | `lt` | Less than | `30` |
-| `>=` | `ge` | Greater than or equal | `30` |
-| `<=` | `le` | Less than or equal | `30` |
-| `like` | — | SQL LIKE (case-sensitive) | `"%alice%"` |
-| `ilike` | — | SQL ILIKE (case-insensitive) | `"%alice%"` |
-| `not_ilike` | — | Negated ILIKE | `"%alice%"` |
-| `in` | — | Value in list | `[1, 2, 3]` |
-| `not_in` | — | Value not in list | `[1, 2, 3]` |
-| `between` | — | Value between two bounds | `[18, 65]` |
-| `is_null` | — | Field is NULL | *(no value)* |
-| `is_not_null` | — | Field is not NULL | *(no value)* |
-| `any` | — | Relationship collection test | *(nested filter; see limitation below)* |
-| `not_any` | — | Negated relationship collection test | *(nested filter; see limitation below)* |
-| `has` | — | Relationship scalar test | *(nested filter; see limitation below)* |
-| `text_search` | — | Search a related model's configured columns | `"search term"` |
-| `fuzzy_search` | — | ILIKE with automatic `%` wrapping | `"alic"` |
-
-`text_search` targets a relationship and calls the related model's `text_search()`; it uses `any()` or `has()` according to relationship cardinality. `like` case sensitivity depends on the database dialect. Other than `is_null` and `is_not_null`, operators require a `value` key.
-
-The current generic filter formatter attempts column type lookup on relationship attributes. Consequently `any`, `not_any`, `has`, and colon traversal can raise `BadFilterFormatError` instead of producing a query; use explicit SQLAlchemy relationship clauses in `sqla_filters` until this is fixed. `text_search` handles relationships separately.
-
-### Negation
-
-Prefix a field name with `!` to negate its operator (for relationship paths, prefer explicit SQLAlchemy clauses):
-
-```python
-{"field": "!is_active", "op": "==", "value": True}  # WHERE NOT is_active = True
-```
-
-### Boolean Combinators
-
-Combine filters with `or` / `and`:
-
-```python
-# OR
-{"or": [
-    {"field": "age", "op": ">", "value": 30},
-    {"field": "name", "op": "==", "value": "Bob"},
-]}
-
-# AND (explicit)
-{"and": [
-    {"field": "is_active", "op": "==", "value": True},
-    {"field": "role", "op": "in", "value": ["admin", "staff"]},
-]}
-```
-
-### Nested Filters — Dot Notation (JOIN)
-
-Use `.` to traverse relationships via SQL JOIN:
-
-```python
-# Filter users by their department's name (joins department table)
-{"field": "department.name", "op": "==", "value": "Engineering"}
-```
-
-### Nested Filters — Colon Notation (any/has)
-
-The parser accepts `:` paths and selects `any()` or `has()` from relationship cardinality, but the current formatter's relationship type lookup can fail as described above. Use SQLAlchemy clauses instead:
-
-```python
-# Filter users who have an order with status "shipped"
-sqla_filters = [UserModel.orders.any(Order.status == "shipped")]
-```
-
-### Filter Examples
-
-```python
-# Pagination with multiple filters
-result = search_filter_sort_paginate(
-    db_session=db.session,
-    model=UserModel,
-    filter_specs=[
-        {"field": "is_active", "op": "==", "value": True},
-        {"field": "email", "op": "ilike", "value": "%@company.com"},
-        {"or": [
-            {"field": "role", "op": "==", "value": "admin"},
-            {"field": "age", "op": ">=", "value": 21},
-        ]},
-    ],
-    sort_key="name",
-    sort_dir="asc",
-    page=1,
-    limit=25,
-)
-
-# Between filter
-{"field": "age", "op": "between", "value": [18, 65]}
-
-# Fuzzy search (wraps value with %)
-{"field": "name", "op": "fuzzy_search", "value": "alic"}
-# Equivalent to: WHERE name ILIKE '%alic%'
-```
+`bedrock.database.service.search_filter_sort_paginate`, `asearch_filter_sort_paginate`, `build_query`, and legacy `filter_specs` remain in `0.4.x` with a `DeprecationWarning` and are scheduled for removal in `0.5.0`. Migrate to `compile_query_schema` and `paginate_models` / `apaginate_models`.
 
 ---
 
@@ -603,14 +505,14 @@ class UserModel(BedrockModel):
 
 ### Querying Across Relationships
 
-Use dot notation for JOIN-based filters and explicit SQLAlchemy relationship clauses for any/has queries:
+Both dotted to-one paths and explicit `relation` quantifier nodes compile to `EXISTS` subqueries without adding main-query joins:
 
 ```python
-# JOIN-based: filter users in "Engineering" department
-filter_specs=[{"field": "department.name", "op": "==", "value": "Engineering"}]
+# To-one dotted syntax sugar -> UserModel.department.has(DepartmentModel.name == "Engineering")
+{"field": "department.name", "op": "eq", "value": "Engineering"}
 
-# any/has-based: departments that have any active user
-sqla_filters=[DepartmentModel.users.any(UserModel.is_active == True)]
+# Collection quantifier -> DepartmentModel.users.any(UserModel.is_active == True)
+{"relation": "users", "quantifier": "some", "filter": {"field": "is_active", "op": "eq", "value": True}}
 ```
 
 ---
@@ -620,8 +522,7 @@ sqla_filters=[DepartmentModel.users.any(UserModel.is_active == True)]
 ### CRUD in Service Layer
 
 ```python
-from bedrock.database import db
-from bedrock.database.service import search_filter_sort_paginate
+from bedrock.database import PageResult, db, paginate_models
 
 
 def get_user(user_id: int) -> UserModel | None:
@@ -629,17 +530,9 @@ def get_user(user_id: int) -> UserModel | None:
     return db.session.get(UserModel, user_id)
 
 
-def list_users(page: int = 1, limit: int = 10, filters: list | None = None) -> dict:
-    """List users with filtering and pagination."""
-    return search_filter_sort_paginate(
-        db_session=db.session,
-        model=UserModel,
-        filter_specs=filters or [],
-        page=page,
-        limit=limit,
-        sort_key="name",
-        sort_dir="asc",
-    )
+def list_users(query: dict | None = None) -> PageResult[UserModel]:
+    """List users with JSON Schema filtering, sorting, and pagination."""
+    return paginate_models(db.session, UserModel, query=query)
 
 
 def create_user(name: str, email: str) -> UserModel:
@@ -670,34 +563,14 @@ def delete_user(user_id: int) -> None:
     db.session.commit()
 ```
 
-### Pagination Helper
+### Unpaginated Export (Reusing Client Query JSON)
 
 ```python
-def paginated_response(result: dict) -> dict:
-    """Transform search_filter_sort_paginate output for API response."""
-    return {
-        "data": [item.dict() for item in result["items"]],
-        "pagination": {
-            "total": result["page_info"]["total"],
-            "page": result["page_info"]["page"],
-            "limit": result["page_info"]["limit"],
-            "has_more": result["page_info"]["has_more"],
-        },
-    }
+from bedrock.database import db, search_models
+
+# Validates query (including pagination if present) and ignores pagination without COUNT(*)
+all_users = search_models(db.session, UserModel, query=client_query_json, limit=5000)
 ```
-
-### Show All (No Pagination)
-
-```python
-result = search_filter_sort_paginate(
-    db_session=db.session,
-    model=UserModel,
-    show_all=True,
-)
-all_users = result["items"]
-```
-
-`show_all=True` does not bypass limit validation, and `has_more` remains based on the requested page and limit rather than the number of returned items.
 
 ---
 

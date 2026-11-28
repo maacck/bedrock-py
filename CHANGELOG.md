@@ -2,8 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+The format is based on [Keep a Changelog](https://keepachangelog.com/spec/v1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.4.2] - 2026-11-28
+
+### Added
+
+- **JSON Schema-driven SQLAlchemy 2.0 query builder (`bedrock.database`)**: `compile_query_schema(model, *, policy=None, pager=None)` returns a memory-light `QuerySchema[M]` that exports model-scoped Draft 2020-12 JSON Schemas (`json_schema()`, `filter_json_schema()`), validates untrusted JSON payloads into typed `QuerySpec` / `FilterNode` ASTs with iterative depth/node/relation-hop safety budgets and SEC-01 hidden-vs-missing error redaction (`reveal_allowed_fields=False` by default), and integrates natively with Pydantic v2 and FastAPI OpenAPI via `Annotated[QuerySpec, schema]` and `Annotated[FilterNode, schema]`.
+- Three orthogonal sync and async query execution pairs exported from `bedrock.database` (and as methods on `QuerySchema[M]`):
+  - `search_models` / `asearch_models` (`list[M]`) and `paginate_models` / `apaginate_models` (`PageResult[M]`) for ORM entity listing with explicit `options` and `base_select` (no automatic joins, automatic eager loads, or entity `group_by`).
+  - `search_fields` / `asearch_fields` (`list[dict[str, Any]]`) and `paginate_fields` / `apaginate_fields` (`PageResult[dict[str, Any]]`) for single-table column projections and multi-column `group_by` aggregations.
+  - `search_select` / `asearch_select` (`list[dict[str, Any]]`) and `paginate_select` / `apaginate_select` (`PageResult[dict[str, Any]]`) for explicit cross-table `JOIN` / `LEFT OUTER JOIN` / `aliased()` / aggregation SQLAlchemy `Select` statements.
+- `QueryPolicy` and `FieldPolicy` (supported both on `BedrockModel.__query_policy__` and per call via `compile_query_schema(Model, policy=...)`) for per-field operator overrides, `allow_raw_like`, `extra_fields`, `sort_expressions`, and safety budgets. All relationship filters (explicit `relation` quantifiers `some`/`none`/`every`/`has`/`missing` and to-one dotted path syntax sugar such as `owner.name`) compile to correlated `EXISTS` subqueries without modifying the main `FROM`/`JOIN` topology.
+- **Extensible pagination strategies (`BasePager`)**: `QuerySchema(model, *, policy=None, pager=None)`, `compile_query_schema`, and all `paginate_*` / `search_*` helpers accept pluggable pager classes (defaulting to `PagePager`). Ships with three built-in pagers — `PagePager` (`page`/`limit`), `LimitOffsetPager` (`limit`/`offset`, optional `include_total=False`), and `CursorPager` (forward keyset pagination with opaque URL-safe Base64 JSON tokens, automatic primary-key tie-breakers in declared PK order on single-table queries, explicit `unique_keys` for joined/multi-table selects, NULL-safe lexicographical comparisons, `InvalidCursorError`, and optional `include_total=False`) — plus `BasePager`, `PaginationParams` (shared `limit` parameter), `BasePageInfo`, and `PaginationContext` for external custom pager subclasses. `PageResult.total` is now `int | None = None` (`int` whenever `include_total=True`, `None` when `COUNT(*)` is disabled) and `PageResult.page_info` validates concrete built-in metadata (`PageInfo | LimitOffsetPageInfo | CursorPageInfo | BasePageInfo`) while preserving custom `BasePageInfo` subclasses via `SerializeAsAny`.
+
+### Deprecated
+
+- `bedrock.database.service.build_query`, `search_filter_sort_paginate`, `asearch_filter_sort_paginate`, and legacy `filter_specs` are deprecated in `0.4.x` (emitting `DeprecationWarning`) and scheduled for removal in `0.5.0`. Migrate to `compile_query_schema`, `paginate_models` / `apaginate_models`, `paginate_fields` / `apaginate_fields`, and `paginate_select` / `apaginate_select`.
+
+### Fixed
+
+- `BedrockModel.text_search()` now escapes literal `\`, `%`, and `_` wildcards when `__search_op__` is `"ilike"` or `"like"`.
 
 ## [0.4.1] - 2026-11-23
 

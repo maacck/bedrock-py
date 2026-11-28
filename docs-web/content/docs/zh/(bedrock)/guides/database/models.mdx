@@ -1,0 +1,82 @@
+---
+title: 模型与事件
+description: BedrockModel 声明式基类、CrudMixin 内置方法、默认值与 SQLAlchemy ORM 事件监听
+---
+
+所有 Bedrock 模型都继承自 `BedrockModel`，它将 SQLAlchemy 的 `DeclarativeBase` 与用于常见操作的 `CrudMixin` 结合在一起。
+
+## 内置方法
+
+| 方法 / 属性 | 说明 |
+|-------------------|-------------|
+| `.dict()` | 返回包含所有列值的字典 |
+| `.update(**kwargs)` | 使用关键字参数设置属性 |
+| `.delete()` | 从其所在 session 中删除该实例 |
+| `.verbose_name` | 以可读标签形式返回类名 |
+| `.__repr__()` | 返回 `<ClassName #id>` 格式 |
+| `.text_search(q)` | 类方法，在 `__searchable_columns__` 上构造已转义的 `OR` 搜索子句 |
+
+## 模型类属性
+
+| 类属性 | 默认值 | 说明 |
+|--------|--------|------|
+| `__filterable_fields__` | `[]` | 对客户端查询开放的列、hybrid 属性与关系白名单（主键始终开放）。`"__all__"` 仅展开当前模型的 mapped 列，不会自动展开关系。 |
+| `__query_policy__` | `None` | 可选的模型级默认 `QueryPolicy`，配置单字段操作符、`sortable`、`allow_raw_like` 与安全预算。参见[查询构建器](/docs/guides/database/query-builder)。 |
+| `__searchable_columns__` | `[]` | `text_search(q)` 与查询顶层 `search` 搜索的列名列表。 |
+| `__search_op__` | `"ilike"` | `text_search(q)` 使用的操作符；为 `"ilike"` 或 `"like"` 时自动转义 `\`、`%`、`_`。 |
+
+## 示例
+
+```python
+from bedrock.database import BedrockModel
+from sqlalchemy import Column, String, Integer
+
+class Product(BedrockModel):
+    __tablename__ = "products"
+    __filterable_fields__ = ["name", "price"]
+    __searchable_columns__ = ["name"]
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String(100), nullable=False)
+    price = Column(Integer, default=0)
+
+# Create and use
+product = Product(name="Widget", price=999)
+product.dict()  # {"id": None, "name": "Widget", "price": 999}
+
+# Update attributes
+product.update(price=1499)
+
+# Delete (must be attached to a session)
+session.add(product)
+session.commit()
+product.delete()
+session.commit()
+```
+
+## 默认值
+
+`BedrockModel` 会监听 `init` 事件，并在构造函数结束前应用列默认值。可调用默认值会以实例作为参数进行调用；显式传入的关键字参数优先于默认值。
+
+## 模型事件
+
+Bedrock 不封装 ORM 事件。直接注册 SQLAlchemy 监听器，并按需要选择触发阶段：
+
+```python
+from sqlalchemy import event
+from sqlalchemy.orm import Session
+
+# INSERT 执行之后：主键已经赋值。额外的 SQL 用 `connection` 执行，不要修改 session。
+@event.listens_for(Catalog, "after_insert", propagate=True)
+def catalog_inserted(mapper, connection, target):
+    ...
+
+# flush 之前：在这里加入 session 的对象会在同一个事务中一起 flush。
+@event.listens_for(Session, "before_flush")
+def audit_catalog(session, flush_context, instances):
+    for obj in session.new:
+        if isinstance(obj, Catalog):
+            session.add(AuditLog(action="catalog_created"))
+```
+
+`after_update` / `after_delete`（以及对应的 `before_*`）用法相同。`propagate=True` 让子类也会触发。全部钩子及其限制见 SQLAlchemy 的 [ORM 事件文档](https://docs.sqlalchemy.org/en/20/orm/events.html)。

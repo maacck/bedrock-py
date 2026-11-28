@@ -1,0 +1,358 @@
+---
+title: Query Builder
+description: JSON Schema-driven QuerySchema, FastAPI OpenAPI integration, models/fields/select executors, and SEC-01 policies
+---
+
+`bedrock.database` provides a **JSON Schema (Draft 2020-12)-driven SQLAlchemy 2.0 query builder** centered on `QuerySchema[M]`. It validates untrusted JSON payloads against model-scoped allowlists, exports matching JSON Schemas for OpenAPI, frontend query builders, and AI agents, and compiles pure SQLAlchemy `WHERE` (using `EXISTS` for all relationship filters) and multi-field `ORDER BY` clauses — with **no automatic joins**, **no automatic eager loading**, and **no entity-level `group_by`**.
+
+## Architecture at a Glance
+
+1. **`QuerySchema[M]` is the single source of truth** for parsing, validation, JSON Schema export, and SQLAlchemy clause compilation.
+2. **Low memory footprint**: internal validators are built directly from `pydantic_core` schemas (zero dynamic `BaseModel` class explosion), default-policy schemas are cached per model class without global strong retention, and `json_schema()` is generated lazily.
+3. **Composable with SQLAlchemy 2.0**: relationship filters compile to correlated `EXISTS` subqueries, leaving your `FROM`, `JOIN`, `options`, and `GROUP BY` untouched.
+
+## Filterable Fields & `QueryPolicy`
+
+Client-supplied `filter` and `sort` payloads may only reference fields the model exposes. Primary keys are always allowed; every other column, hybrid property, or relationship must be listed in `__filterable_fields__` or configured via `QueryPolicy`:
+
+```python
+from bedrock.database import BedrockModel, FieldPolicy, QueryPolicy
+
+class Customer(BedrockModel):
+    __tablename__ = "customers"
+    __filterable_fields__ = ["name", "tier"]  # password_hash stays hidden
+
+
+class Order(BedrockModel):
+    __tablename__ = "orders"
+    __filterable_fields__ = ["status", "total", "created_at", "customer", "items"]
+    __query_policy__ = QueryPolicy(
+        fields={
+            "status": FieldPolicy(sortable=True),
+        },
+        max_limit=200,
+    )
+```
+
+- **Primary keys** are always filterable and sortable unless disabled in `FieldPolicy`.
+- **`__filterable_fields__ = "__all__"`** expands all mapped columns on that model into the schema, **never** relationships; relationships must still be opted in explicitly.
+- **Model vs call-site policy**: `BedrockModel.__query_policy__` provides a model default, and `compile_query_schema(Model, policy=...)` overrides or extends it for a specific endpoint or report.
+- **Hybrid properties & custom types**: pass `FieldPolicy(value_type=str)` when SQLAlchemy cannot infer a column `TypeEngine`.
+- **SEC-01 redaction**: `reveal_allowed_fields=False` (default) makes hidden and non-existent fields raise identical `BadFilterFormatError` messages without enumerating allowed field names. Set `QueryPolicy(reveal_allowed_fields=True)` for internal tools or agent self-correction loops.
+
+## Compiling `QuerySchema` & FastAPI Integration
+
+Compile once per resource router or model:
+
+```python
+from typing import Annotated
+from fastapi import APIRouter
+from sqlalchemy.orm import selectinload
+
+from bedrock.database import FilterNode, PageResult, QuerySpec, compile_query_schema, db
+
+router = APIRouter(prefix="/orders", tags=["orders"])
+order_schema = compile_query_schema(Order)
+
+# 1. Export Draft 2020-12 JSON Schema for frontend query builders or AI tools
+@router.get("/query-schema")
+def get_order_query_schema() -> dict:
+    return order_schema.json_schema()
+
+# 2. Use directly in FastAPI route signatures via Python's Annotated (mypy-safe, populates OpenAPI)
+@router.post("/search")
+async def search_orders(
+    query: Annotated[QuerySpec, order_schema],
+) -> PageResult[dict]:
+    page = await order_schema.apaginate(
+        db.asession,
+        query=query,
+        options=[selectinload(Order.customer)],
+    )
+    return PageResult(
+        items=[o.dict() for o in page.items],
+        total=page.total,
+        page_info=page.page_info,
+    )
+```
+
+If an endpoint must enforce strict SEC-01 redaction (returning `BadFilterFormatError` via `bedrock-fastapi`'s `bedrock_exception_handler` instead of FastAPI's 422 field enumeration), accept `raw_body: dict[str, Any]` and pass it directly to `order_schema.apaginate(db.asession, query=raw_body)`.
+
+## Three Execution Pairs (Sync & Async)
+
+Every pair is exported directly from `bedrock.database` and also available as methods on `QuerySchema[M]`:
+
+| Scenario | Unpaginated | Paginated | Return type | Key parameters |
+|----------|-------------|-----------|-------------|----------------|
+| **Models** (entities) | `search_models` / `asearch_models` | `paginate_models` / `apaginate_models` | `list[M]` / `PageResult[M]` | `base_select`, `options` (data query only), optional server `limit`; no `group_by` |
+| **Fields** (single-table projection / aggregation) | `search_fields` / `asearch_fields` | `paginate_fields` / `apaginate_fields` | `list[dict[str, Any]]` / `PageResult[dict[str, Any]]` | `fields`, multi-column `group_by`, `base_select`, optional server `limit` |
+| **Select** (cross-table `JOIN` / `aliased` / CTE) | `search_select` / `asearch_select` | `paginate_select` / `apaginate_select` | `list[dict[str, Any]]` / `PageResult[dict[str, Any]]` | Explicit SQLAlchemy `stmt`, optional server `limit` |
+
+### 1. Model Search & Pagination
+
+```python
+from sqlalchemy import select
+from sqlalchemy.orm import selectinload
+from bedrock.database import apaginate_models, db, paginate_models, search_models
+
+# Paginated listing with tenant isolation and explicit eager loading
+page = paginate_models(
+    db.session,
+    Order,
+    query={
+        "filter": {
+            "logic": "and",
+            "conditions": [
+                {"field": "status", "op": "in", "value": ["paid", "shipped"]},
+                {"field": "customer.name", "op": "icontains", "value": "ann"},
+            ],
+        },
+        "sort": [
+            {"field": "created_at", "direction": "desc", "nulls": "last"},
+            {"field": "id", "direction": "asc"},
+        ],
+        "pagination": {"page": 1, "limit": 20},
+    },
+    base_select=select(Order).where(Order.tenant_id == tenant_id),
+    options=[selectinload(Order.customer)],
+)
+
+# Async variant
+page = await apaginate_models(db.asession, Order, query=raw_json, options=[selectinload(Order.customer)])
+
+# Unpaginated export: reuses the exact same client JSON, validates pagination, then ignores it without COUNT(*)
+rows = search_models(db.session, Order, query=raw_json, limit=5000)
+```
+
+### 2. Single-Table Fields & Multi-Column `group_by`
+
+```python
+from sqlalchemy import func
+from bedrock.database import QueryPolicy, db, paginate_fields, search_fields
+
+# Lightweight column projection (avoids hydrating full ORM objects)
+rows = search_fields(db.session, Order, fields=["id", "status", "total"], query=raw_json)
+
+# Multi-column GROUP BY aggregation with pagination over groups
+stats = paginate_fields(
+    db.session,
+    Order,
+    fields=[
+        Order.status,
+        Order.currency,
+        func.count(Order.id).label("order_count"),
+        func.sum(Order.total).label("gmv"),
+    ],
+    group_by=[Order.status, Order.currency],
+    query={"sort": [{"field": "gmv", "direction": "desc"}], "pagination": {"page": 1, "limit": 20}},
+    policy=QueryPolicy(sort_expressions={"gmv": func.sum(Order.total)}),
+)
+```
+
+### 3. Cross-Table `JOIN` / `LEFT JOIN` / `aliased()` Select
+
+When a query needs explicit joins, build a standard SQLAlchemy 2.0 `Select` and pair it with `search_select` / `paginate_select`:
+
+```python
+from sqlalchemy import select
+from sqlalchemy.orm import aliased
+from bedrock.database import FieldPolicy, QueryPolicy, db, paginate_select
+
+Approver = aliased(User)
+stmt = (
+    select(
+        Order.id,
+        Order.total,
+        User.name.label("creator_name"),
+        Approver.name.label("approver_name"),
+    )
+    .select_from(Order)
+    .join(User, Order.creator_id == User.id)
+    .outerjoin(Approver, Order.approver_id == Approver.id)
+)
+
+report_policy = QueryPolicy(
+    extra_fields={
+        "creator_name": FieldPolicy(column=User.name, sortable=True),
+        "approver_name": FieldPolicy(column=Approver.name, nullable=True, sortable=True),
+    }
+)
+
+report_page = paginate_select(db.session, Order, stmt, query=raw_json, policy=report_policy)
+```
+
+### Pure Clause Compilation
+
+You can also embed compiled clauses directly into any custom SQLAlchemy statement:
+
+```python
+where_clause = order_schema.compile_where(raw_json)
+order_clauses = order_schema.compile_order_by(raw_json)
+stmt = order_schema.apply(select(Order), raw_json, paginate=False)
+```
+
+## Extensible Pagers (`PagePager`, `LimitOffsetPager`, `CursorPager`, Custom)
+
+`QuerySchema` defaults to 1-based `PagePager` (`page` + `limit`), and accepts any `BasePager` subclass via `QuerySchema(Model, pager=...)`, `compile_query_schema(Model, pager=...)`, or the top-level `paginate_*` / `search_*` helpers. Every pager shares the unified `PageResult[M]` envelope (`items`, `total: int | None`, `page_info`), differing only in its `PaginationParams` input model (all inheriting `limit`) and `BasePageInfo` subclass:
+
+| Pager | Input (`query.pagination`) | `page_info` Type | `COUNT(*)` / `total` |
+|-------|----------------------------|------------------|----------------------|
+| `PagePager()` (default) | `{"page": 1, "limit": 20}` (`PaginationSpec`) | `PageInfo` (`total`, `page`, `limit`, `offset`, `has_more`) | Always runs `COUNT(*)` |
+| `LimitOffsetPager(include_total=True)` | `{"limit": 20, "offset": 40}` (`LimitOffsetParams`) | `LimitOffsetPageInfo` (`total`, `limit`, `offset`, `has_more`) | Runs `COUNT(*)` by default; `include_total=False` fetches `limit + 1` and sets `total=None` |
+| `CursorPager(include_total=True)` | `{"cursor": "<token>", "limit": 20}` (`CursorParams`) | `CursorPageInfo` (`total`, `limit`, `has_more`, `next_cursor`) | Runs `COUNT(*)` by default; `include_total=False` skips `COUNT(*)` |
+
+### Built-in `LimitOffsetPager` & `CursorPager`
+
+```python
+from bedrock.database import CursorPager, LimitOffsetPager, compile_query_schema, db
+
+# Limit/Offset pagination (skip COUNT(*) with include_total=False on huge tables)
+offset_schema = compile_query_schema(Order, pager=LimitOffsetPager())
+page = offset_schema.paginate(db.session, query={"pagination": {"offset": 20, "limit": 10}})
+
+# Forward keyset cursor pagination (opaque URL-safe Base64 JSON token)
+# Primary keys are appended automatically in declared PK order as tie-breakers
+# so duplicate sort values (e.g. identical created_at) never skip or duplicate rows.
+cursor_schema = compile_query_schema(Order, pager=CursorPager(include_total=False))
+first = cursor_schema.paginate(
+    db.session,
+    query={"sort": [{"field": "created_at", "direction": "desc"}], "pagination": {"limit": 20}},
+)
+second = cursor_schema.paginate(
+    db.session,
+    query={
+        "sort": [{"field": "created_at", "direction": "desc"}],
+        "pagination": {"cursor": first.page_info.next_cursor, "limit": 20},
+    },
+)
+```
+
+- Tampered, malformed, or sort-mismatched cursors raise `InvalidCursorError` (a `BadFilterFormatError` subclass).
+- For multi-table / joined queries (such as `paginate_select()` with a `JOIN`), pass explicit row-unique sortable keys via `CursorPager(unique_keys=[...])` (e.g. `unique_keys=["id", "event_id"]` for a 1-to-N join); omitting `unique_keys` raises `BadFilterFormatError` to prevent silent row skips.
+- `CursorPager` rejects `group_by`, `DISTINCT`, `HAVING`, and aggregate projections with `BadFilterFormatError`; use `PagePager` or `LimitOffsetPager` for those queries.
+- `QuerySchema.apply(stmt, query, paginate=True)` delegates to `pager.apply(stmt, ctx)` (`OFFSET`/`LIMIT` for page & offset pagers; keyset `WHERE` + tie-breaker `ORDER BY` + `LIMIT` for `CursorPager`).
+
+### Custom External Pager
+
+Subclass `PaginationParams`, `BasePageInfo`, and `BasePager` — `QuerySchema` automatically enforces `policy.default_limit` / `policy.max_limit` and exports Draft 2020-12 JSON Schema & FastAPI OpenAPI definitions for your custom parameters:
+
+```python
+from typing import Any
+from pydantic import Field, StrictInt
+from sqlalchemy import Select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Session
+from bedrock.database import BasePageInfo, BasePager, PageResult, PaginationContext, PaginationParams, QuerySchema
+
+class WindowParams(PaginationParams):
+    window: StrictInt = Field(default=0, ge=0)
+
+class WindowPageInfo(BasePageInfo):
+    window: int
+
+class WindowPager(BasePager[WindowParams, WindowPageInfo]):
+    params_model = WindowParams
+    page_info_model = WindowPageInfo
+
+    def apply(self, stmt: Select[Any], ctx: PaginationContext[Any, WindowParams]) -> Select[Any]:
+        out = stmt.order_by(*ctx.order_clauses) if ctx.order_clauses else stmt
+        return out.fetch(None).offset(ctx.params.window * ctx.params.limit).limit(ctx.params.limit)
+
+    def paginate[T](self, session: Session, ctx: PaginationContext[T, WindowParams]) -> PageResult[T]:
+        total = ctx.fetch_total(session)
+        items = ctx.fetch_rows(session, self.apply(ctx.filtered_stmt, ctx))
+        offset = ctx.params.window * ctx.params.limit
+        return PageResult[T](
+            items=items,
+            total=total,
+            page_info=WindowPageInfo(total=total, limit=ctx.params.limit, has_more=total > offset + ctx.params.limit, window=ctx.params.window),
+        )
+
+    async def apaginate[T](self, session: AsyncSession, ctx: PaginationContext[T, WindowParams]) -> PageResult[T]:
+        total = await ctx.afetch_total(session)
+        items = await ctx.afetch_rows(session, self.apply(ctx.filtered_stmt, ctx))
+        offset = ctx.params.window * ctx.params.limit
+        return PageResult[T](
+            items=items,
+            total=total,
+            page_info=WindowPageInfo(total=total, limit=ctx.params.limit, has_more=total > offset + ctx.params.limit, window=ctx.params.window),
+        )
+
+window_schema = QuerySchema(Order, pager=WindowPager())
+```
+
+## Query JSON DSL Reference
+
+All objects strictly forbid unknown keys (`additionalProperties: false`). Top-level `QuerySpec` accepts:
+
+- `filter`: filter node tree (optional)
+- `sort`: list of `{"field": "<name>", "direction": "asc" | "desc", "nulls": "first" | "last" | null}` (optional)
+- `search`: free-text search string applied to `__searchable_columns__` (always present in exported JSON Schema; no-op when empty)
+- `pagination`: pager-specific pagination object (optional; defaults to `PagePager` `{"page": 1, "limit": policy.default_limit}`, or `{"limit", "offset"}` for `LimitOffsetPager`, `{"cursor", "limit"}` for `CursorPager`, or custom `PaginationParams` fields)
+
+### Logical Combinators
+
+```json
+{
+  "logic": "and",
+  "conditions": [
+    { "field": "status", "op": "eq", "value": "paid" },
+    {
+      "logic": "not",
+      "condition": {
+        "logic": "or",
+        "conditions": [
+          { "field": "total", "op": "lt", "value": 10 },
+          { "relation": "items", "quantifier": "none" }
+        ]
+      }
+    }
+  ]
+}
+```
+
+### Operators by Column Type
+
+| Column Category | Default Allowed Operators | Value Schema & Behavior |
+|-----------------|---------------------------|-------------------------|
+| Numeric (`Integer`, `Float`, `Numeric`) | `eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `in`, `between` | Strict numeric types (booleans rejected); `between` requires a 2-element array |
+| String (`String`, `Text`) | `eq`, `ne`, `in`, `contains`, `icontains`, `starts_with`, `ends_with` | `%`, `_`, `\` are automatically escaped; raw `like` / `ilike` are disabled by default and opted in via `FieldPolicy(allow_raw_like=True)` |
+| Boolean | `eq`, `ne` | Strict boolean only |
+| Temporal (`DateTime`, `Date`, `Time`) | `eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `in`, `between` | ISO-8601 strings; `DateTime` values automatically normalize to match `DateTime(timezone=True\|False)` |
+| Enum / UUID | `eq`, `ne`, `in` | Exported as `enum` / `format: "uuid"` |
+| Nullable column (any type) | Adds `is_null`, `is_not_null` | Unary operators forbid the `value` key |
+
+### Relationship Filters (`EXISTS`)
+
+All relationship filters compile to correlated `EXISTS` subqueries so main-query row counts and cross-relation `OR` clauses stay exact:
+
+```json
+// Collection (one-to-many / many-to-many): "some" | "none" | "every"
+{ "relation": "items", "quantifier": "some", "filter": { "field": "sku", "op": "starts_with", "value": "PRO_" } }
+
+// Collection with no matching items (filter is optional for "some" and "none"; required for "every")
+{ "relation": "items", "quantifier": "none" }
+
+// Scalar (many-to-one / one-to-one): "has" | "missing"
+{ "relation": "customer", "quantifier": "missing" }
+
+// To-one dotted path syntax sugar (auto-expanded to Order.customer.has(...))
+{ "field": "customer.name", "op": "eq", "value": "Ann" }
+```
+
+> Note: `every` compiles to `~rel.any(clause.is_not(True))`, which follows standard SQL vacuous truth (records with zero related items match) while treating `NULL` child values as non-matching rather than silently ignoring them.
+
+### Safety Budgets & Exceptions
+
+| Budget | Default | On Violation |
+|--------|---------|--------------|
+| `max_depth` | `16` | `FilterDepthExceededError` |
+| `max_nodes` | `100` | `BadFilterFormatError` |
+| `max_relation_depth` | `2` | `FilterDepthExceededError` (shared across `relation` nodes and dotted paths) |
+| `max_in_items` | `200` | `BadFilterFormatError` |
+| `max_limit` | `1000` | `InvalidQueryLimitError` |
+| Cursor token | Valid URL-safe Base64 JSON matching `sort` | `InvalidCursorError` (`BadFilterFormatError` subclass) |
+
+## Legacy `search_filter_sort_paginate` (Deprecated)
+
+`bedrock.database.service.search_filter_sort_paginate`, `asearch_filter_sort_paginate`, `build_query`, and legacy `filter_specs` remain available in `0.4.x` with a `DeprecationWarning` and are scheduled for removal in `0.5.0`. Migrate to `compile_query_schema`, `paginate_models` / `apaginate_models`, `paginate_fields` / `apaginate_fields`, and `paginate_select` / `apaginate_select`.

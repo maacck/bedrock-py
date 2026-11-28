@@ -32,6 +32,12 @@ class BadFilterFormatError(FilterError):
     detail: str = "Bad filter format."
 
 
+class InvalidCursorError(BadFilterFormatError):
+    """Raised when a pagination cursor token is malformed or incompatible with the query sort."""
+
+    detail: str = "Invalid pagination cursor."
+
+
 class FilterDepthExceededError(FilterError):
     """Raised when the recursive depth of a filter tree exceeds MAX_FILTER_DEPTH."""
 

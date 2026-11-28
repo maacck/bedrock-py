@@ -7,7 +7,7 @@ description: >
   debugging module lifecycle issues, writing bootstrap hooks, configuring database migrations,
   writing tests for Bedrock modules, or building applications on top of Bedrock. Trigger on: "python project dependencies contains 'bedrock-py'", "working on a Bedrock module", "writing a manifest.yaml", "using bedrock CLI commands", "testing a Bedrock module"
 metadata:
-  bedrock-core: "0.4.1"
+  bedrock-core: "0.4.2"
 ---
 
 # Bedrock Application Development
@@ -283,36 +283,36 @@ class UserModel(BedrockModel):
 
 ### 8. Database Queries
 
-Use `search_filter_sort_paginate` for filtered, paginated queries:
+Use `QuerySchema` (`compile_query_schema`) and the three sync/async executor pairs exported from `bedrock.database`:
 
 ```python
-from bedrock.database import db
-from bedrock.database.service import search_filter_sort_paginate
+from typing import Annotated
+from bedrock.database import QuerySpec, compile_query_schema, db, paginate_models, search_models
 
-result = search_filter_sort_paginate(
-    db_session=db.session,
-    model=UserModel,
-    filter_specs=[{"field": "name", "op": "==", "value": "Alice"}],
-    sort_key="name",
-    sort_dir="asc",
-    page=1,
-    limit=10,
+user_schema = compile_query_schema(UserModel)
+json_schema = user_schema.json_schema()  # Draft 2020-12 JSON Schema
+# In FastAPI routes: query: Annotated[QuerySpec, user_schema]
+
+page = paginate_models(
+    db.session,
+    UserModel,
+    query={
+        "filter": {"field": "name", "op": "icontains", "value": "alice"},
+        "sort": [{"field": "name", "direction": "asc"}],
+        "pagination": {"page": 1, "limit": 10},
+    },
 )
-# Returns: {"items": [...], "total": N, "page_info": {"page": 1, "limit": 10, "has_more": True}}
+# Returns PageResult[UserModel]: page.items, page.total, page.page_info
 ```
 
-In `async def` services, use `await asearch_filter_sort_paginate(db_session=db.asession, ...)` from the same module: same arguments, same return value.
+- **Models** (`list[M]` / `PageResult[M]`): `search_models` / `asearch_models`, `paginate_models` / `apaginate_models` (explicit `options` and `base_select`; no `group_by`).
+- **Single-table fields & multi-column `group_by`** (`list[dict]` / `PageResult[dict]`): `search_fields` / `asearch_fields`, `paginate_fields` / `apaginate_fields`.
+- **Cross-table explicit `Select`** (`list[dict]` / `PageResult[dict]`): `search_select` / `asearch_select`, `paginate_select` / `apaginate_select` (explicit `JOIN` / `LEFT JOIN` / `aliased()` with `QueryPolicy(extra_fields=..., sort_expressions=...)`; zero `auto_join` / `auto_loads`).
+- **Pluggable Pagers** (`pager=` on `QuerySchema` / `compile_query_schema` / `paginate_*`): `PagePager()` (default), `LimitOffsetPager(include_total=True)`, `CursorPager(include_total=True)` (opaque URL-safe Base64 JSON, automatic PK tie-breaker, `InvalidCursorError`), or external `BasePager` / `PaginationParams` / `BasePageInfo` subclasses returning unified `PageResult[T]`.
 
-Client-supplied `filter_specs`, `sort_key`, and `group_by` may only name primary keys and fields listed in the model's `__filterable_fields__` (each dotted-path hop is checked on its own model); `count_pk` must be a primary key. Anything else raises `BadFilterFormatError`. Never add secret columns (password hashes, tokens) to `__filterable_fields__`. Use `__filterable_fields__ = "__all__"` only when the adapter already validates field names; it opts out that model alone.
+Client-supplied filters and sorts may only name primary keys, fields in `__filterable_fields__`, or fields configured in `QueryPolicy` / `__query_policy__`. `"__all__"` expands mapped columns on that model only (never relationships). Hidden and missing fields raise identical `BadFilterFormatError` by default (`reveal_allowed_fields=False`).
 
-**Filter operators**: `is_null`, `is_not_null`, `==`/`eq`, `!=`/`neq`, `>`/`gt`, `<`/`lt`, `>=`/`ge`, `<=`/`le`, `like`, `ilike`, `not_ilike`, `in`, `not_in`, `between`, `has`, `any`, `not_any`, `text_search`, `fuzzy_search`. `limit` must be an integer from 1 to 1000 inclusive, even with `show_all=True`.
-
-**Boolean combinators**: `or`, `and`
-
-```json
-{"field": "name", "op": "==", "value": "Alice"}
-{"or": [{"field": "age", "op": ">", "value": 30}, {"field": "name", "op": "==", "value": "Bob"}]}
-```
+**Filter DSL**: `{"logic": "and"|"or", "conditions": [...]}`, `{"logic": "not", "condition": ...}`, `{"field": "<name>", "op": "<op>", "value": ...}` (unary `is_null`/`is_not_null` forbid `value`; to-one dotted paths like `"owner.name"` compile to `has()` `EXISTS`), and `{"relation": "<rel>", "quantifier": "some"|"none"|"every"|"has"|"missing", "filter": ...}`. Canonical ops: `eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `in`, `between`, `is_null`, `is_not_null`, `contains`, `icontains`, `starts_with`, `ends_with` (raw `like`/`ilike` opt-in via `FieldPolicy(allow_raw_like=True)`). Legacy `search_filter_sort_paginate` / `filter_specs` are deprecated in 0.4.x and scheduled for removal in 0.5.0.
 
 **Nested filters**: `.` traverses relationships via joins; `:` selects any/has but the current formatter can fail on relationship type lookup. Prefer explicit SQLAlchemy relationship clauses in `sqla_filters`; see `references/database-guide.md`.
 

@@ -1,0 +1,198 @@
+---
+title: Overview & Configuration
+description: SQLAlchemy 2.0 database layer setup, DbSettings, DatabaseManager API, architecture, and anti-patterns
+---
+
+Bedrock ships with a SQLAlchemy 2.0 database layer that handles engine setup, context-local sessions, declarative models, JSON Schema-driven querying, and module-scoped migrations. The whole subsystem lives under `bedrock.database`.
+
+<Cards>
+  <Card title="Sessions" href="/docs/guides/database/sessions" description="Context-local sync/async session scopes, decorators, independent transactions, and engine shutdown." />
+  <Card title="Models & Events" href="/docs/guides/database/models" description="BedrockModel base class, CrudMixin helpers, column defaults, and SQLAlchemy ORM event listeners." />
+  <Card title="Query Builder" href="/docs/guides/database/query-builder" description="JSON Schema-driven QuerySchema, FastAPI OpenAPI integration, models/fields/select executors, and SEC-01 policies." />
+  <Card title="Migrations" href="/docs/guides/database/migrations" description="Module-scoped bedrock_migrations ledger, table ownership, cross-module dependencies, adopt, and squash." />
+</Cards>
+
+## Quick Start
+
+Define a model, initialize the database, and start querying:
+
+```python
+from bedrock.database import db, BedrockModel
+from sqlalchemy import Column, String, Integer
+
+class Product(BedrockModel):
+    __tablename__ = "products"
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String(100), nullable=False)
+
+# Initialize once at process start
+db.init()
+
+# Use a transaction scope (and unbind the session on exit)
+with db.session_scope() as session:
+    product = Product(name="Widget")
+    session.add(product)
+    session.flush()
+
+    # Query back
+    all_products = session.query(Product).all()
+```
+
+## Configuration
+
+Database settings use environment variables with the `DATABASE_` prefix. `DbSettings` is a Pydantic `BaseSettings` subclass, so it reads from the environment automatically.
+
+### Environment Variables
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `DATABASE_TYPE` | `str` | `"sqlite"` | Database dialect (`sqlite`, `postgresql`, `mysql`) |
+| `DATABASE_DRIVER` | `str` | `"pysqlite"` | DBAPI driver (`pysqlite`, `psycopg2`, `pymysql`) |
+| `DATABASE_HOST` | `str \| None` | `None` | Database host (required for non-SQLite) |
+| `DATABASE_PORT` | `int \| None` | `None` | Database port (required for non-SQLite) |
+| `DATABASE_USERNAME` | `str \| None` | `None` | Database username |
+| `DATABASE_PASSWORD` | `SecretStr \| None` | `None` | Database password. Omitted from `repr` and validation errors. |
+| `DATABASE_ASYNC_DRIVER` | `str \| None` | `None` | Async DBAPI driver (`aiosqlite`, `asyncpg`, `psycopg`, `asyncmy`, `aiomysql`) |
+| `DATABASE_MAX_CONNECTIONS` | `int` | `10` | Per-process connection ceiling, including overflow |
+| `DATABASE_POOL_TIMEOUT` | `int` | `30` | Seconds to wait for a connection |
+| `DATABASE_POOL_SIZE` | `int` | `10` | Steady-state pool size. Must be at least 1. |
+| `DATABASE_POOL_RECYCLE` | `int` | `1800` | Seconds before recycling a connection |
+| `DATABASE_MIGRATION_LOCK_TIMEOUT` | `float` | `30` | Seconds to wait for the migration lock. `0` does not wait. |
+| `DATABASE_MIGRATION_VERSION_TABLE` | `str` | `"bedrock_migrations"` | Table that records applied migrations. Lowercase simple SQL identifier, at most 57 characters. See [Custom Version Table](/docs/guides/database/migrations#custom-version-table-and-independent-module-sets). |
+| `DATABASE_SCHEMA` | `str` | `"bedrock.db"` | Database name or file path |
+
+`MAX_CONNECTIONS` is the total number of connections one process may check out. PostgreSQL and MySQL engines receive `pool_size`, `pool_timeout`, `pool_recycle`, and `max_overflow = MAX_CONNECTIONS - POOL_SIZE`. `MAX_CONNECTIONS` must be greater than or equal to `POOL_SIZE`. A smaller value raises `DatabaseConfigurationError` and the message names both settings. `POOL_SIZE` below 1 also raises `DatabaseConfigurationError`, because SQLAlchemy treats a pool size of 0 as unlimited and would ignore the ceiling. SQLite engines ignore the pool settings.
+
+The defaults (`POOL_SIZE=10`, `MAX_CONNECTIONS=10`) cap a process at 10 connections. Those defaults previously left SQLAlchemy's implicit overflow of 10 in place, so the engine allowed 20. Raise `DATABASE_MAX_CONNECTIONS` above `DATABASE_POOL_SIZE` when a deployment needs that extra capacity.
+
+`PASSWORD` is a Pydantic `SecretStr`. A plain string is accepted and stored as a secret. `repr(settings)` and validation errors do not contain the password or the rendered URL. The URL is built with `sqlalchemy.engine.URL.create`, so `@`, `:`, `/`, and `%` in the username or password round-trip. Read the secret with `settings.PASSWORD.get_secret_value()` only where the connection is opened.
+
+### SQLite
+
+```bash
+export DATABASE_TYPE=sqlite
+export DATABASE_DRIVER=pysqlite
+export DATABASE_SCHEMA=bedrock.db
+```
+
+For in-memory databases, set `DATABASE_SCHEMA=:memory:`.
+
+### PostgreSQL
+
+```bash
+export DATABASE_TYPE=postgresql
+export DATABASE_DRIVER=psycopg2
+export DATABASE_HOST=localhost
+export DATABASE_PORT=5432
+export DATABASE_USERNAME=myuser
+export DATABASE_PASSWORD=mypassword
+export DATABASE_SCHEMA=myapp
+```
+
+### MySQL
+
+```bash
+export DATABASE_TYPE=mysql
+export DATABASE_DRIVER=pymysql
+export DATABASE_HOST=localhost
+export DATABASE_PORT=3306
+export DATABASE_USERNAME=root
+export DATABASE_PASSWORD=secret
+export DATABASE_SCHEMA=myapp
+```
+
+### Programmatic Configuration
+
+Pass a `DbSettings` instance directly to `db.init()`:
+
+```python
+from bedrock.database import db, DbSettings
+
+settings = DbSettings(
+    TYPE="postgresql",
+    DRIVER="psycopg2",
+    HOST="localhost",
+    PORT=5432,
+    USERNAME="admin",
+    PASSWORD="secret",
+    SCHEMA="myapp",
+)
+
+db.init(settings=settings)
+```
+
+You can also override the connection URL entirely:
+
+```python
+db.init(url="postgresql+psycopg2://admin:secret@localhost:5432/myapp")
+```
+
+## DatabaseManager
+
+The `db` singleton is a `DatabaseManager` instance. It owns the engine, session factory, and settings. All access goes through this object.
+
+### API Reference
+
+| Method / Property | Signature | Description |
+|-------------------|-----------|-------------|
+| `db.init()` | `init(url: str \| None = None, settings: DbSettings \| None = None)` | Initialize engine and session factory. Call once at process start. |
+| `db.engine` | `property → Engine` | The SQLAlchemy engine. Raises `DatabaseNotConfiguredError` if not initialized. |
+| `db.session` | `property → Session` | The session bound to the current context. Raises `SessionNotBoundError` when none is bound. |
+| `db.session_factory` | `property → SessionFactory` | The underlying session factory. |
+| `db.settings` | `property → DbSettings` | The resolved database settings. |
+| `db.set_session(session)` | `set_session(session: Session)` | Bind an existing session to the current execution context. |
+| `db.clear_session()` | `clear_session()` | Close and unbind the current context-local session. |
+| `db.session_scope()` | `contextmanager → Session` | Transactional scope with auto commit/rollback. Binds to context. Also usable as a decorator. |
+| `db.independent_session()` | `contextmanager → Session` | Isolated transaction that does not bind to context. |
+| `db.aengine` | `property → AsyncEngine` | Async engine for the URL resolved by `init()`, with only the driver swapped for `DATABASE_ASYNC_DRIVER`. |
+| `db.asession` | `property → AsyncSession` | The async session bound to the current context. Separate context variable from `db.session`. Raises `SessionNotBoundError` when none is bound. |
+| `db.asession_scope()` | `async context manager → AsyncSession` | Async transactional scope with the same commit, rollback, and nesting rules as `session_scope()`. Also usable as a decorator on `async def`. |
+| `db.aindependent_session()` | `async context manager → AsyncSession` | Async transaction that does not bind `db.asession`. |
+| `db.close()` | `close()` | Dispose the sync engine. Leaves a built async engine usable. Safe to call twice. `init()` works again afterwards. |
+| `db.aclose()` | `async aclose()` | Dispose the async engine. Leaves the sync engine usable. Safe to call twice. |
+
+### Error Handling
+
+Accessing `db.engine`, `db.session`, or `db.settings` before calling `db.init()` raises `DatabaseNotConfiguredError`. Always initialize the database before using any of these properties.
+
+Reading `db.session` or `db.asession` when no session is bound to the current context raises `SessionNotBoundError` (a `BedrockExc`). Nothing is created implicitly: open a scope at the entry point.
+
+## Architecture
+
+The database module is organized into focused files and sub-packages:
+
+```
+bedrock/database/
+├── __init__.py            # Public exports
+├── base.py                # BedrockModel (DeclarativeBase + CrudMixin)
+├── config.py              # DbSettings (env-prefixed BaseSettings)
+├── connection.py          # Engine and session factory builders
+├── manager.py             # DatabaseManager singleton (db)
+├── migration/             # Module migration manager, graph, ledger, squash, and script writer
+├── query/                 # JSON Schema-driven QuerySchema, policy, pagers, compiler, and executors
+├── session_factory.py     # Context-local sessions via ContextVar
+├── utils.py               # Model registry helpers
+├── filters.py             # Legacy filter parser (deprecated; scheduled for 0.5.0 removal)
+└── service.py             # Legacy search_filter_sort_paginate (deprecated; scheduled for 0.5.0 removal)
+```
+
+## Anti-Patterns
+
+**Avoid reinitializing `db` during active work.** `db.init()` supports replacement: it constructs the new synchronous engine first, then clears the current context's synchronous session and disposes the previous synchronous engine. If an async engine has already opened a connection, `await db.aclose()` before `init()` so those connections close on the event loop. Other contexts must manage their own sessions before replacement.
+
+**Don't access `db.session` before initialization.** This raises `DatabaseNotConfiguredError`. Always call `db.init()` first.
+
+**Don't read `db.session` outside a scope.** It raises `SessionNotBoundError`. Bind a session at the entry point with `db.session_scope()` or the FastAPI middleware; services only read it.
+
+**Don't forget to clear sessions you bind yourself.** A session bound with `db.set_session()` stays bound until `db.clear_session()`. Call it in a `finally` block.
+
+**Don't put HTTP types in service or model layers.** Request and Response objects belong at adapter boundaries, not in business logic.
+
+**Don't bypass `ModuleRegistry.install()` for migrations.** The registry handles dependency ordering and lifecycle hooks. Manual module loading skips these.
+
+**Don't hardcode database URLs.** Use environment variables or `DbSettings` so configuration stays external to code.
+
+**Don't instantiate settings eagerly at module level if env vars may not be ready.** Wrap module-level singletons with `SettingsProxy` from `bedrock.conf` to defer initialization.
+
+**Don't import `contrib` modules from core code.** The core runtime must not depend on contrib packages.

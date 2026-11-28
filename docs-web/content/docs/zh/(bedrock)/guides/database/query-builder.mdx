@@ -1,0 +1,353 @@
+---
+title: 查询构建器
+description: JSON Schema 驱动的 QuerySchema、FastAPI OpenAPI 集成、models/fields/select 执行器与 SEC-01 安全策略
+---
+
+`bedrock.database` 内置以 `QuerySchema[M]` 为核心的 **JSON Schema（Draft 2020-12）驱动 SQLAlchemy 2.0 查询构建器**。它按模型白名单校验不可信 JSON 载荷，导出同源 JSON Schema（供 OpenAPI、前端 Query Builder、AI Agent 使用），并编译出纯粹的 SQLAlchemy `WHERE`（所有关系过滤走相关性 `EXISTS` 子查询）与多字段 `ORDER BY` —— **不做 `auto_join`**、**不做 `auto_loads`**、**不在实体列表查询中塞入 `group_by`**。
+
+## 架构要点
+
+1. **`QuerySchema[M]` 是唯一解析与 Schema 中枢**：负责内省模型、导出 JSON Schema、校验 JSON 为强类型 `QuerySpec`，以及编译纯 SQLAlchemy 子句，确保对外 Schema 与后端解析永远同源、零漂移。
+2. **极低内存占用**：底层直接用 `pydantic_core` 组装校验器（零动态 `BaseModel` 类爆炸），默认策略按模型类缓存（不经全局强引用，动态模型销毁时可正常回收），`json_schema()` 按需懒生成。
+3. **与 SQLAlchemy 2.0 无缝组合**：所有关系过滤编译为 `EXISTS` 子查询，绝不侵入主查询的 `FROM`、`JOIN`、`options` 或 `GROUP BY`。
+
+## 可过滤字段与 `QueryPolicy`
+
+客户端传入的 `filter` 与 `sort` 只能引用模型白名单公开的字段。主键始终开放；其他列、hybrid 属性和关系必须列在 `__filterable_fields__` 中或通过 `QueryPolicy` 声明：
+
+```python
+from bedrock.database import BedrockModel, FieldPolicy, QueryPolicy
+
+class Customer(BedrockModel):
+    __tablename__ = "customers"
+    __filterable_fields__ = ["name", "tier"]  # password_hash 保持隐藏
+
+
+class Order(BedrockModel):
+    __tablename__ = "orders"
+    __filterable_fields__ = ["status", "total", "created_at", "customer", "items"]
+    __query_policy__ = QueryPolicy(
+        fields={
+            "status": FieldPolicy(sortable=True),
+        },
+        max_limit=200,
+    )
+```
+
+- **主键**默认可过滤、可排序，除非在 `FieldPolicy` 中显式关闭。
+- **`__filterable_fields__ = "__all__"`** 仅展开当前模型的所有 mapped 列，**不会**自动展开关系；关系仍须显式声明。
+- **双层策略**：`BedrockModel.__query_policy__` 提供模型级默认策略，`compile_query_schema(Model, policy=...)` 可按路由或报表场景覆盖/扩展。
+- **Hybrid 属性与自定义类型**：当 SQLAlchemy 无法自动推断 `TypeEngine` 时，在 `FieldPolicy(value_type=str)` 中显式标注 Python 类型即可。
+- **SEC-01 脱敏**：默认 `reveal_allowed_fields=False`，隐藏字段与不存在字段抛出同文案 `BadFilterFormatError`（不枚举合法字段名）；内部工具或 AI Agent 自纠错可开启 `QueryPolicy(reveal_allowed_fields=True)`。
+
+## 编译 `QuerySchema` 与 FastAPI 集成
+
+推荐在每个 Resource Router 模块顶层定义一个 `QuerySchema`：
+
+```python
+from typing import Annotated
+from fastapi import APIRouter
+from sqlalchemy.orm import selectinload
+
+from bedrock.database import FilterNode, PageResult, QuerySpec, compile_query_schema, db
+
+router = APIRouter(prefix="/orders", tags=["orders"])
+order_schema = compile_query_schema(Order)
+
+# 1. 导出 Draft 2020-12 JSON Schema（给前端动态 Query Builder 或 AI Agent）
+@router.get("/query-schema")
+def get_order_query_schema() -> dict:
+    return order_schema.json_schema()
+
+# 2. 通过 Python 标准 Annotated 直接接入 FastAPI 路由（mypy 100% 合法，自动渲染 OpenAPI）
+@router.post("/search")
+async def search_orders(
+    query: Annotated[QuerySpec, order_schema],
+) -> PageResult[dict]:
+    page = await order_schema.apaginate(
+        db.asession,
+        query=query,
+        options=[selectinload(Order.customer)],
+    )
+    return PageResult(
+        items=[o.dict() for o in page.items],
+        total=page.total,
+        page_info=page.page_info,
+    )
+```
+
+如果某接口不公开 Schema 且需要严格 SEC-01 脱敏（走 `bedrock-fastapi` 的 `bedrock_exception_handler` 返回统一 `{"detail": ...}` 而非 FastAPI 422 字段枚举），路由参数接收 `raw_body: dict[str, Any]` 并直接传给 `order_schema.apaginate(db.asession, query=raw_body)` 即可。
+
+## 三组正交执行器（同步与异步）
+
+三组函数均直接从 `bedrock.database` 导出，同时在 `QuerySchema[M]` 实例上提供等价方法：
+
+| 场景 | 不分页 | 分页 | 返回类型 | 核心参数 |
+|------|--------|------|----------|----------|
+| **Models**（ORM 实体） | `search_models` / `asearch_models` | `paginate_models` / `apaginate_models` | `list[M]` / `PageResult[M]` | `base_select`、`options`（仅作用于数据查询）、可选服务端 `limit`；无 `group_by` |
+| **Fields**（单表投影 / 聚合） | `search_fields` / `asearch_fields` | `paginate_fields` / `apaginate_fields` | `list[dict[str, Any]]` / `PageResult[dict[str, Any]]` | `fields`、多列 `group_by`、`base_select`、可选服务端 `limit` |
+| **Select**（跨表 `JOIN` / `aliased` / CTE） | `search_select` / `asearch_select` | `paginate_select` / `apaginate_select` | `list[dict[str, Any]]` / `PageResult[dict[str, Any]]` | 显式原生 SQLAlchemy `stmt`、可选服务端 `limit` |
+
+### 1. 根据模型搜索与分页
+
+```python
+from sqlalchemy import select
+from sqlalchemy.orm import selectinload
+from bedrock.database import apaginate_models, db, paginate_models, search_models
+
+# 分页查询 + 服务端租户隔离 + 显式预加载
+page = paginate_models(
+    db.session,
+    Order,
+    query={
+        "filter": {
+            "logic": "and",
+            "conditions": [
+                {"field": "status", "op": "in", "value": ["paid", "shipped"]},
+                {"field": "customer.name", "op": "icontains", "value": "ann"},
+            ],
+        },
+        "sort": [
+            {"field": "created_at", "direction": "desc", "nulls": "last"},
+            {"field": "id", "direction": "asc"},
+        ],
+        "pagination": {"page": 1, "limit": 20},
+    },
+    base_select=select(Order).where(Order.tenant_id == tenant_id),
+    options=[selectinload(Order.customer)],
+)
+
+# 异步版本
+page = await apaginate_models(db.asession, Order, query=raw_json, options=[selectinload(Order.customer)])
+
+# 不分页导出：直接复用同一份客户端 JSON（先校验 pagination 合法性，随后静默忽略且不跑 COUNT(*)）
+rows = search_models(db.session, Order, query=raw_json, limit=5000)
+```
+
+### 2. 根据单表字段投影与多列 `group_by`
+
+```python
+from sqlalchemy import func
+from bedrock.database import QueryPolicy, db, paginate_fields, search_fields
+
+# 轻量列投影（避免加载大字段或实例化完整 ORM 对象）
+rows = search_fields(db.session, Order, fields=["id", "status", "total"], query=raw_json)
+
+# 多列 GROUP BY 聚合 + 按分组数精确分页
+stats = paginate_fields(
+    db.session,
+    Order,
+    fields=[
+        Order.status,
+        Order.currency,
+        func.count(Order.id).label("order_count"),
+        func.sum(Order.total).label("gmv"),
+    ],
+    group_by=[Order.status, Order.currency],
+    query={"sort": [{"field": "gmv", "direction": "desc"}], "pagination": {"page": 1, "limit": 20}},
+    policy=QueryPolicy(sort_expressions={"gmv": func.sum(Order.total)}),
+)
+```
+
+### 3. 跨表 `JOIN` / `LEFT JOIN` / `aliased()` 自定义 Select
+
+跨表查询不依赖任何隐式 `auto_join`，直接编写标准 SQLAlchemy 2.0 `Select` 并交给 `search_select` / `paginate_select`：
+
+```python
+from sqlalchemy import select
+from sqlalchemy.orm import aliased
+from bedrock.database import FieldPolicy, QueryPolicy, db, paginate_select
+
+Approver = aliased(User)
+stmt = (
+    select(
+        Order.id,
+        Order.total,
+        User.name.label("creator_name"),
+        Approver.name.label("approver_name"),
+    )
+    .select_from(Order)
+    .join(User, Order.creator_id == User.id)
+    .outerjoin(Approver, Order.approver_id == Approver.id)
+)
+
+report_policy = QueryPolicy(
+    extra_fields={
+        "creator_name": FieldPolicy(column=User.name, sortable=True),
+        "approver_name": FieldPolicy(column=Approver.name, nullable=True, sortable=True),
+    }
+)
+
+report_page = paginate_select(db.session, Order, stmt, query=raw_json, policy=report_policy)
+```
+
+### 纯子句编译（自由嵌入任意 SQLAlchemy 语句）
+
+```python
+where_clause = order_schema.compile_where(raw_json)
+order_clauses = order_schema.compile_order_by(raw_json)
+stmt = order_schema.apply(select(Order), raw_json, paginate=False)
+```
+
+## 可扩展分页器（`PagePager`、`LimitOffsetPager`、`CursorPager` 与自定义拓展）
+
+`QuerySchema` 默认使用 1-based `PagePager`（`page` + `limit`），并支持通过 `QuerySchema(Model, pager=...)`、`compile_query_schema(Model, pager=...)` 或顶层 `paginate_*` / `search_*` 助手传入任意 `BasePager` 子类。所有分页器统一返回 `PageResult[M]`（`items`、`total: int | None`、`page_info`），仅在输入参数模型（统一继承含 `limit` 的 `PaginationParams`）与 `page_info` 子类（继承 `BasePageInfo`）上区分：
+
+| 分页器 | 输入（`query.pagination`） | `page_info` 类型 | `COUNT(*)` / `total` |
+|--------|----------------------------|------------------|----------------------|
+| `PagePager()`（默认） | `{"page": 1, "limit": 20}`（`PaginationSpec`） | `PageInfo`（`total`、`page`、`limit`、`offset`、`has_more`） | 始终执行 `COUNT(*)` |
+| `LimitOffsetPager(include_total=True)` | `{"limit": 20, "offset": 40}`（`LimitOffsetParams`） | `LimitOffsetPageInfo`（`total`、`limit`、`offset`、`has_more`） | 默认执行 `COUNT(*)`；`include_total=False` 改查 `limit + 1` 且 `total=None` |
+| `CursorPager(include_total=True)` | `{"cursor": "<token>", "limit": 20}`（`CursorParams`） | `CursorPageInfo`（`total`、`limit`、`has_more`、`next_cursor`） | 默认执行 `COUNT(*)`；`include_total=False` 跳过 `COUNT(*)` |
+
+### 内置 `LimitOffsetPager` 与 `CursorPager`
+
+```python
+from bedrock.database import CursorPager, LimitOffsetPager, compile_query_schema, db
+
+# Limit/Offset 分页（大表可传 include_total=False 跳过 COUNT(*)）
+offset_schema = compile_query_schema(Order, pager=LimitOffsetPager())
+page = offset_schema.paginate(db.session, query={"pagination": {"offset": 20, "limit": 10}})
+
+# 单向 Keyset 游标分页（不透明 URL-safe Base64 JSON）
+# 自动按模型声明的主键顺序追加 PK 作为 tie-breaker，避免 created_at 同值导致的丢行或重复行
+cursor_schema = compile_query_schema(Order, pager=CursorPager(include_total=False))
+first = cursor_schema.paginate(
+    db.session,
+    query={"sort": [{"field": "created_at", "direction": "desc"}], "pagination": {"limit": 20}},
+)
+second = cursor_schema.paginate(
+    db.session,
+    query={
+        "sort": [{"field": "created_at", "direction": "desc"}],
+        "pagination": {"cursor": first.page_info.next_cursor, "limit": 20},
+    },
+)
+```
+
+- 篡改、格式非法或与当前 `sort` 不匹配的游标会抛出 `InvalidCursorError`（`BadFilterFormatError` 子类）。
+- 跨表 / `JOIN` 查询（例如带联表的 `paginate_select()`）必须通过 `CursorPager(unique_keys=[...])` 显式声明行级唯一排序键（如 1-to-N 联表传 `unique_keys=["id", "event_id"]`）；未传时会直接抛出 `BadFilterFormatError`，避免主表主键不唯一导致静默漏行。
+- `CursorPager` 不支持 `group_by`、`DISTINCT`、`HAVING` 及聚合投影查询（会明确抛出 `BadFilterFormatError`），此类查询请使用 `PagePager` 或 `LimitOffsetPager`。
+- `QuerySchema.apply(stmt, query, paginate=True)` 会委托给 `pager.apply(stmt, ctx)`（页码/偏移分页拼 `OFFSET`/`LIMIT`，游标分页拼 keyset `WHERE` + 主键 tie-breaker `ORDER BY` + `LIMIT`）。
+
+### 外部自定义 Pager
+
+只需继承 `PaginationParams`、`BasePageInfo` 与 `BasePager`，`QuerySchema` 会自动继承并校验 `limit` 上限（`policy.default_limit` / `policy.max_limit`），并自动生成 Draft 2020-12 JSON Schema 与 FastAPI OpenAPI 文档：
+
+```python
+from typing import Any
+from pydantic import Field, StrictInt
+from sqlalchemy import Select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Session
+from bedrock.database import BasePageInfo, BasePager, PageResult, PaginationContext, PaginationParams, QuerySchema
+
+class WindowParams(PaginationParams):
+    window: StrictInt = Field(default=0, ge=0)
+
+class WindowPageInfo(BasePageInfo):
+    window: int
+
+class WindowPager(BasePager[WindowParams, WindowPageInfo]):
+    params_model = WindowParams
+    page_info_model = WindowPageInfo
+
+    def apply(self, stmt: Select[Any], ctx: PaginationContext[Any, WindowParams]) -> Select[Any]:
+        out = stmt.order_by(*ctx.order_clauses) if ctx.order_clauses else stmt
+        return out.fetch(None).offset(ctx.params.window * ctx.params.limit).limit(ctx.params.limit)
+
+    def paginate[T](self, session: Session, ctx: PaginationContext[T, WindowParams]) -> PageResult[T]:
+        total = ctx.fetch_total(session)
+        items = ctx.fetch_rows(session, self.apply(ctx.filtered_stmt, ctx))
+        offset = ctx.params.window * ctx.params.limit
+        return PageResult[T](
+            items=items,
+            total=total,
+            page_info=WindowPageInfo(total=total, limit=ctx.params.limit, has_more=total > offset + ctx.params.limit, window=ctx.params.window),
+        )
+
+    async def apaginate[T](self, session: AsyncSession, ctx: PaginationContext[T, WindowParams]) -> PageResult[T]:
+        total = await ctx.afetch_total(session)
+        items = await ctx.afetch_rows(session, self.apply(ctx.filtered_stmt, ctx))
+        offset = ctx.params.window * ctx.params.limit
+        return PageResult[T](
+            items=items,
+            total=total,
+            page_info=WindowPageInfo(total=total, limit=ctx.params.limit, has_more=total > offset + ctx.params.limit, window=ctx.params.window),
+        )
+
+window_schema = QuerySchema(Order, pager=WindowPager())
+```
+
+## 查询 JSON DSL 参考
+
+所有对象严格禁止未知键（`additionalProperties: false`）。顶层 `QuerySpec` 支持 4 个可选键：
+
+- `filter`：过滤条件树
+- `sort`：多字段排序列表 `{"field": "<name>", "direction": "asc" | "desc", "nulls": "first" | "last" | null}`
+- `search`：全文搜索词（始终出现在导出 JSON Schema 中；未声明 `__searchable_columns__` 时为 no-op）
+- `pagination`：随分页器而定的分页对象（默认 `PagePager` 为 `{"page": 1, "limit": policy.default_limit}`，`LimitOffsetPager` 为 `{"limit", "offset"}`，`CursorPager` 为 `{"cursor", "limit"}`，或外部自定义 `PaginationParams` 字段）
+
+### 逻辑组合节点
+
+```json
+{
+  "logic": "and",
+  "conditions": [
+    { "field": "status", "op": "eq", "value": "paid" },
+    {
+      "logic": "not",
+      "condition": {
+        "logic": "or",
+        "conditions": [
+          { "field": "total", "op": "lt", "value": 10 },
+          { "relation": "items", "quantifier": "none" }
+        ]
+      }
+    }
+  ]
+}
+```
+
+### 按列类型推导的标准操作符
+
+| 列类型 | 默认允许操作符 | 值类型与行为 |
+|--------|----------------|--------------|
+| 数值（`Integer`、`Float`、`Numeric`） | `eq`、`ne`、`gt`、`gte`、`lt`、`lte`、`in`、`between` | 严格数值（拒绝布尔值）；`between` 要求 2 元定长数组 |
+| 字符串（`String`、`Text`） | `eq`、`ne`、`in`、`contains`、`icontains`、`starts_with`、`ends_with` | 自动转义 `%`、`_`、`\`；原始 `like` / `ilike` 默认关闭，按需通过 `FieldPolicy(allow_raw_like=True)` 开启 |
+| 布尔 | `eq`、`ne` | 严格布尔值 |
+| 日期时间（`DateTime`、`Date`、`Time`） | `eq`、`ne`、`gt`、`gte`、`lt`、`lte`、`in`、`between` | ISO-8601 字符串；`DateTime` 自动按列 `timezone=True\|False` 归一化 |
+| 枚举 / UUID | `eq`、`ne`、`in` | 导出为 `enum` / `format: "uuid"` |
+| 可空列（任意类型） | 追加 `is_null`、`is_not_null` | 一元操作符禁止传 `value` 键 |
+
+### 关系过滤（统一编译为 `EXISTS`）
+
+```json
+// 集合关系（一对多 / 多对多）："some" | "none" | "every"
+{ "relation": "items", "quantifier": "some", "filter": { "field": "sku", "op": "starts_with", "value": "PRO_" } }
+
+// 无关联子项（"some" / "none" 可省略 filter；"every" 必传 filter）
+{ "relation": "items", "quantifier": "none" }
+
+// 标量关系（多对一 / 一对一）："has" | "missing"
+{ "relation": "customer", "quantifier": "missing" }
+
+// 多对一点号语法糖（自动展开为 Order.customer.has(...)）
+{ "field": "customer.name", "op": "eq", "value": "Ann" }
+```
+
+> 注：`every` 编译为 `~rel.any(clause.is_not(True))`，遵循标准 SQL 空真（vacuous truth）语义（没有子记录的父行也会匹配），同时将子表中的 `NULL` 正确视为不满足条件，避免 SQL 三值逻辑漏判。
+
+### 安全预算与异常
+
+| 预算项 | 默认值 | 超限时抛出 |
+|--------|--------|------------|
+| `max_depth` | `16` | `FilterDepthExceededError` |
+| `max_nodes` | `100` | `BadFilterFormatError` |
+| `max_relation_depth` | `2` | `FilterDepthExceededError`（`relation` 节点与点号路径共享跳数上限） |
+| `max_in_items` | `200` | `BadFilterFormatError` |
+| `max_limit` | `1000` | `InvalidQueryLimitError` |
+| 游标令牌 | 合法且匹配当前 `sort` 的 URL-safe Base64 JSON | `InvalidCursorError`（`BadFilterFormatError` 子类） |
+
+## 旧版 `search_filter_sort_paginate`（已弃用）
+
+`bedrock.database.service.search_filter_sort_paginate`、`asearch_filter_sort_paginate`、`build_query` 与旧版 `filter_specs` 在 `0.4.x` 中原样保留并发出 `DeprecationWarning`，计划于 `0.5.0` 移除。请迁移至 `compile_query_schema`、`paginate_models` / `apaginate_models`、`paginate_fields` / `apaginate_fields` 与 `paginate_select` / `apaginate_select`。

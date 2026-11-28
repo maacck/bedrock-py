@@ -1,0 +1,162 @@
+---
+title: Session 管理
+description: 上下文局部同步与异步事务作用域、入口装饰器、独立事务以及关闭 Engine
+---
+
+Bedrock 使用由 `ContextVar` 支撑的上下文局部 session。新异步任务会继承创建者的上下文，包括已绑定的 session；应在任务和请求边界清理或单独建立绑定，避免并发共享 session。
+
+## 工作方式
+
+`SessionFactory` 对 SQLAlchemy 的 `sessionmaker` 做了封装。`db.session` 只返回 `ContextVar` 中已绑定的 session，从不自行创建。绑定由入口负责：
+
+| 入口 | 绑定方式 |
+|------|----------|
+| 脚本、CLI 命令、自定义 worker、WebSocket 处理函数、启动钩子 | `with db.session_scope():` 或 `@db.session_scope()` |
+| FastAPI HTTP 请求 | `bedrock-fastapi` 的 `DbSessionMiddleware` / `AsyncDbSessionMiddleware` |
+| 测试 | 在测试中 `with db.session_scope():`；`bedrock.testing` 的 `db_session` fixture 负责回滚 |
+| 由其他框架管理的 session | `db.set_session(...)` |
+
+Service 读取 `db.session` 并负责提交，自身不打开作用域：
+
+```python
+from bedrock.database import db
+
+# service.py
+def create_product(name: str) -> None:
+    db.session.add(Product(name=name))
+    db.session.commit()
+
+# 入口
+db.init()
+with db.session_scope():
+    create_product("Widget")
+
+create_product("Gadget")  # 抛出 SessionNotBoundError：没有打开作用域
+```
+
+## 使用 `session_scope()` 管理事务
+
+推荐使用 `session_scope()` 来管理事务。它会创建一个新 session，绑定到当前上下文，并在正常退出时自动提交，异常时自动回滚：
+
+```python
+from bedrock.database import db
+
+db.init()
+
+# 成功时自动提交
+with db.session_scope() as session:
+    product = Product(name="Widget")
+    session.add(product)
+    # 块正常退出时 session 自动提交
+
+# 异常时自动回滚
+try:
+    with db.session_scope() as session:
+        session.add(Product(name="Gadget"))
+        raise ValueError("出错了")  # 回滚
+except ValueError:
+    pass  # "Gadget" 永远不会被持久化
+```
+
+**关键行为：**
+- 将 session 绑定到 `ContextVar`，块内可正常使用 `db.session`
+- 正常退出时提交，任何异常（包括 `BaseException`）时回滚
+- 退出时始终关闭 session 并重置 `ContextVar`
+- 如果在已绑定 session 的上下文中调用会抛出 `SessionAlreadyBoundError`（`BedrockExc` 的子类，同时也是 `RuntimeError`），防止嵌套
+
+## 装饰入口函数
+
+`session_scope()` 和 `asession_scope()` 也可以用作装饰器。每次调用都会打开新的作用域，所以每次调用都有自己的 session 和事务。装饰器可以在 `db.init()` 之前应用，因为数据库只在函数被调用时才会用到：
+
+```python
+from bedrock.database import db
+
+@db.session_scope()
+def import_products(path: str) -> None:
+    for name in read_names(path):
+        db.session.add(Product(name=name))
+
+@db.asession_scope()
+async def sync_inventory() -> None:
+    await refresh_stock(db.asession)
+```
+
+注意括号：写 `@db.session_scope()`，不是 `@db.session_scope`。函数返回值原样返回。不要装饰会在已绑定 session 时被调用的函数（例如请求内调用的 service）：嵌套的作用域会抛出 `SessionAlreadyBoundError`。
+
+## 使用 `independent_session()` 进行独立事务
+
+对于需要写入但不影响当前事务的副作用操作，使用 `independent_session()`。它创建一个**不**绑定到 `ContextVar` 的隔离 session：
+
+```python
+from bedrock.database import db
+
+db.init()
+
+with db.session_scope() as session:
+    # 主事务
+    order = Order(total=100)
+    session.add(order)
+
+    # 在独立事务中写入审计日志
+    with db.independent_session() as audit_session:
+        audit_log = AuditLog(action="order_started")
+        audit_session.add(audit_log)
+        # 独立提交 — 不影响外部 session
+
+    # db.session 仍然返回外部 session
+    assert db.session is session
+```
+
+**`independent_session()` 适用场景：**
+- 审计日志（即使主事务回滚也必须持久化）
+- 以独立事务发布事件（事务性 outbox 则必须与主事务共享同一事务）
+- 需要读取调用方未提交数据之外的数据
+- 需要独立事务生命周期的后台任务
+
+## 异步 Session
+
+异步服务使用带 `a` 前缀的同一套作用域规则。设置 `DATABASE_ASYNC_DRIVER`，并安装提供该驱动的 extra：
+
+| 驱动 | 安装 |
+|--------|---------|
+| `aiosqlite` | `pip install 'bedrock-core[async-sqlite]'` |
+| `asyncpg` | `pip install 'bedrock-core[async-postgresql]'` |
+| `asyncmy` | `pip install 'bedrock-core[async-mysql]'` |
+| `psycopg`、`aiomysql` | 直接安装驱动包（`pip install psycopg` / `pip install aiomysql`） |
+
+`db.asession_scope()` 在正常退出时提交，在任何异常时回滚，并且在当前上下文已经绑定异步 session 时拒绝嵌套。`db.aindependent_session()` 不会绑定 `db.asession`。异步 session 使用单独的上下文变量，同一任务里的同步 session 保持不变。缺少驱动包时会抛出 `DatabaseConfigurationError`，并在错误信息中写明需要安装的 extra。
+
+```python
+from bedrock.database import db, DbSettings
+
+db.init(settings=DbSettings(ASYNC_DRIVER="aiosqlite"))
+
+async with db.asession_scope() as session:
+    session.add(Product(name="Widget"))
+
+await db.aclose()
+db.close()
+```
+
+## 关闭 Engine
+
+同步 engine 调用 `db.close()`，异步 engine 调用 `await db.aclose()`。两边都创建过时，两个都要调用。对同一侧重复调用不会再做额外释放。`close()` 之后，同步访问会抛出 `DatabaseNotConfiguredError`，直到再次 `db.init()`；已经创建的异步 engine 仍可使用。`aclose()` 之后，同步 engine 仍可使用；若同步配置还在，下一次异步访问会重新构建异步 engine。这两个方法不会关闭模块注册表。停止进程时请调用 `bedrock.shutdown()`（或 `await bedrock.ashutdown()`）：它会先停止所有模块，再各调用一次 `db.close()` 以及（存在异步 engine 时）`db.aclose()`，因此即使某个模块失败，两个连接池也会在所有模块钩子之后被释放。从未初始化的数据库不会被处理。在运行中的事件循环里且存在异步 engine 时，请使用 `await bedrock.ashutdown()`；`bedrock.shutdown()` 会在改变任何状态之前抛出 `ModuleAsyncRequiredError`。
+
+`db.init()` 会释放上一个同步 engine。已经打开过连接的异步 engine 不会在这里同步释放：那种关闭发生在事件循环之外，会以 `MissingGreenlet` 失败。需要关闭该异步 engine 时，先 `await db.aclose()` 再调用 `db.init()`。尚未打开连接的异步 engine 会在 `init()` 中释放。
+
+## 绑定外部 Session
+
+当你使用会自行管理 session 的框架（例如 FastAPI 的依赖注入）时，可以绑定一个现有 session：
+
+FastAPI 用户请优先使用 [FastAPI 集成](/docs/integrations/fastapi#数据库-session)中的数据库 session 中间件。
+
+```python
+from bedrock.database import db
+
+# Bind a session from an external source
+db.set_session(framework_session)
+try:
+    product = db.session.query(Product).first()
+finally:
+    db.clear_session()  # 关闭 session，然后解绑
+```

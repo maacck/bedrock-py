@@ -1,0 +1,226 @@
+---
+title: Migrations
+description: Module-scoped bedrock_migrations ledger, table ownership, cross-module dependencies, adopt, squash, and locks
+---
+
+Bedrock runs migrations itself. Each app has its own set of migration scripts, identified by its import path, and executed migrations are recorded in the `bedrock_migrations` table with primary key `(app, revision)`. Scripts are executed and generated through Alembic's library API (operations and autogenerate); Alembic's command layer, `env.py`, branch labels, and `alembic_version` are not used. The `MigrationsManager` handles revision creation, dependency-aware upgrades and downgrades, installation, and adoption of legacy databases.
+
+For the complete migration CLI reference, see [CLI Reference — Database Commands](/docs/guides/cli#database-commands-bedrock-db).
+
+## Table Ownership
+
+Autogeneration resolves ownership for every table in the shared metadata. Ordinary ORM models need no extra declaration: the model's defining Python package selects the longest matching loaded Bedrock module import path. Models in imported domain packages are included; importing or re-exporting another module's model does not transfer ownership. Import needed domain models from `models.py`; Bedrock does not discover unimported model files.
+
+Unmapped `Table` objects, such as association tables, declare their owner through SQLAlchemy's `info` dictionary. For example, in `myapp.tags.models`, after the users module has defined `users` in the shared metadata:
+
+```python
+from sqlalchemy import Column, ForeignKey, Integer, String, Table
+from bedrock.database import BedrockModel
+
+user_labels = Table(
+    "user_labels",
+    BedrockModel.metadata,
+    Column("user_id", Integer, ForeignKey("users.id"), primary_key=True),
+    Column("label", String(50), primary_key=True),
+    info={"bedrock_module": "myapp.tags"},
+)
+```
+
+Declare `myapp.users` in the tags module's manifest `depends_on`. Cross-module foreign keys retain access to the complete metadata, but do not grant ownership of their referenced tables. Migration ordering between modules is recorded in the scripts' `depends_on` (see [Cross-Module Dependencies](#cross-module-dependencies)).
+
+An ORM model may also declare `__table_args__ = {"info": {"bedrock_module": "myapp.tags"}}`; this must agree with its defining module. Missing ownership, invalid declarations, unloaded owners, owners without a `models` module, and conflicting mappings raise `MigrationError` before a revision is written. There is no fallback to all tables. Keep all mappings of one table in one module: same-module single-table inheritance is supported, cross-module single-table mappings are rejected, and joined-table inheritance assigns each local table separately.
+
+Every mapped class sharing a table must resolve to an owner; one resolved class does not cover an unresolved class. A valid explicit table declaration can supply missing ownership, but cannot override a known conflict between loaded modules.
+
+Ownership is a per-operation snapshot, not a database ownership table or a global registration hook. Table identities include schema; explicit and implicit default schemas refer to the same physical table, and duplicate declarations of that physical table are rejected. Reflection is restricted to the target's schemas and tables, and metadata objects are filtered too. An empty owned-table set creates no tables.
+
+When a model is removed, the remaining database table's historical owner cannot be inferred. It is not automatically claimed or dropped: write a reviewed explicit migration with `bedrock db revision <app> -m "drop obsolete table" --no-autogenerate`. Historical upgrade/downgrade, manual revisions, and offline SQL rendering do not require a current ownership snapshot. Raw Alembic calls without Bedrock's managed context retain the full metadata view and are outside this isolation guarantee.
+
+## Programmatic Usage
+
+```python
+from bedrock.module import apps
+from bedrock.database import MigrationsManager
+
+migrations = MigrationsManager(
+    registry=apps,
+    database_url=db.settings.SQLALCHEMY_DATABASE_URI,
+)
+
+# Create a new revision
+migrations.revision("myapp.users", "add email column")
+
+# Apply migrations
+migrations.upgrade("myapp.users")
+
+# Check current state
+migrations.current("myapp.users")
+
+# View history
+history = migrations.get_history("myapp.users")
+```
+
+## Migration Scripts
+
+Each module keeps its scripts in `<package_dir>/migrations/*.py`; files starting with `_` are skipped. A script declares a string `revision`, `down_revision` (a revision of the same module, or `None`), and optionally `depends_on`. The file stem is the revision name. `bedrock db revision` names new revisions `0001_initial`, `0002_add_email`, and so on: it takes the module's highest number plus one and a slug of the message (the full name is at most 64 characters). Existing random revision IDs are kept as they are; the next generated name continues the numbering and uses the old head as its `down_revision`. Revision names only need to be unique within a module, so two modules can each have `0001_initial`.
+
+`branch_labels` is ignored, so scripts that still declare it keep loading. A script that never defines `revision`, a `down_revision` that is not a revision of the same module, a duplicate revision, or a dependency cycle raises `MigrationError`. A migration runs in its own transaction. SQLite runs DDL inside it; MySQL and MariaDB cannot roll back DDL, so after a failure compare the real schema with the version table before retrying. Scripts must not commit on their own or use `autocommit_block()`; review pending scripts for this before upgrading.
+
+## Cross-Module Dependencies
+
+`depends_on` lists qualified `app:revision` references, for example `("myapp.users:0002_email",)`. Bare revision names are rejected, and the target must belong to a module that is a direct manifest `depends_on` of the owner. Upgrading a module first applies every migration it depends on, in dependency order, and nothing else: unrelated modules and later revisions of a dependency stay untouched.
+
+`bedrock db revision` writes these references for you. It records the heads of the modules that the new revision depends on, and repeats a reference only when that module has a newer head. Autogeneration requires the module to be at head (`bedrock db upgrade <app>` first); any generation requires a single head.
+
+A generated revision is a reviewable draft: read it, edit it, and commit it with the module. At run time Bedrock uses only the dependency graph declared in the committed scripts (`down_revision` plus qualified `depends_on`). It never infers ordering from foreign keys, table names, or the current models, so add a `depends_on` entry by hand when a script needs another module's tables that generation did not record.
+
+## Rolling Back
+
+`downgrade` undoes a module's migrations in reverse dependency order. If other modules' applied migrations depend on them, the command stops with `MigrationError` naming those migrations and changes nothing. Pass `cascade=True` (`--cascade` on the CLI) to roll back the dependent modules first. Dependents that are not loaded are always an error, even with `cascade`: load those modules (`--load <app>` on the CLI) and roll them back first. Rolling back never touches unrelated modules, even when they use the same revision names.
+
+To remove a module's schema from the CLI, use `bedrock db downgrade <app> base`; there is no `bedrock db uninstall` command. The Python `MigrationsManager.uninstall()` remains and is equivalent to downgrading the module to base.
+
+## First Install
+
+`ensure_schema()` runs the module's migration scripts up to head, together with the migrations they depend on, and returns `"created"` (first run for the module), `"upgraded"`, or `"up-to-date"`. It no longer creates tables from metadata with `create_all` and a stamp, so a module that has models but no migration scripts raises `MigrationError`: generate the initial migration first with `bedrock db revision <app> -m "initial schema"`.
+
+Table ownership applies when a revision is generated. A successful installation now means the recorded scripts really ran, so a rollback executes the `downgrade()` of scripts whose `upgrade()` ran.
+
+`bedrock app install <target>` calls `ensure_schema()` for the target only. The migration closure (the target's migrations plus the migrations they depend on in other modules) is applied either way; `--with-dependencies` additionally runs each dependency's own schema step and installation hooks, and `--skip-migrations` skips only the schema step.
+
+## Adopting an Existing Database
+
+Databases created by earlier Bedrock versions record migrations in Alembic's `alembic_version` table. Every migration command refuses to run on such a database until you adopt it once. Alembic's native CLI must no longer be used on Bedrock-managed databases.
+
+1. Pause migration commands, and back up the database, the deployed package, and the original migration scripts. Record `alembic_version` and the actual schema and data of every environment.
+2. Load every module that appears in `alembic_version` and run `bedrock db adopt <app> ...`. Each old head must belong to exactly one loaded module. Bedrock resolves it through that deployment's own revision graph; today's manifest edges are not evidence of what ran historically. If a head is missing, ambiguous, or its history cannot be resolved, nothing is written; fix the scripts or the loaded modules and retry.
+3. `adopt` writes one `origin = 'baseline'` row for every revision up to those heads into a staging table, verifies it, and renames it atomically to `bedrock_migrations`. The old `alembic_version` table is left as an audit snapshot. A command that is interrupted before publishing leaves only staging state and can be retried; an already published table is never dropped or re-imported.
+4. Baseline rows are protected. They mean "assumed to be in place", not "executed by Bedrock": their scripts are never replayed, and a downgrade or cascade that would need to undo a baseline row fails before the first DDL statement. Rolling back to the baseline itself is allowed. A suspected missed data migration needs manual reconciliation; adoption does not replay it.
+5. After the new version has written to the database, do not switch back to the old program against the same data. Restore the matching database, program, and migration files together; never let old code reread `alembic_version`.
+
+### Before adoption: qualify references, preserve published history
+
+Use the **actually deployed scripts**. Record all heads from `SELECT version_num FROM alembic_version` and locate each in its owner's `migrations/` directory. Stop on missing scripts or ambiguous owners. Do not renumber published random IDs to `0001_*`.
+
+For example, suppose an orders script declares `revision = "c91a"`, `down_revision = "c900"` and `depends_on = "a12f"`. After verifying from the original release that `a12f` belongs to `myapp.auth`, change only the reference syntax in the new deployment copy:
+
+```python
+revision = "c91a"
+down_revision = "c900"
+depends_on = ("myapp.auth:a12f",)
+```
+
+Preserve `upgrade()`, `downgrade()`, local parent IDs and every parent of a merge. Existing `branch_labels` may stay; they do not establish ownership. `myapp.auth` must be a direct dependency in the orders manifest. Do not substitute today's upstream head for an unknown historical dependency or regenerate old scripts from current models. If the graph cannot be partitioned without changing its meaning, reconcile it manually; do not stamp or edit database rows to bypass validation.
+
+On a restored database copy, exercise normal script loading, adopt, then verify the position:
+
+```bash
+bedrock db history myapp.orders
+bedrock db adopt myapp.auth myapp.orders
+bedrock db current myapp.orders
+bedrock db check myapp.orders
+```
+
+Compare `current` with the original position for that module. `check` reporting `behind` is expected if the release contains pending scripts. Correct actual differences with new, unapplied migrations; do not replay the baseline. These steps import `alembic_version`; they are not an in-place upgrade procedure for an experimental Bedrock ledger.
+
+### Adding a new module registry after adoption
+
+Use `adopt` for existing history. Use `init-ledger` only to add a genuinely new registry after adoption:
+
+| Situation | Command |
+|-----------|---------|
+| Legacy database, nothing adopted yet | `bedrock db adopt <app> ...` |
+| Adopted database, new revisions to apply | `bedrock db upgrade <app>` |
+| Adopted database; independent modules with no prior migrations or business tables | `bedrock db init-ledger <root> [<root> ...] --adopted-ledger <source-name>` |
+
+```bash
+export DATABASE_MIGRATION_VERSION_TABLE=billing_migrations
+bedrock db init-ledger myapp.billing --adopted-ledger bedrock_migrations
+```
+
+Programmatic equivalent: `mgr.init_ledger(adopted_ledger="bedrock_migrations")` on a manager built with the new registry and the target `version_table`. It returns `None`.
+
+`init-ledger` creates an empty target ledger. It neither imports baseline rows nor executes migrations; ordinary `upgrade` still refuses to initialize beside legacy history. The operator must verify there is no prior handwritten schema or unrecorded data migration.
+
+Preflight, in order:
+
+1. Pause migration commands and take a verified backup of the database, the deployed package, and the migration scripts.
+2. Confirm the source ledger was published by `adopt` and covers the core legacy heads; the new modules must be disjoint.
+3. Load exactly the new registry's modules and rehearse on a restored copy.
+
+It refuses, writing nothing, when any of the following holds:
+
+- the legacy `alembic_version` table is missing, or the source ledger is not a valid adopted ledger with evidence for the old heads;
+- the source ledger already has rows for a loaded module;
+- a table owned by a loaded module's models already exists in the database;
+- the target ledger, or a staging table of the source or target, already exists.
+
+Fix the reported cause and rerun; never create or edit ledger rows by hand to get past a refusal.
+
+## Squashing migrations
+
+Prepare and rehearse in development. A squash replaces a linear range, not a schema diff. Reviewing transaction boundaries matters: one new script runs as one migration, not three. Only use trusted module hooks and migration imports; they can have side effects.
+
+1. Generate the candidate outside the active migrations directories. Review it, then replace all listed old files together. Replay the old and new paths against equivalent seeded databases: compare rows, indexes, constraints, and downgrade behavior. Unloaded and unapplied third-party plugins cannot be checked.
+2. Publish the bridge release with the old scripts. For a squash of `0002_add` through `0004_finalize`, partially applied databases must first reach `0004_finalize` on the old release; upgrade refuses a partial or conflicting range. Keeping its ID preserves dependents such as `0005_ship`.
+3. Deploy the new code and run the ordinary upgrade (`bedrock db upgrade`, or `ensure_schema` at startup). Complete approved ranges in the target's ancestry are reconciled before business migrations without replay: a fresh database executes the replacement, a current one skips it. Read-only commands never mutate. For a handover or recovery, pause writes and migration/install jobs, back up, then use `bedrock db squash apply` to preview and `--apply` to switch manually, confirming the database, ledger and affected rows first.
+
+Retired IDs remain reserved when generating later revisions. Do not use `head` or `base` as rename targets. Adopt ambiguous bare Alembic revisions on the bridge release. Manual replacements need synchronous, non-generic `upgrade()` and `downgrade()` functions.
+
+A failed business migration on MySQL or MariaDB may already have committed DDL: inspect the schema before retrying. Retrying a ledger switch is different. Restoring old history requires matching code, scripts and a backup; after business writes resume, an old backup alone loses new data.
+
+## Existing Migration Safety
+
+Bedrock does not rewrite already generated scripts. Before upgrading or rolling back an affected module:
+
+1. Pause these operations, back up the database and migration files, and record both `alembic_version` (or `bedrock_migrations`) and the actual schema/data state in every deployed environment.
+2. Review both `upgrade()` and `downgrade()` in core and plugin modules, including tables, columns, indexes, constraints, and raw SQL. A script declaring the right module is not evidence of safe table operations, and autogeneration filters are not a script execution sandbox.
+3. Regenerate or correct an unpublished revision only after confirming no environment has applied it. For published or applied revisions, coordinate a reviewed repair across deployments; do not casually delete revisions or change their names. A new revision alone cannot neutralize a dangerous older downgrade that a rollback will still reach.
+4. After a failed upgrade, inspect residual DDL even if no revision was recorded. If data was already deleted, restore it through verified backups or database recovery; recreating tables does not restore rows.
+5. Verify the actual install/upgrade/downgrade paths on an isolated copy of production data before resuming operations.
+
+## Migration Lock
+
+`upgrade` and `downgrade`, including `ensure_schema()` and `uninstall()`, take a database lock so two processes do not migrate the same database together.
+
+| Dialect | Lock | Wait |
+|---------|------|------|
+| PostgreSQL | `pg_try_advisory_lock` | Polled until `DATABASE_MIGRATION_LOCK_TIMEOUT` (default 30 seconds) |
+| MySQL, MariaDB | `GET_LOCK` | Same timeout, rounded up to whole seconds |
+| SQLite | none | Run migrations from a single process |
+
+A timeout raises `MigrationError`. SQLite has no shared lock in this manager.
+
+## Custom Version Table and Independent Module Sets
+
+The version table defaults to `bedrock_migrations`. `MigrationsManager(..., version_table="...")` and the host setting `DATABASE_MIGRATION_VERSION_TABLE` change it. The name must be a lowercase simple SQL identifier (`[a-z_][a-z0-9_]*`) of at most 57 characters. The name itself and `<name>_adopt` (the adopt staging table) are reserved, and a name must not end in `_adopt`.
+
+Programmatic code may run several independent registries against one database, each with its own ledger:
+
+```python
+from bedrock.database import MigrationsManager
+from bedrock.module.registry import ModuleRegistry
+
+billing, search = ModuleRegistry(), ModuleRegistry()
+billing.populate(["myproject.modules.billing"])
+search.populate(["myproject.modules.search"])
+
+url = "postgresql://user:pass@localhost/mydb"
+MigrationsManager(billing, url, version_table="billing_migrations").ensure_schema("myproject.modules.billing")
+MigrationsManager(search, url, version_table="search_migrations").ensure_schema("myproject.modules.search")
+```
+
+Rules:
+
+- The module sets must be independent: their model tables are disjoint and no migration depends on a module in another ledger. Bedrock does not check this across ledgers.
+- All managers on one database share the same migration lock, so they serialize against each other.
+- The host application and the `bedrock` CLI use a single configured root set and one ledger, chosen by `DATABASE_MIGRATION_VERSION_TABLE`. There is no CLI flag or manifest field for it.
+  ```bash
+  DATABASE_MIGRATION_VERSION_TABLE=billing_migrations bedrock db upgrade myproject.modules.billing
+  ```
+- Never rename a table to switch ledgers. Changing the name points Bedrock at a different (possibly empty) ledger, so already-applied migrations look pending.
+- `adopt` imports the *whole* legacy `alembic_version` baseline into the configured ledger, so adopt with every module loaded. A module set that owns only part of the legacy history cannot adopt it.
+
+## `bedrock db check`
+
+`bedrock db check <app>` prints the current and head revisions for the app and for every other installed app that already has migration scripts. It does not change the database and does not create the `bedrock_migrations` table. The process exits with status 1 when any reported module is `behind` or `unknown`. `unknown` includes a database that has never been migrated. Use the command as a deploy gate before serving traffic. See [CLI Reference — Database Commands](/docs/guides/cli#database-commands-bedrock-db).
