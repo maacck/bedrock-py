@@ -1271,3 +1271,88 @@ class TestCustomExternalPager:
 
         StrUuidBase.registry.dispose()
         engine.dispose()
+
+    def test_cursor_left_outer_join_non_nullable_right_column_handles_unmatched_nulls(self):
+        from sqlalchemy.orm import DeclarativeBase, aliased
+
+        class OuterBase(DeclarativeBase):
+            pass
+
+        class OuterChild(OuterBase):
+            __tablename__ = "outer_children"
+            id = Column(Integer, primary_key=True)
+            rank = Column(Integer, nullable=False)  # NOT NULL on child table, but NULL on unmatched LEFT OUTER JOIN
+
+        class OuterParent(OuterBase):
+            __tablename__ = "outer_parents"
+            __filterable_fields__ = ["code"]
+            id = Column(Integer, primary_key=True)
+            code = Column(String(20), nullable=False)
+            child_id = Column(Integer, ForeignKey("outer_children.id"), nullable=True)
+
+        engine = create_engine("sqlite:///:memory:")
+        OuterBase.metadata.create_all(engine)
+
+        with Session(engine) as session:
+            session.add_all(
+                [
+                    OuterChild(id=10, rank=20),
+                    OuterChild(id=11, rank=10),
+                    OuterParent(id=1, code="P1", child_id=10),  # rank=20
+                    OuterParent(id=2, code="P2", child_id=None),  # rank=NULL
+                    OuterParent(id=3, code="P3", child_id=11),  # rank=10
+                    OuterParent(id=4, code="P4", child_id=None),  # rank=NULL
+                ]
+            )
+            session.commit()
+
+            child_alias = aliased(OuterChild)
+            stmt = select(
+                OuterParent.id.label("id"),
+                OuterParent.code.label("code"),
+                child_alias.rank.label("child_rank"),
+            ).outerjoin(child_alias, OuterParent.child_id == child_alias.id)
+
+            policy = QueryPolicy(
+                extra_fields={"child_rank": FieldPolicy(column=child_alias.rank, filterable=True, sortable=True)}
+            )
+            schema = compile_query_schema(OuterParent, policy=policy, pager=CursorPager(unique_keys=["id"]))
+
+            # 1. Explicit nulls="last" (and default nulls_first=False): non-nulls first, then both unmatched NULL rows.
+            seen_last: list[tuple[int, int | None]] = []
+            cursor = None
+            while True:
+                page = schema.paginate_select(
+                    session,
+                    stmt,
+                    {
+                        "sort": [{"field": "child_rank", "direction": "asc", "nulls": "last"}],
+                        "pagination": {"cursor": cursor, "limit": 1},
+                    },
+                )
+                seen_last.extend((row["id"], row["child_rank"]) for row in page.items)
+                if not page.page_info.has_more:
+                    break
+                cursor = page.page_info.next_cursor  # type: ignore[attr-defined]
+            assert seen_last == [(3, 10), (1, 20), (2, None), (4, None)]
+
+            # 2. Explicit nulls="first": both unmatched NULL rows first (testing NULL -> NULL and NULL -> non-null cursors).
+            seen_first: list[tuple[int, int | None]] = []
+            cursor = None
+            while True:
+                page = schema.paginate_select(
+                    session,
+                    stmt,
+                    {
+                        "sort": [{"field": "child_rank", "direction": "desc", "nulls": "first"}],
+                        "pagination": {"cursor": cursor, "limit": 1},
+                    },
+                )
+                seen_first.extend((row["id"], row["child_rank"]) for row in page.items)
+                if not page.page_info.has_more:
+                    break
+                cursor = page.page_info.next_cursor  # type: ignore[attr-defined]
+            assert seen_first == [(2, None), (4, None), (1, 20), (3, 10)]
+
+        OuterBase.registry.dispose()
+        engine.dispose()

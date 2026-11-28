@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.sql.base import ExecutableOption
 from sqlalchemy.sql.elements import ColumnElement
 from sqlalchemy.sql.functions import FunctionElement
+from sqlalchemy.sql.selectable import Join
 from sqlalchemy.sql.sqltypes import NullType
 from sqlalchemy.sql.visitors import iterate as sql_iterate
 
@@ -421,6 +422,7 @@ class _CursorSortKey:
     nulls: NullsOrder | None
     field: ResolvedField | None
     nulls_first: bool
+    nullable: bool = True
 
 
 def _encode_cursor_scalar(value: Any) -> Any:
@@ -446,7 +448,7 @@ def _decode_cursor_scalar(raw: Any, key: _CursorSortKey) -> Any:
     """Decode and validate a single scalar value extracted from a cursor token."""
     field = key.field
     if raw is None:
-        if field is not None and not field.nullable:
+        if not key.nullable:
             raise InvalidCursorError(f"Cursor value for non-nullable sort key `{key.name}` cannot be null.")
         return None
 
@@ -548,7 +550,6 @@ def _decode_cursor_token(token: str, keys: Sequence[_CursorSortKey], fingerprint
 def _keyset_strict_after(key: _CursorSortKey, val: Any) -> ColumnElement[bool]:
     """Build the strict ``>``/``<`` predicate for one sort key with NULL and boolean ordering."""
     expr = key.expr
-    nullable = key.field is None or key.field.nullable
 
     if val is None:
         return expr.is_not(None) if key.nulls_first else false()
@@ -561,7 +562,7 @@ def _keyset_strict_after(key: _CursorSortKey, val: Any) -> ColumnElement[bool]:
     else:
         cmp_clause = expr > val if key.direction == "asc" else expr < val
 
-    if nullable and not key.nulls_first:
+    if key.nullable and not key.nulls_first:
         return or_(cmp_clause, expr.is_(None))
     return cmp_clause
 
@@ -573,6 +574,50 @@ def _keyset_equal(key: _CursorSortKey, val: Any) -> ColumnElement[bool]:
     if isinstance(val, bool):
         return key.expr.is_(val)
     return key.expr == val
+
+
+def _collect_leaf_froms(from_obj: Any, out: set[Any]) -> None:
+    """Collect deannotated leaf selectables underneath *from_obj*."""
+    if isinstance(from_obj, Join):
+        _collect_leaf_froms(from_obj.left, out)
+        _collect_leaf_froms(from_obj.right, out)
+    else:
+        out.add(from_obj._deannotate() if hasattr(from_obj, "_deannotate") else from_obj)
+
+
+def _collect_outer_joined_froms(stmt: Select[Any]) -> set[Any]:
+    """Return all leaf selectables appearing on a nullable side of an ``OUTER JOIN``."""
+    nullable_froms: set[Any] = set()
+
+    def _walk(node: Any) -> None:
+        if isinstance(node, Join):
+            if node.full:
+                _collect_leaf_froms(node.left, nullable_froms)
+                _collect_leaf_froms(node.right, nullable_froms)
+            elif node.isouter:
+                _collect_leaf_froms(node.right, nullable_froms)
+                _walk(node.left)
+            else:
+                _walk(node.left)
+                _walk(node.right)
+
+    for from_obj in stmt.get_final_froms():
+        _walk(from_obj)
+    return nullable_froms
+
+
+def _expr_is_outer_nullable(expr: Any, outer_froms: set[Any]) -> bool:
+    """Return ``True`` when *expr* references any selectable on the nullable side of an ``OUTER JOIN``."""
+    if not outer_froms:
+        return False
+    target = expr.__clause_element__() if hasattr(expr, "__clause_element__") else expr
+    for element in sql_iterate(target):
+        table = getattr(element, "table", None)
+        if table is not None:
+            deannotated = table._deannotate() if hasattr(table, "_deannotate") else table
+            if table in outer_froms or deannotated in outer_froms:
+                return True
+    return False
 
 
 def _has_aggregate_projection(stmt: Select[Any]) -> bool:
@@ -729,6 +774,7 @@ class CursorPager(BasePager[CursorParams, CursorPageInfo]):
             )
 
         resolved = ctx.resolved
+        outer_froms = _collect_outer_joined_froms(stmt)
         keys: list[_CursorSortKey] = []
         seen: set[str] = set()
 
@@ -739,7 +785,7 @@ class CursorPager(BasePager[CursorParams, CursorPageInfo]):
             field_meta = resolved.fields.get(item.field)
             if field_meta is None or field_meta.expression is not expr:
                 field_meta = _infer_sort_expression_field(item.field, expr)
-            nullable = field_meta is None or field_meta.nullable
+            nullable = (field_meta is None or field_meta.nullable) or _expr_is_outer_nullable(expr, outer_froms)
             nulls_first = item.nulls == "first" if item.nulls is not None else False
             effective_nulls: NullsOrder | None = item.nulls
             if nullable and effective_nulls is None:
@@ -752,6 +798,7 @@ class CursorPager(BasePager[CursorParams, CursorPageInfo]):
                     nulls=effective_nulls,
                     field=field_meta,
                     nulls_first=nulls_first,
+                    nullable=nullable,
                 )
             )
             seen.add(item.field)
@@ -773,7 +820,7 @@ class CursorPager(BasePager[CursorParams, CursorPageInfo]):
                 field_meta = resolved.fields.get(key_name)
                 if field_meta is None or field_meta.expression is not expr:
                     field_meta = _infer_sort_expression_field(key_name, expr)
-                nullable = field_meta is None or field_meta.nullable
+                nullable = (field_meta is None or field_meta.nullable) or _expr_is_outer_nullable(expr, outer_froms)
                 keys.append(
                     _CursorSortKey(
                         name=key_name,
@@ -782,6 +829,7 @@ class CursorPager(BasePager[CursorParams, CursorPageInfo]):
                         nulls="last" if nullable else None,
                         field=field_meta,
                         nulls_first=False,
+                        nullable=nullable,
                     )
                 )
                 seen.add(key_name)
@@ -805,6 +853,7 @@ class CursorPager(BasePager[CursorParams, CursorPageInfo]):
                         nulls="last" if pk_field.nullable else None,
                         field=pk_field,
                         nulls_first=False,
+                        nullable=pk_field.nullable,
                     )
                 )
         else:
