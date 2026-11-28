@@ -40,7 +40,7 @@ from .ast import (
     QuerySpec,
     SortDirection,
 )
-from .compiler import _normalize_scalar_value
+from .compiler import _normalize_scalar_value, compile_order_item, session_dialect_name
 from .policy import QueryPolicy, ResolvedField, ResolvedModelPolicy, _infer_from_sql_type
 
 _CURSOR_COL_PREFIX = "__bedrock_cursor_"
@@ -608,15 +608,6 @@ def _infer_sort_expression_field(name: str, expr: Any) -> ResolvedField | None:
     )
 
 
-def _session_dialect_name(session: Session | AsyncSession) -> str | None:
-    """Extract the SQLAlchemy dialect name from a sync or async session if bound."""
-    try:
-        bind = session.sync_session.get_bind() if isinstance(session, AsyncSession) else session.get_bind()
-    except Exception:
-        return None
-    return getattr(getattr(bind, "dialect", None), "name", None)
-
-
 def _build_keyset_where(keys: Sequence[_CursorSortKey], values: Sequence[Any]) -> ColumnElement[bool]:
     """Build a lexicographical keyset ``WHERE`` clause supporting mixed directions and NULLs."""
     branches: list[ColumnElement[bool]] = []
@@ -814,21 +805,15 @@ class CursorPager(BasePager[CursorParams, CursorPageInfo]):
         dialect_name: str | None = None,
     ) -> list[ColumnElement[Any]]:
         clauses: list[ColumnElement[Any]] = []
-        emulate_nulls = dialect_name in ("mysql", "mariadb")
         for key in keys:
-            ordered = key.expr.desc() if key.direction == "desc" else key.expr.asc()
-            if emulate_nulls and key.nulls is not None:
-                if key.nulls == "first":
-                    clauses.append(key.expr.is_not(None).asc())
-                else:
-                    clauses.append(key.expr.is_(None).asc())
-                clauses.append(ordered)
-            else:
-                if key.nulls == "first":
-                    ordered = ordered.nulls_first()
-                elif key.nulls == "last":
-                    ordered = ordered.nulls_last()
-                clauses.append(ordered)
+            clauses.extend(
+                compile_order_item(
+                    key.expr,
+                    direction=key.direction,
+                    nulls=key.nulls,
+                    dialect_name=dialect_name,
+                )
+            )
         return clauses
 
     def _prepare_statement(
@@ -934,7 +919,7 @@ class CursorPager(BasePager[CursorParams, CursorPageInfo]):
 
     def paginate[T](self, session: Session, ctx: PaginationContext[T, CursorParams]) -> PageResult[T]:
         """Execute forward keyset cursor pagination synchronously."""
-        dialect_name = _session_dialect_name(session)
+        dialect_name = session_dialect_name(session, mapper=ctx.resolved.model)
         data_stmt, keys, fingerprint = self._prepare_statement(
             ctx.filtered_stmt,
             ctx,
@@ -968,7 +953,7 @@ class CursorPager(BasePager[CursorParams, CursorPageInfo]):
 
     async def apaginate[T](self, session: AsyncSession, ctx: PaginationContext[T, CursorParams]) -> PageResult[T]:
         """Execute forward keyset cursor pagination asynchronously."""
-        dialect_name = _session_dialect_name(session)
+        dialect_name = session_dialect_name(session, mapper=ctx.resolved.model)
         data_stmt, keys, fingerprint = self._prepare_statement(
             ctx.filtered_stmt,
             ctx,

@@ -8,7 +8,7 @@ description: JSON Schema-driven QuerySchema, FastAPI OpenAPI integration, models
 ## Architecture at a Glance
 
 1. **`QuerySchema[M]` is the single source of truth** for parsing, validation, JSON Schema export, and SQLAlchemy clause compilation.
-2. **Low memory footprint**: internal validators are built directly from `pydantic_core` schemas (zero dynamic `BaseModel` class explosion), default-policy schemas are cached in a `WeakKeyDictionary`, and `json_schema()` is generated lazily.
+2. **Low memory footprint**: internal validators are built directly from `pydantic_core` schemas (zero dynamic `BaseModel` class explosion), default-policy schemas are cached per model class without global strong retention, and `json_schema()` is generated lazily.
 3. **Composable with SQLAlchemy 2.0**: relationship filters compile to correlated `EXISTS` subqueries, leaving your `FROM`, `JOIN`, `options`, and `GROUP BY` untouched.
 
 ## Filterable Fields & `QueryPolicy`

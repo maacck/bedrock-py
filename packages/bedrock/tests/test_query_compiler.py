@@ -227,3 +227,37 @@ class TestCompilerSqlSemantics:
         spec_subq = validator.validate_python({"sort": [{"field": "owner_name", "direction": "asc", "nulls": "first"}]})
         stmt2 = select(CompOrder).order_by(*compile_order_by(spec_subq, resolved))
         assert [r.title for r in comp_session.scalars(stmt2).all()] == ["Orphan Order", "100% Widget", "a_b Gadget"]
+
+    @pytest.mark.parametrize("dialect_name", ["mysql", "mariadb"])
+    def test_portable_null_ordering_for_mysql_and_mariadb(self, comp_session, dialect_name):
+        from sqlalchemy.dialects import mysql
+
+        resolved = resolve_model_policy(CompOrder)
+        validator = CompiledQueryValidator(resolved)
+        mysql_dialect = mysql.dialect()
+
+        spec_first = validator.validate_python(
+            {"sort": [{"field": "total", "direction": "asc", "nulls": "first"}, {"field": "id", "direction": "asc"}]}
+        )
+        stmt_first = select(CompOrder).order_by(*compile_order_by(spec_first, resolved, dialect_name=dialect_name))
+        sql_first = str(stmt_first.compile(dialect=mysql_dialect))
+        assert "NULLS FIRST" not in sql_first.upper()
+        assert "IS NOT NULL" in sql_first.upper()
+        assert [r.title for r in comp_session.scalars(stmt_first).all()] == [
+            "Orphan Order",
+            "100% Widget",
+            "a_b Gadget",
+        ]
+
+        spec_last = validator.validate_python(
+            {"sort": [{"field": "total", "direction": "desc", "nulls": "last"}, {"field": "id", "direction": "asc"}]}
+        )
+        stmt_last = select(CompOrder).order_by(*compile_order_by(spec_last, resolved, dialect_name=dialect_name))
+        sql_last = str(stmt_last.compile(dialect=mysql_dialect))
+        assert "NULLS LAST" not in sql_last.upper()
+        assert "IS NULL" in sql_last.upper()
+        assert [r.title for r in comp_session.scalars(stmt_last).all()] == [
+            "a_b Gadget",
+            "100% Widget",
+            "Orphan Order",
+        ]

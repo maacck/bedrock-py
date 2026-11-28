@@ -4,6 +4,8 @@ from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import and_, not_, or_, true
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Session
 from sqlalchemy.sql.elements import ColumnElement
 
 from ...exc import BadFilterFormatError
@@ -173,17 +175,64 @@ def compile_where(spec: QuerySpec, resolved: ResolvedModelPolicy) -> ColumnEleme
     return and_(*clauses)
 
 
-def compile_order_by(spec: QuerySpec, resolved: ResolvedModelPolicy) -> list[ColumnElement[Any]]:
+_MYSQL_DIALECTS: frozenset[str] = frozenset({"mysql", "mariadb"})
+
+
+def session_dialect_name(session: Session | AsyncSession, *, mapper: Any = None) -> str | None:
+    """Extract the SQLAlchemy dialect name from a sync or async session if bound."""
+    sync_session = session.sync_session if isinstance(session, AsyncSession) else session
+    try:
+        bind = sync_session.get_bind(mapper=mapper) if mapper is not None else sync_session.get_bind()
+    except Exception:
+        try:
+            bind = sync_session.get_bind()
+        except Exception:
+            return None
+    return getattr(getattr(bind, "dialect", None), "name", None)
+
+
+def compile_order_item(
+    expr: ColumnElement[Any],
+    *,
+    direction: str,
+    nulls: str | None,
+    dialect_name: str | None = None,
+) -> list[ColumnElement[Any]]:
+    """Compile one sort expression with dialect-portable ``NULLS FIRST`` / ``NULLS LAST``.
+
+    MySQL and MariaDB do not support ``ORDER BY ... NULLS FIRST/LAST`` syntax,
+    so explicit null positioning is emulated via a leading ``IS NOT NULL`` /
+    ``IS NULL`` boolean expression on those dialects.
+    """
+    ordered = expr.desc() if direction == "desc" else expr.asc()
+    if nulls is not None and dialect_name in _MYSQL_DIALECTS:
+        null_flag = expr.is_not(None).asc() if nulls == "first" else expr.is_(None).asc()
+        return [null_flag, ordered]
+    if nulls == "first":
+        ordered = ordered.nulls_first()
+    elif nulls == "last":
+        ordered = ordered.nulls_last()
+    return [ordered]
+
+
+def compile_order_by(
+    spec: QuerySpec,
+    resolved: ResolvedModelPolicy,
+    *,
+    dialect_name: str | None = None,
+) -> list[ColumnElement[Any]]:
     """Compile *spec*'s multi-field ``sort`` directives into SQLAlchemy ``ORDER BY`` clauses."""
     clauses: list[ColumnElement[Any]] = []
     for item in spec.sort:
         expr = resolved.sortable_expressions.get(item.field)
         if expr is None:
             raise BadFilterFormatError(f"Field `{item.field}` is not allowed on {resolved.model.__name__}.")
-        ordered = expr.desc() if item.direction == "desc" else expr.asc()
-        if item.nulls == "first":
-            ordered = ordered.nulls_first()
-        elif item.nulls == "last":
-            ordered = ordered.nulls_last()
-        clauses.append(ordered)
+        clauses.extend(
+            compile_order_item(
+                expr,
+                direction=item.direction,
+                nulls=item.nulls,
+                dialect_name=dialect_name,
+            )
+        )
     return clauses

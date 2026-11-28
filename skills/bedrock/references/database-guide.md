@@ -374,7 +374,7 @@ my_app/users/
 from typing import Annotated
 from bedrock.database import QuerySpec, FilterNode, compile_query_schema
 
-user_schema = compile_query_schema(UserModel)  # default policy cached in WeakKeyDictionary
+user_schema = compile_query_schema(UserModel)  # default policy cached per model class
 json_schema = user_schema.json_schema()        # Draft 2020-12 JSON Schema
 filter_schema = user_schema.filter_json_schema()
 

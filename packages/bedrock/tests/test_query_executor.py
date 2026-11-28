@@ -536,3 +536,86 @@ class TestCustomSelectExecutors:
         )
         assert select_page.total == 4
         assert len(select_page.items) == 4
+
+    @pytest.mark.parametrize("dialect_name", ["mysql", "mariadb"])
+    def test_non_cursor_executors_use_portable_null_ordering_on_mysql(self, sync_session, dialect_name: str):
+        from unittest.mock import patch
+
+        from bedrock.database import LimitOffsetPager
+        from sqlalchemy.dialects import mysql
+
+        mysql_dialect = mysql.dialect()
+        captured_sql: list[str] = []
+        orig_execute = sync_session.execute
+
+        def _spy_execute(stmt, *args, **kwargs):
+            sql = str(stmt.compile(dialect=mysql_dialect))
+            if "ORDER BY" in sql.upper():
+                captured_sql.append(sql)
+            return orig_execute(stmt, *args, **kwargs)
+
+        query = {
+            "sort": [{"field": "total", "direction": "desc", "nulls": "last"}, {"field": "id", "direction": "asc"}],
+            "pagination": {"limit": 10},
+        }
+        with (
+            patch("bedrock.database.query.executor.session_dialect_name", return_value=dialect_name),
+            patch.object(sync_session, "execute", side_effect=_spy_execute),
+        ):
+            search_models(sync_session, ExecOrder, query)
+            paginate_models(sync_session, ExecOrder, query)
+            paginate_models(sync_session, ExecOrder, query, pager=LimitOffsetPager())
+            search_fields(sync_session, ExecOrder, ["code"], query)
+            paginate_fields(sync_session, ExecOrder, ["code"], query)
+            search_select(sync_session, ExecOrder, select(ExecOrder.code), query)
+            paginate_select(sync_session, ExecOrder, select(ExecOrder.code), query)
+
+        assert len(captured_sql) == 7
+        for sql in captured_sql:
+            assert "NULLS LAST" not in sql.upper()
+            assert "IS NULL" in sql.upper()
+
+    def test_default_schema_cache_releases_discarded_dynamic_models_and_isolates_subclasses(self):
+        import gc
+        import weakref
+
+        from sqlalchemy.orm import DeclarativeBase
+
+        def _compile_dynamic_pair():
+            class DynBase(DeclarativeBase):
+                pass
+
+            class DynParent(DynBase):
+                __tablename__ = "dyn_gc_parent"
+                __filterable_fields__ = ["name"]
+                id = Column(Integer, primary_key=True)
+                name = Column(String(50))
+
+            class DynChild(DynParent):
+                __mapper_args__ = {"polymorphic_identity": "child"}
+
+            parent_schema_1 = compile_query_schema(DynParent)
+            parent_schema_2 = compile_query_schema(DynParent)
+            child_schema = compile_query_schema(DynChild)
+            assert parent_schema_1 is parent_schema_2
+            assert child_schema is not parent_schema_1
+            assert child_schema.model is DynChild
+
+            # Exercise validation and JSON schema generation to ensure no hidden caches retain the model.
+            assert parent_schema_1.validate_python({"filter": {"field": "name", "op": "eq", "value": "x"}}).filter
+            assert "properties" in parent_schema_1.json_schema()
+
+            refs = (
+                weakref.ref(DynBase),
+                weakref.ref(DynParent),
+                weakref.ref(DynChild),
+                weakref.ref(parent_schema_1),
+                weakref.ref(child_schema),
+            )
+            DynBase.registry.dispose()
+            return refs
+
+        refs = _compile_dynamic_pair()
+        gc.collect()
+        gc.collect()
+        assert all(ref() is None for ref in refs)

@@ -3,7 +3,6 @@
 from collections.abc import Sequence
 from threading import Lock
 from typing import Any, TypeVar
-from weakref import WeakKeyDictionary
 
 from pydantic import GetCoreSchemaHandler
 from pydantic_core import CoreSchema
@@ -24,14 +23,14 @@ from .ast import (
     QueryInput,
     QuerySpec,
 )
-from .compiler import compile_order_by, compile_where
+from .compiler import compile_order_by, compile_where, session_dialect_name
 from .pager import BasePager, PagePager, PaginationContext
 from .policy import QueryPolicy, ResolvedModelPolicy, resolve_model_policy
 from .schema import CompiledQueryValidator
 
 M = TypeVar("M", bound=BedrockModel)
 
-_DEFAULT_SCHEMA_CACHE: WeakKeyDictionary[type[Any], "QuerySchema[Any]"] = WeakKeyDictionary()
+_DEFAULT_SCHEMA_ATTR = "__bedrock_default_query_schema__"
 _CACHE_LOCK = Lock()
 
 
@@ -191,10 +190,11 @@ class QuerySchema[M: BedrockModel]:
         base_select: Select[Any] | None,
         options: Sequence[ExecutableOption] | None,
         server_limit: int | None = None,
+        dialect_name: str | None = None,
     ) -> Select[Any]:
         spec = self.validate(query)
         where_clause = compile_where(spec, self._resolved)
-        order_clauses = compile_order_by(spec, self._resolved)
+        order_clauses = compile_order_by(spec, self._resolved, dialect_name=dialect_name)
 
         base = select(self.model) if base_select is None else base_select
         data_stmt = base.where(where_clause)
@@ -213,10 +213,11 @@ class QuerySchema[M: BedrockModel]:
         *,
         base_select: Select[Any] | None,
         options: Sequence[ExecutableOption] | None,
+        dialect_name: str | None = None,
     ) -> PaginationContext[M, Any]:
         spec = self.validate(query)
         where_clause = compile_where(spec, self._resolved)
-        order_clauses = compile_order_by(spec, self._resolved)
+        order_clauses = compile_order_by(spec, self._resolved, dialect_name=dialect_name)
         base = select(self.model) if base_select is None else base_select
         filtered = base.where(where_clause)
         if base_select is None:
@@ -242,13 +243,14 @@ class QuerySchema[M: BedrockModel]:
         *,
         group_by: Sequence[GroupByExpr] | None,
         base_select: Select[Any] | None,
+        dialect_name: str | None = None,
     ) -> tuple[QuerySpec, Select[Any], ColumnElement[bool], list[ColumnElement[Any]], list[Any], list[Any]]:
         if not fields:
             raise BadFilterFormatError("`fields` must contain at least one column or expression.")
 
         spec = self.validate(query)
         where_clause = compile_where(spec, self._resolved)
-        order_clauses = compile_order_by(spec, self._resolved)
+        order_clauses = compile_order_by(spec, self._resolved, dialect_name=dialect_name)
         projected = _resolve_projection_exprs(fields, self._resolved, param_name="fields")
         grouped = _resolve_projection_exprs(group_by, self._resolved, param_name="group_by") if group_by else []
 
@@ -270,12 +272,14 @@ class QuerySchema[M: BedrockModel]:
         group_by: Sequence[GroupByExpr] | None,
         base_select: Select[Any] | None,
         server_limit: int | None = None,
+        dialect_name: str | None = None,
     ) -> Select[Any]:
         _, filtered, _, order_clauses, _, _ = self._fields_base(
             fields,
             query,
             group_by=group_by,
             base_select=base_select,
+            dialect_name=dialect_name,
         )
         data_stmt = filtered.order_by(*order_clauses) if order_clauses else filtered
         cap = _validate_server_limit(server_limit)
@@ -290,12 +294,14 @@ class QuerySchema[M: BedrockModel]:
         *,
         group_by: Sequence[GroupByExpr] | None,
         base_select: Select[Any] | None,
+        dialect_name: str | None = None,
     ) -> PaginationContext[dict[str, Any], Any]:
         spec, filtered, where_clause, order_clauses, projected, grouped = self._fields_base(
             fields,
             query,
             group_by=group_by,
             base_select=base_select,
+            dialect_name=dialect_name,
         )
         all_plain_columns = all(_is_plain_model_column(expr, self.model) for expr in projected)
         if not grouped and base_select is None and all_plain_columns:
@@ -319,10 +325,11 @@ class QuerySchema[M: BedrockModel]:
         query: QueryInput,
         *,
         server_limit: int | None = None,
+        dialect_name: str | None = None,
     ) -> Select[Any]:
         spec = self.validate(query)
         where_clause = compile_where(spec, self._resolved)
-        order_clauses = compile_order_by(spec, self._resolved)
+        order_clauses = compile_order_by(spec, self._resolved, dialect_name=dialect_name)
         filtered = stmt.where(where_clause)
         data_stmt = filtered.order_by(*order_clauses) if order_clauses else filtered
         cap = _validate_server_limit(server_limit)
@@ -334,10 +341,12 @@ class QuerySchema[M: BedrockModel]:
         self,
         stmt: Select[Any],
         query: QueryInput,
+        *,
+        dialect_name: str | None = None,
     ) -> PaginationContext[dict[str, Any], Any]:
         spec = self.validate(query)
         where_clause = compile_where(spec, self._resolved)
-        order_clauses = compile_order_by(spec, self._resolved)
+        order_clauses = compile_order_by(spec, self._resolved, dialect_name=dialect_name)
         filtered = stmt.where(where_clause)
         return PaginationContext(
             filtered_stmt=filtered,
@@ -371,6 +380,7 @@ class QuerySchema[M: BedrockModel]:
             base_select=base_select,
             options=options,
             server_limit=limit,
+            dialect_name=session_dialect_name(session, mapper=self.model),
         )
         return list(session.execute(data_stmt).unique().scalars().all())
 
@@ -389,6 +399,7 @@ class QuerySchema[M: BedrockModel]:
             base_select=base_select,
             options=options,
             server_limit=limit,
+            dialect_name=session_dialect_name(session, mapper=self.model),
         )
         result = await session.execute(data_stmt)
         return list(result.unique().scalars().all())
@@ -402,7 +413,12 @@ class QuerySchema[M: BedrockModel]:
         options: Sequence[ExecutableOption] | None = None,
     ) -> PageResult[M]:
         """Execute a paginated entity search returning :class:`PageResult`."""
-        ctx = self._model_pagination_ctx(query, base_select=base_select, options=options)
+        ctx = self._model_pagination_ctx(
+            query,
+            base_select=base_select,
+            options=options,
+            dialect_name=session_dialect_name(session, mapper=self.model),
+        )
         return self.pager.paginate(session, ctx)
 
     async def apaginate(
@@ -414,7 +430,12 @@ class QuerySchema[M: BedrockModel]:
         options: Sequence[ExecutableOption] | None = None,
     ) -> PageResult[M]:
         """Asynchronous counterpart of :meth:`paginate` for ``AsyncSession``."""
-        ctx = self._model_pagination_ctx(query, base_select=base_select, options=options)
+        ctx = self._model_pagination_ctx(
+            query,
+            base_select=base_select,
+            options=options,
+            dialect_name=session_dialect_name(session, mapper=self.model),
+        )
         return await self.pager.apaginate(session, ctx)
 
     # --- 2. Field projection / aggregation search & paginate ---
@@ -436,6 +457,7 @@ class QuerySchema[M: BedrockModel]:
             group_by=group_by,
             base_select=base_select,
             server_limit=limit,
+            dialect_name=session_dialect_name(session, mapper=self.model),
         )
         return [dict(row) for row in session.execute(data_stmt).mappings().all()]
 
@@ -456,6 +478,7 @@ class QuerySchema[M: BedrockModel]:
             group_by=group_by,
             base_select=base_select,
             server_limit=limit,
+            dialect_name=session_dialect_name(session, mapper=self.model),
         )
         result = await session.execute(data_stmt)
         return [dict(row) for row in result.mappings().all()]
@@ -470,7 +493,13 @@ class QuerySchema[M: BedrockModel]:
         base_select: Select[Any] | None = None,
     ) -> PageResult[dict[str, Any]]:
         """Execute a paginated column/aggregate projection returning ``PageResult[dict]``."""
-        ctx = self._fields_pagination_ctx(fields, query, group_by=group_by, base_select=base_select)
+        ctx = self._fields_pagination_ctx(
+            fields,
+            query,
+            group_by=group_by,
+            base_select=base_select,
+            dialect_name=session_dialect_name(session, mapper=self.model),
+        )
         return self.pager.paginate(session, ctx)
 
     async def apaginate_fields(
@@ -483,7 +512,13 @@ class QuerySchema[M: BedrockModel]:
         base_select: Select[Any] | None = None,
     ) -> PageResult[dict[str, Any]]:
         """Asynchronous counterpart of :meth:`paginate_fields` for ``AsyncSession``."""
-        ctx = self._fields_pagination_ctx(fields, query, group_by=group_by, base_select=base_select)
+        ctx = self._fields_pagination_ctx(
+            fields,
+            query,
+            group_by=group_by,
+            base_select=base_select,
+            dialect_name=session_dialect_name(session, mapper=self.model),
+        )
         return await self.pager.apaginate(session, ctx)
 
     # --- 3. Custom cross-table Select search & paginate ---
@@ -497,7 +532,12 @@ class QuerySchema[M: BedrockModel]:
         limit: int | None = None,
     ) -> list[dict[str, Any]]:
         """Apply *query* to an explicit SQLAlchemy ``Select`` and return dict rows."""
-        data_stmt = self._select_search_stmt(stmt, query, server_limit=limit)
+        data_stmt = self._select_search_stmt(
+            stmt,
+            query,
+            server_limit=limit,
+            dialect_name=session_dialect_name(session, mapper=self.model),
+        )
         return [dict(row) for row in session.execute(data_stmt).mappings().all()]
 
     async def asearch_select(
@@ -509,7 +549,12 @@ class QuerySchema[M: BedrockModel]:
         limit: int | None = None,
     ) -> list[dict[str, Any]]:
         """Asynchronous counterpart of :meth:`search_select` for ``AsyncSession``."""
-        data_stmt = self._select_search_stmt(stmt, query, server_limit=limit)
+        data_stmt = self._select_search_stmt(
+            stmt,
+            query,
+            server_limit=limit,
+            dialect_name=session_dialect_name(session, mapper=self.model),
+        )
         result = await session.execute(data_stmt)
         return [dict(row) for row in result.mappings().all()]
 
@@ -520,7 +565,11 @@ class QuerySchema[M: BedrockModel]:
         query: QueryInput = None,
     ) -> PageResult[dict[str, Any]]:
         """Apply *query* to an explicit SQLAlchemy ``Select`` and return paginated dict rows."""
-        ctx = self._select_pagination_ctx(stmt, query)
+        ctx = self._select_pagination_ctx(
+            stmt,
+            query,
+            dialect_name=session_dialect_name(session, mapper=self.model),
+        )
         return self.pager.paginate(session, ctx)
 
     async def apaginate_select(
@@ -530,7 +579,11 @@ class QuerySchema[M: BedrockModel]:
         query: QueryInput = None,
     ) -> PageResult[dict[str, Any]]:
         """Asynchronous counterpart of :meth:`paginate_select` for ``AsyncSession``."""
-        ctx = self._select_pagination_ctx(stmt, query)
+        ctx = self._select_pagination_ctx(
+            stmt,
+            query,
+            dialect_name=session_dialect_name(session, mapper=self.model),
+        )
         return await self.pager.apaginate(session, ctx)
 
 
@@ -542,19 +595,23 @@ def compile_query_schema[M: BedrockModel](
 ) -> QuerySchema[M]:
     """Compile (or reuse cached) :class:`QuerySchema` for *model*.
 
-    Default schemas (``policy=None`` and ``pager=None``) are cached in a
-    ``WeakKeyDictionary`` keyed by *model*. When a custom *policy* or *pager*
-    is passed, a dedicated schema is returned for the caller (such as a router
-    module) to hold without growing global cache memory.
+    Default schemas (``policy=None`` and ``pager=None``) are cached directly on
+    *model* (via its own class ``__dict__``, never inherited by subclasses) so
+    no global cache retains dynamically created model classes after they are
+    discarded. When a custom *policy* or *pager* is passed, a dedicated schema
+    is returned for the caller (such as a router module) to hold.
     """
     if policy is not None or pager is not None:
         return QuerySchema(model, policy=policy, pager=pager)
+    cached = model.__dict__.get(_DEFAULT_SCHEMA_ATTR)
+    if isinstance(cached, QuerySchema):
+        return cached
     with _CACHE_LOCK:
-        cached = _DEFAULT_SCHEMA_CACHE.get(model)
-        if cached is not None:
+        cached = model.__dict__.get(_DEFAULT_SCHEMA_ATTR)
+        if isinstance(cached, QuerySchema):
             return cached
         compiled: QuerySchema[M] = QuerySchema(model)
-        _DEFAULT_SCHEMA_CACHE[model] = compiled
+        type.__setattr__(model, _DEFAULT_SCHEMA_ATTR, compiled)
         return compiled
 
 

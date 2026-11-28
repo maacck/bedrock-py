@@ -8,7 +8,7 @@ description: JSON Schema 驱动的 QuerySchema、FastAPI OpenAPI 集成、models
 ## 架构要点
 
 1. **`QuerySchema[M]` 是唯一解析与 Schema 中枢**：负责内省模型、导出 JSON Schema、校验 JSON 为强类型 `QuerySpec`，以及编译纯 SQLAlchemy 子句，确保对外 Schema 与后端解析永远同源、零漂移。
-2. **极低内存占用**：底层直接用 `pydantic_core` 组装校验器（零动态 `BaseModel` 类爆炸），默认策略由 `WeakKeyDictionary` 缓存，`json_schema()` 按需懒生成。
+2. **极低内存占用**：底层直接用 `pydantic_core` 组装校验器（零动态 `BaseModel` 类爆炸），默认策略按模型类缓存（不经全局强引用，动态模型销毁时可正常回收），`json_schema()` 按需懒生成。
 3. **与 SQLAlchemy 2.0 无缝组合**：所有关系过滤编译为 `EXISTS` 子查询，绝不侵入主查询的 `FROM`、`JOIN`、`options` 或 `GROUP BY`。
 
 ## 可过滤字段与 `QueryPolicy`

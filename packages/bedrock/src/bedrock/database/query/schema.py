@@ -1,9 +1,9 @@
 """Low-memory Model-Scoped Pydantic v2 and JSON Schema Draft 2020-12 compiler."""
 
 import enum
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import datetime
-from typing import Annotated, Any
+from typing import Any
 
 import orjson
 from pydantic import GetCoreSchemaHandler, TypeAdapter, ValidationError
@@ -329,6 +329,21 @@ def _filter_ref(model: type[Any], depth: int, schema_tag: str, max_in_items: int
     return f"{model.__module__}.{model.__qualname__}:Filter:d{depth}:in{max_in_items}:{schema_tag}"
 
 
+def _schema_carrier(builder: Callable[[GetCoreSchemaHandler], CoreSchema]) -> type[Any]:
+    """Create a one-shot Pydantic schema carrier class without entering ``typing._tp_cache``."""
+
+    class _Carrier:
+        @classmethod
+        def __get_pydantic_core_schema__(
+            cls,
+            _source_type: Any,
+            handler: GetCoreSchemaHandler,
+        ) -> CoreSchema:
+            return builder(handler)
+
+    return _Carrier
+
+
 class _FilterNodeSource:
     """Pydantic metadata source building a recursive model filter ``CoreSchema``."""
 
@@ -353,7 +368,8 @@ class _FilterNodeSource:
             resolved.policy.max_in_items if max_in_items is None else min(max_in_items, resolved.policy.max_in_items)
         )
 
-    def __get_pydantic_core_schema__(self, source_type: Any, handler: GetCoreSchemaHandler) -> CoreSchema:
+    def build_core_schema(self, handler: GetCoreSchemaHandler) -> CoreSchema:
+        """Build the recursive ``pydantic_core`` tagged-union schema for this filter node."""
         resolved = self._resolved
         ref = self._ref
         choices: dict[str, CoreSchema] = {}
@@ -425,7 +441,7 @@ class _FilterNodeSource:
                     schema_tag=self._schema_tag,
                     max_in_items=child_max_in,
                 )
-                child_schema = handler.generate_schema(Annotated[Any, child_source])
+                child_schema = handler.generate_schema(_schema_carrier(child_source.build_core_schema))
                 child_ref_only = core_schema.definition_reference_schema(child_ref)
 
                 if rel.uselist:
@@ -491,9 +507,10 @@ class _QueryDictSource:
         self._filter_source = filter_source
         self._pager = pager
 
-    def __get_pydantic_core_schema__(self, source_type: Any, handler: GetCoreSchemaHandler) -> CoreSchema:
+    def build_core_schema(self, handler: GetCoreSchemaHandler) -> CoreSchema:
+        """Build the full model-scoped query ``CoreSchema``."""
         resolved = self._resolved
-        filter_schema = handler.generate_schema(Annotated[Any, self._filter_source])
+        filter_schema = handler.generate_schema(_schema_carrier(self._filter_source.build_core_schema))
         sortable_names = sorted(resolved.sortable_expressions)
         if sortable_names:
             sort_item_schema: CoreSchema = core_schema.typed_dict_schema(
@@ -583,8 +600,8 @@ class CompiledQueryValidator:
             schema_tag=self._schema_tag,
         )
         self._query_source = _QueryDictSource(resolved, self._filter_source, self.pager)
-        self._query_adapter: TypeAdapter[Any] = TypeAdapter(Annotated[Any, self._query_source])
-        self._filter_adapter: TypeAdapter[Any] = TypeAdapter(Annotated[Any, self._filter_source])
+        self._query_adapter: TypeAdapter[Any] = TypeAdapter(_schema_carrier(self._query_source.build_core_schema))
+        self._filter_adapter: TypeAdapter[Any] = TypeAdapter(_schema_carrier(self._filter_source.build_core_schema))
 
     def build_pydantic_core_schema(
         self,
@@ -597,7 +614,7 @@ class CompiledQueryValidator:
         serializer = core_schema.plain_serializer_function_ser_schema(_serialize_ast_model, info_arg=True)
 
         if source_type is QuerySpec:
-            inner = handler.generate_schema(Annotated[Any, self._query_source])
+            inner = handler.generate_schema(_schema_carrier(self._query_source.build_core_schema))
 
             def _precheck_query(value: Any) -> Any:
                 raw = _query_spec_to_dict(value) if isinstance(value, QuerySpec) else value
@@ -628,7 +645,7 @@ class CompiledQueryValidator:
             )
 
         if source_type == FilterNode:
-            inner = handler.generate_schema(Annotated[Any, self._filter_source])
+            inner = handler.generate_schema(_schema_carrier(self._filter_source.build_core_schema))
 
             def _precheck_filter(value: Any) -> Any:
                 raw = (
