@@ -759,38 +759,56 @@ class CursorPager(BasePager[CursorParams, CursorPageInfo]):
         is_single_model_table = len(froms) == 1 and (froms[0] is model_table or sole_from is model_table)
 
         if self.unique_keys is not None:
-            tie_breaker_names: tuple[str, ...] = self.unique_keys
+            for key_name in self.unique_keys:
+                if key_name in seen:
+                    continue
+                expr = resolved.sortable_expressions.get(key_name)
+                if expr is None:
+                    raise BadFilterFormatError(
+                        f"Cursor unique key `{key_name}` is not a sortable field on {resolved.model.__name__}."
+                    )
+                field_meta = resolved.fields.get(key_name)
+                if field_meta is None or field_meta.expression is not expr:
+                    field_meta = _infer_sort_expression_field(key_name, expr)
+                nullable = field_meta is None or field_meta.nullable
+                keys.append(
+                    _CursorSortKey(
+                        name=key_name,
+                        expr=expr,
+                        direction="asc",
+                        nulls="last" if nullable else None,
+                        field=field_meta,
+                        nulls_first=False,
+                    )
+                )
+                seen.add(key_name)
         elif is_single_model_table:
-            tie_breaker_names = resolved.primary_key_order
+            # Resolve automatic PK tie-breakers from mapped primary-key columns directly
+            # so `QueryPolicy.sort_expressions` overrides or `sortable=False` on a PK name
+            # can never replace or drop the real uniqueness guarantee.
+            for pk_name in resolved.primary_key_order:
+                pk_field = resolved.fields.get(pk_name)
+                if pk_field is None:
+                    raise BadFilterFormatError(
+                        f"Cursor primary key `{pk_name}` is not mapped on {resolved.model.__name__}."
+                    )
+                if any(k.expr is pk_field.expression for k in keys):
+                    continue
+                keys.append(
+                    _CursorSortKey(
+                        name=pk_name,
+                        expr=pk_field.expression,
+                        direction="asc",
+                        nulls="last" if pk_field.nullable else None,
+                        field=pk_field,
+                        nulls_first=False,
+                    )
+                )
         else:
             raise BadFilterFormatError(
                 "CursorPager requires explicit `unique_keys` for multi-table or joined queries; "
                 "pass `CursorPager(unique_keys=[...])` or use PagePager/LimitOffsetPager."
             )
-
-        for key_name in tie_breaker_names:
-            if key_name in seen:
-                continue
-            expr = resolved.sortable_expressions.get(key_name)
-            if expr is None:
-                raise BadFilterFormatError(
-                    f"Cursor unique key `{key_name}` is not a sortable field on {resolved.model.__name__}."
-                )
-            field_meta = resolved.fields.get(key_name)
-            if field_meta is None or field_meta.expression is not expr:
-                field_meta = _infer_sort_expression_field(key_name, expr)
-            nullable = field_meta is None or field_meta.nullable
-            keys.append(
-                _CursorSortKey(
-                    name=key_name,
-                    expr=expr,
-                    direction="asc",
-                    nulls="last" if nullable else None,
-                    field=field_meta,
-                    nulls_first=False,
-                )
-            )
-            seen.add(key_name)
 
         if not keys:
             raise BadFilterFormatError(

@@ -1138,3 +1138,58 @@ class TestCustomExternalPager:
         assert '"page"' in result_schema
         assert '"offset"' in result_schema
         assert '"next_cursor"' in result_schema
+
+    def test_cursor_automatic_pk_tie_breaker_ignores_sort_expression_overrides_and_non_sortable_pk(
+        self, pager_sync_session
+    ):
+        # PagerEvent timestamps: id=5 (earlier_ts), ids 1, 2, 3 (same_ts), id=4 (later_ts).
+        override_policy = QueryPolicy(sort_expressions={"id": PagerEvent.created_at})
+        schema = compile_query_schema(PagerEvent, policy=override_policy, pager=CursorPager())
+
+        # 1. Even with empty sort, automatic tie-breaker must use real PagerEvent.id (not overridden created_at).
+        ids_default: list[int] = []
+        cursor = None
+        while True:
+            page = schema.paginate(pager_sync_session, {"pagination": {"cursor": cursor, "limit": 1}})
+            ids_default.extend(e.id for e in page.items)
+            if not page.page_info.has_more:
+                break
+            cursor = page.page_info.next_cursor  # type: ignore[attr-defined]
+        assert ids_default == [1, 2, 3, 4, 5]
+
+        # 2. When client sorts by overridden "id" (which maps to duplicate created_at), real PagerEvent.id
+        #    must still be appended as tie-breaker so rows with identical created_at are never skipped.
+        ids_sorted_by_override: list[int] = []
+        cursor = None
+        while True:
+            page = schema.paginate(
+                pager_sync_session,
+                {
+                    "sort": [{"field": "id", "direction": "desc"}],
+                    "pagination": {"cursor": cursor, "limit": 1},
+                },
+            )
+            ids_sorted_by_override.extend(e.id for e in page.items)
+            if not page.page_info.has_more:
+                break
+            cursor = page.page_info.next_cursor  # type: ignore[attr-defined]
+        assert ids_sorted_by_override == [4, 1, 2, 3, 5]
+
+        # 3. Automatic PK tie-breaker still works when client sorting on PK is disabled via FieldPolicy.
+        non_sortable_pk_policy = QueryPolicy(fields={"id": FieldPolicy(sortable=False)})
+        schema_no_pk_sort = compile_query_schema(PagerEvent, policy=non_sortable_pk_policy, pager=CursorPager())
+        ids_no_pk_sort: list[int] = []
+        cursor = None
+        while True:
+            page = schema_no_pk_sort.paginate(
+                pager_sync_session,
+                {
+                    "sort": [{"field": "created_at", "direction": "asc"}],
+                    "pagination": {"cursor": cursor, "limit": 1},
+                },
+            )
+            ids_no_pk_sort.extend(e.id for e in page.items)
+            if not page.page_info.has_more:
+                break
+            cursor = page.page_info.next_cursor  # type: ignore[attr-defined]
+        assert ids_no_pk_sort == [5, 1, 2, 3, 4]
