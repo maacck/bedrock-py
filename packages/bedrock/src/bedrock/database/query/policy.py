@@ -178,6 +178,7 @@ class ResolvedField:
     datetime_timezone: bool = False
     enum_values: tuple[Any, ...] | None = None
     enum_type: type[enum.Enum] | None = None
+    uuid_as_uuid: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -277,30 +278,30 @@ def _infer_from_python_type(
     py_type: Any,
     *,
     allow_raw_like: bool,
-) -> tuple[ScalarKind, frozenset[str], bool, tuple[Any, ...] | None, type[enum.Enum] | None]:
+) -> tuple[ScalarKind, frozenset[str], bool, tuple[Any, ...] | None, type[enum.Enum] | None, bool]:
     """Infer scalar metadata from an explicit Python type annotation."""
     if isinstance(py_type, type) and issubclass(py_type, enum.Enum):
         values = tuple(member.value for member in py_type)
-        return ("enum", ENUM_OPS, False, values, py_type)
+        return ("enum", ENUM_OPS, False, values, py_type, True)
     if py_type is bool:
-        return ("bool", BOOLEAN_OPS, False, None, None)
+        return ("bool", BOOLEAN_OPS, False, None, None, True)
     if py_type is int:
-        return ("int", NUMERIC_OPS, False, None, None)
+        return ("int", NUMERIC_OPS, False, None, None, True)
     if py_type is float:
-        return ("float", NUMERIC_OPS, False, None, None)
+        return ("float", NUMERIC_OPS, False, None, None, True)
     if py_type is Decimal:
-        return ("decimal", NUMERIC_OPS, False, None, None)
+        return ("decimal", NUMERIC_OPS, False, None, None, True)
     if py_type is datetime:
-        return ("datetime", TEMPORAL_OPS, False, None, None)
+        return ("datetime", TEMPORAL_OPS, False, None, None, True)
     if py_type is date:
-        return ("date", TEMPORAL_OPS, False, None, None)
+        return ("date", TEMPORAL_OPS, False, None, None, True)
     if py_type is time:
-        return ("time", TEMPORAL_OPS, False, None, None)
+        return ("time", TEMPORAL_OPS, False, None, None, True)
     if py_type is UUID:
-        return ("uuid", UUID_OPS, False, None, None)
+        return ("uuid", UUID_OPS, False, None, None, True)
     if py_type is str:
         ops = STRING_SAFE_OPS | (STRING_RAW_LIKE_OPS if allow_raw_like else frozenset())
-        return ("str", ops, False, None, None)
+        return ("str", ops, False, None, None, True)
     raise BadFilterFormatError(f"Unsupported explicit field value_type `{py_type!r}`.")
 
 
@@ -308,7 +309,7 @@ def _infer_from_sql_type(
     sql_type: TypeEngine[Any],
     *,
     allow_raw_like: bool,
-) -> tuple[ScalarKind, frozenset[str], bool, tuple[Any, ...] | None, type[enum.Enum] | None]:
+) -> tuple[ScalarKind, frozenset[str], bool, tuple[Any, ...] | None, type[enum.Enum] | None, bool]:
     """Infer scalar metadata and default operators from a SQLAlchemy ``TypeEngine``."""
     unwrapped = _unwrap_type_engine(sql_type)
 
@@ -316,31 +317,40 @@ def _infer_from_sql_type(
         enum_cls = unwrapped.enum_class
         if isinstance(enum_cls, type) and issubclass(enum_cls, enum.Enum):
             values = tuple(member.value for member in enum_cls)
-            return ("enum", ENUM_OPS, False, values, enum_cls)
+            return ("enum", ENUM_OPS, False, values, enum_cls, True)
         if unwrapped.enums:
-            return ("enum", ENUM_OPS, False, tuple(unwrapped.enums), None)
-        return ("str", STRING_SAFE_OPS | (STRING_RAW_LIKE_OPS if allow_raw_like else frozenset()), False, None, None)
+            return ("enum", ENUM_OPS, False, tuple(unwrapped.enums), None, True)
+        return (
+            "str",
+            STRING_SAFE_OPS | (STRING_RAW_LIKE_OPS if allow_raw_like else frozenset()),
+            False,
+            None,
+            None,
+            True,
+        )
 
     if isinstance(unwrapped, Boolean):
-        return ("bool", BOOLEAN_OPS, False, None, None)
+        return ("bool", BOOLEAN_OPS, False, None, None, True)
     if isinstance(unwrapped, Integer):
-        return ("int", NUMERIC_OPS, False, None, None)
+        return ("int", NUMERIC_OPS, False, None, None, True)
     if isinstance(unwrapped, Float):
-        return ("float", NUMERIC_OPS, False, None, None)
+        return ("float", NUMERIC_OPS, False, None, None, True)
     if isinstance(unwrapped, Numeric):
         kind: ScalarKind = "decimal" if getattr(unwrapped, "asdecimal", True) else "float"
-        return (kind, NUMERIC_OPS, False, None, None)
+        return (kind, NUMERIC_OPS, False, None, None, True)
     if isinstance(unwrapped, DateTime):
-        return ("datetime", TEMPORAL_OPS, bool(getattr(unwrapped, "timezone", False)), None, None)
+        return ("datetime", TEMPORAL_OPS, bool(getattr(unwrapped, "timezone", False)), None, None, True)
     if isinstance(unwrapped, Date):
-        return ("date", TEMPORAL_OPS, False, None, None)
+        return ("date", TEMPORAL_OPS, False, None, None, True)
     if isinstance(unwrapped, Time):
-        return ("time", TEMPORAL_OPS, False, None, None)
+        return ("time", TEMPORAL_OPS, False, None, None, True)
     if isinstance(unwrapped, Uuid):
-        return ("uuid", UUID_OPS, False, None, None)
+        outer_as_uuid = getattr(sql_type, "as_uuid", None)
+        as_uuid = bool(outer_as_uuid) if outer_as_uuid is not None else bool(getattr(unwrapped, "as_uuid", True))
+        return ("uuid", UUID_OPS, False, None, None, as_uuid)
     if isinstance(unwrapped, String):
         ops = STRING_SAFE_OPS | (STRING_RAW_LIKE_OPS if allow_raw_like else frozenset())
-        return ("str", ops, False, None, None)
+        return ("str", ops, False, None, None, True)
 
     # Try dialect-agnostic python_type fallback for custom types (e.g. Postgres UUID)
     try:
@@ -418,15 +428,20 @@ def _resolve_scalar_field(
             raise BadFilterFormatError(f"Model {model.__name__} has no column or attribute `{name}`.")
 
     if field_policy.value_type is not None:
-        scalar_kind, default_ops, dt_tz, enum_vals, enum_cls = _infer_from_python_type(
+        scalar_kind, default_ops, dt_tz, enum_vals, enum_cls, uuid_as_uuid = _infer_from_python_type(
             field_policy.value_type, allow_raw_like=field_policy.allow_raw_like
         )
         if sql_type is not None:
             unwrapped = _unwrap_type_engine(sql_type)
             if isinstance(unwrapped, DateTime):
                 dt_tz = bool(getattr(unwrapped, "timezone", False))
+            if isinstance(unwrapped, Uuid):
+                outer_as_uuid = getattr(sql_type, "as_uuid", None)
+                uuid_as_uuid = (
+                    bool(outer_as_uuid) if outer_as_uuid is not None else bool(getattr(unwrapped, "as_uuid", True))
+                )
     elif sql_type is not None:
-        scalar_kind, default_ops, dt_tz, enum_vals, enum_cls = _infer_from_sql_type(
+        scalar_kind, default_ops, dt_tz, enum_vals, enum_cls, uuid_as_uuid = _infer_from_sql_type(
             sql_type, allow_raw_like=field_policy.allow_raw_like
         )
     else:
@@ -453,6 +468,7 @@ def _resolve_scalar_field(
         datetime_timezone=dt_tz,
         enum_values=enum_vals,
         enum_type=enum_cls,
+        uuid_as_uuid=uuid_as_uuid,
     )
 
 

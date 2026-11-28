@@ -2,6 +2,7 @@
 
 from datetime import UTC, datetime
 from typing import Any
+from uuid import UUID
 
 from sqlalchemy import and_, not_, or_, true
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -42,6 +43,10 @@ def _normalize_scalar_value(field: ResolvedField, value: Any) -> Any:
         return _normalize_datetime(value, timezone_aware=field.datetime_timezone)
     if field.scalar_kind == "enum" and field.enum_type is not None and not isinstance(value, field.enum_type):
         return field.enum_type(value)
+    if field.scalar_kind == "uuid":
+        if field.uuid_as_uuid:
+            return value if isinstance(value, UUID) else UUID(str(value))
+        return str(value) if isinstance(value, UUID) else value
     return value
 
 

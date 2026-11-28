@@ -590,7 +590,9 @@ def _infer_sort_expression_field(name: str, expr: Any) -> ResolvedField | None:
     if sql_type is None or isinstance(sql_type, NullType):
         return None
     try:
-        scalar_kind, ops, dt_tz, enum_vals, enum_cls = _infer_from_sql_type(sql_type, allow_raw_like=False)
+        scalar_kind, ops, dt_tz, enum_vals, enum_cls, uuid_as_uuid = _infer_from_sql_type(
+            sql_type, allow_raw_like=False
+        )
     except BadFilterFormatError:
         return None
     return ResolvedField(
@@ -605,6 +607,7 @@ def _infer_sort_expression_field(name: str, expr: Any) -> ResolvedField | None:
         datetime_timezone=dt_tz,
         enum_values=enum_vals,
         enum_type=enum_cls,
+        uuid_as_uuid=uuid_as_uuid,
     )
 
 

@@ -1193,3 +1193,81 @@ class TestCustomExternalPager:
                 break
             cursor = page.page_info.next_cursor  # type: ignore[attr-defined]
         assert ids_no_pk_sort == [5, 1, 2, 3, 4]
+
+    def test_uuid_as_uuid_false_filters_and_cursor_pagination(self):
+        from sqlalchemy.orm import DeclarativeBase
+
+        class StrUuidBase(DeclarativeBase):
+            pass
+
+        class StrUuidRecord(StrUuidBase):
+            __tablename__ = "str_uuid_records"
+            __filterable_fields__ = ["ref_id", "label"]
+
+            id = Column(Uuid(as_uuid=False), primary_key=True)
+            ref_id = Column(Uuid(as_uuid=False), nullable=False)
+            label = Column(String(40), nullable=False)
+
+        engine = create_engine("sqlite:///:memory:")
+        StrUuidBase.metadata.create_all(engine)
+
+        u1 = "00000000-0000-0000-0000-000000000001"
+        u2 = "00000000-0000-0000-0000-000000000002"
+        u3 = "00000000-0000-0000-0000-000000000003"
+        ref_a = "11111111-1111-1111-1111-111111111111"
+        ref_b = "22222222-2222-2222-2222-222222222222"
+
+        with Session(engine) as session:
+            session.add_all(
+                [
+                    StrUuidRecord(id=u1, ref_id=ref_a, label="one"),
+                    StrUuidRecord(id=u2, ref_id=ref_a, label="two"),
+                    StrUuidRecord(id=u3, ref_id=ref_b, label="three"),
+                ]
+            )
+            session.commit()
+
+            schema = compile_query_schema(StrUuidRecord, pager=CursorPager())
+
+            # Filter eq / ne / in on Uuid(as_uuid=False) columns must bind str, not UUID object.
+            eq_rows = schema.search(session, {"filter": {"field": "ref_id", "op": "eq", "value": ref_a}})
+            assert sorted(r.id for r in eq_rows) == [u1, u2]
+
+            in_rows = schema.search(session, {"filter": {"field": "id", "op": "in", "value": [u1, u3]}})
+            assert sorted(r.id for r in in_rows) == [u1, u3]
+
+            # Cursor pagination over string-valued UUID PK advances across every page cleanly.
+            seen_ids: list[str] = []
+            cursor = None
+            while True:
+                page = schema.paginate(session, {"pagination": {"cursor": cursor, "limit": 1}})
+                seen_ids.extend(r.id for r in page.items)
+                if not page.page_info.has_more:
+                    break
+                cursor = page.page_info.next_cursor  # type: ignore[attr-defined]
+            assert seen_ids == [u1, u2, u3]
+
+            # Custom sort_expression pointing to Uuid(as_uuid=False) column also works with cursor pagination.
+            expr_schema = compile_query_schema(
+                StrUuidRecord,
+                policy=QueryPolicy(sort_expressions={"ref_alias": StrUuidRecord.ref_id}),
+                pager=CursorPager(),
+            )
+            seen_by_ref: list[str] = []
+            cursor = None
+            while True:
+                page = expr_schema.paginate(
+                    session,
+                    {
+                        "sort": [{"field": "ref_alias", "direction": "desc"}],
+                        "pagination": {"cursor": cursor, "limit": 1},
+                    },
+                )
+                seen_by_ref.extend(r.id for r in page.items)
+                if not page.page_info.has_more:
+                    break
+                cursor = page.page_info.next_cursor  # type: ignore[attr-defined]
+            assert seen_by_ref == [u3, u1, u2]
+
+        StrUuidBase.registry.dispose()
+        engine.dispose()
